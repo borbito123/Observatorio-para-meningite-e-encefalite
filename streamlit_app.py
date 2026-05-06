@@ -1409,9 +1409,13 @@ def render_filters(source: str, table: LoadedTable, exprs: Dict[str, Optional[st
                 if default_start > default_end:
                     default_start, default_end = min_year, max_year
                 with c1:
-                    year_range = st.slider("Ano", min_year, max_year, (default_start, default_end), key=f"year_{source}")
-                    if min_year < default_start or max_year > default_end:
-                        st.caption("Há datas fora do período esperado; o intervalo padrão usa o período operacional da base.")
+                    if min_year >= max_year:
+                        st.markdown(f"**Ano:** {min_year}")
+                        year_range = (min_year, max_year)
+                    else:
+                        year_range = st.slider("Ano", min_year, max_year, (default_start, default_end), key=f"year_{source}")
+                        if min_year < default_start or max_year > default_end:
+                            st.caption("Há datas fora do período esperado; o intervalo padrão usa o período operacional da base.")
                 clauses.append(f"EXTRACT(YEAR FROM {dt}) BETWEEN {int(year_range[0])} AND {int(year_range[1])}")
         age = exprs.get("age")
         if age:
