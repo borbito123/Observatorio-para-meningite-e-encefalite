@@ -16,18 +16,19 @@ Utilizando XLXsforms, criei um espelho da ficha de investigação de meningite e
 
 Link: https://ee.kobotoolbox.org/x/ifAQUhNw.
   
-# Em construção - Painel Streamlit para Parquets do SINAN, SIM e CIHA
+# Em construção - Painel Streamlit para análise do banco de dados = SINAN, SIM e CIHA
 
-Este app em Python foi feito para análise epidemiológica a partir de arquivos `.parquet` do DATASUS, com foco nos três bancos de dados supracitados.
+Este app em Python foi feito para análise epidemiológica a partir de arquivos `.parquet ou .duckdb` do DATASUS, com foco nos três bancos de dados supracitados.
+O usuário pode optar por fazer o upload manual dos dados, caso desejado. Logo também será disponibilizado automaticamente os bancos de dados disponíveis. 
 
 Link: https://fgwybuegynhnli87zeyurr.streamlit.app/
 
 Observação: Caso seja necesssário a escolha de um código de município, o código para o Rio de Janeiro é "330455 ou 3304557". O código do estado do Rio de Janeiro é "33".
 
-## O que o app faz
+## _O que o app faz_
 
-- lê um ou mais Parquets por base
-- aceita **upload** ou **caminho local/glob** -> Eventualmente: fazer com o que o aplicativo já leia automaticamente os bancos de dados em vez de exigir que o usuário faça o upload.
+- Lê os parquets na release mais atual e disponibiliza para o usuário fazer o que quiser com eles (https://github.com/borbito123/Teste---Dados-Epidemiol-gicos-para-meningite-SINAN-CIHA-SIM---Rio-de-Janeiro/releases/tag/v1.0) -> Em construção
+- Aceita **upload** ou **caminho local/glob** dos parquets / duckdbs que o usuário escolher.
 - detecta automaticamente colunas prováveis de:
   - data
   - sexo
@@ -88,7 +89,7 @@ streamlit run app_streamlit_epidemiologia.py
 ## Como usar
 
 ### Opção 1: upload
-Envie um ou mais arquivos `.parquet` em cada aba da base desejada.
+Envie um ou mais arquivos `.parquet ou .duckdb` na respectiva aba do banco de dados desejado.
 
 ### Opção 2: pasta/glob local
 Informe um padrão local, por exemplo:
@@ -101,8 +102,6 @@ Bases_Datasus_Municipio_Rio_de_Janeiro/CIHA/data/parquet/*.parquet
 
 ## Observações importantes
 
-- O app foi desenhado para funcionar com layouts **variáveis** do DATASUS, mas pode ser necessário ajustar manualmente as colunas detectadas.
-- Para idade codificada do DATASUS, há a opção **"DATASUS codificada"**. A conversão para anos é aproximada para registros em horas, dias e meses.
 - Se os parquets já estiverem filtrados para um município específico, os gráficos respeitarão esse recorte.
 - A comparação entre bases é **exploratória** e faz mais sentido quando o agravo, o território e a janela temporal são os mesmos.
 
