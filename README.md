@@ -29,46 +29,38 @@ Observação: Caso seja necesssário a escolha de um código de município, o c�
 
 - Lê os parquets da release mais atual (https://github.com/borbito123/Teste---Dados-Epidemiol-gicos-para-meningite-SINAN-CIHA-SIM---Rio-de-Janeiro/releases/tag/v1.0) e já os carrega automaticamente no programa -> Em construção; por hora, apenas estado do Rio.
 - Aceita **upload** ou **caminho local/glob** dos parquets / duckdbs que o usuário escolher.
+- Fornece um dicionário operacional para guiar o usuário em relação aos campos mais relevantes para análise epidemiológico que o banco de dados escolhido possui.
 - detecta automaticamente colunas prováveis de:
-  - data
-  - sexo
-  - idade
-  - município
-  - desfecho/classificação
-  - diagnóstico/CID
 - gera gráficos epidemiológicos interativos
 - permite download em CSV das tabelas agregadas de cada gráfico
-- compara séries temporais entre bases
-
+  
 ## _Gráficos incluídos_
 
 ### Para SINAN
-- série temporal por ano/mês/semana
-- heatmap ano × mês
-- distribuição etária em faixas de 5 anos
-- pirâmide etária por sexo
-- top diagnósticos/agravos
-- top desfechos/classificações
-- top municípios
-- completude de campos-chave
+- Indicadores -> 
+- Análise temporal -> Fornece: análise da sazonalidade por meio de heatmap ano × mês, série temporal que pode ser estratificada conforme sexo e CID-10 para todos os bancos de dados, classificação da meningite + classificação final do caso (apenas para o SINAN). 
+- Análise do CID-10 -> Fornece: tabela indicando o que cada CID-10 significa, distribuição dos casos por classificação, distribuição dos casos por conclusão diagnóstica, distribuição dos casos por critério diagnóstico utilizado, distribuição dos casos conforme evolução.
+- Demografia -> Fornece: Distribuição por faixa etária de 5 anos, pirâmide etária por sexo, distribuição por raça/cor
+- Prévia -> Fornece: prévia do dados presentes no banco de dados, sendo possível exportar para o formato .CS
 
 ### Para SIM
-- série temporal de óbitos
-- heatmap ano × mês
-- distribuição etária
-- pirâmide etária por sexo
-- top causas básicas / diagnóstico
-- top variáveis de desfecho/local do óbito
-- completude
+- Análise temporal -> Fornece: análise da sazonalidade por meio de heatmap ano × mês, série temporal que pode ser estratificada conforme sexo e CID-10 para todos os bancos de dados.
+- Análise do CID-10 -> Fornece: tabela indicando o que cada CID-10 significa, distribuição dos casos por CID-10, 
+- Demografia -> Fornece: Distribuição por faixa etária de 5 anos, pirâmide etária por sexo, distribuição por raça/cor
+- Prévia -> Fornece: prévia do dados presentes no banco de dados, sendo possível exportar para o formato .CS
 
 ### Para CIHA
-- série temporal de internações/atendimentos
-- heatmap ano × mês
-- distribuição etária
-- pirâmide etária por sexo
-- top diagnósticos/procedimentos
-- top desfechos de saída
-- completude
+- Análise temporal -> Fornece: análise da sazonalidade por meio de heatmap ano × mês, série temporal que pode ser estratificada conforme sexo e CID-10 para todos os bancos de dados, classificação da meningite + classificação final do caso (apenas para o SINAN). 
+- Análise do CID-10 -> Fornece: tabela indicando o que cada CID-10 significa, distribuição dos casos por CID-10, 
+- Demografia -> Fornece: Distribuição por faixa etária de 5 anos, pirâmide etária por sexo, distribuição por raça/cor
+- Prévia -> Fornece: prévia do dados presentes no banco de dados, sendo possível exportar para o formato .CS
+
+### Para comparação dos bancos de dados
+- Análise temporal -> Fornece: análise da sazonalidade por meio de heatmap ano × mês, série temporal que pode ser estratificada conforme sexo e CID-10 para todos os bancos de dados, classificação da meningite + classificação final do caso (apenas para o SINAN). 
+- Análise do CID-10 -> Fornece: tabela indicando o que cada CID-10 significa, distribuição dos casos por classificação, distribuição dos casos por conclusão diagnóstica, distribuição dos casos por critério diagnóstico utilizado, distribuição dos casos conforme evolução.
+- Demografia -> Fornece: Distribuição por faixa etária de 5 anos, pirâmide etária por sexo, distribuição por raça/cor
+- Prévia -> Fornece: prévia do dados presentes no banco de dados, sendo possível exportar para o formato .CS
+
 
 ## _Instalação_
 
