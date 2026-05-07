@@ -27,7 +27,7 @@ Observação: Caso seja necesssário a escolha de um código de município, o c�
 
 ## _O que o app faz_
 
-- Lê os parquets na release mais atual e disponibiliza para o usuário fazer o que quiser com eles (https://github.com/borbito123/Teste---Dados-Epidemiol-gicos-para-meningite-SINAN-CIHA-SIM---Rio-de-Janeiro/releases/tag/v1.0) -> Em construção
+- Lê os parquets da release mais atual (https://github.com/borbito123/Teste---Dados-Epidemiol-gicos-para-meningite-SINAN-CIHA-SIM---Rio-de-Janeiro/releases/tag/v1.0) e já os carrega automaticamente no programa -> Em construção; por hora, apenas estado do Rio.
 - Aceita **upload** ou **caminho local/glob** dos parquets / duckdbs que o usuário escolher.
 - detecta automaticamente colunas prováveis de:
   - data
@@ -40,7 +40,7 @@ Observação: Caso seja necesssário a escolha de um código de município, o c�
 - permite download em CSV das tabelas agregadas de cada gráfico
 - compara séries temporais entre bases
 
-## Gráficos incluídos
+## _Gráficos incluídos_
 
 ### Para SINAN
 - série temporal por ano/mês/semana
@@ -70,7 +70,7 @@ Observação: Caso seja necesssário a escolha de um código de município, o c�
 - top desfechos de saída
 - completude
 
-## Instalação
+## _Instalação_
 
 Crie e ative um ambiente virtual, se desejar, e depois instale as dependências:
 
@@ -78,7 +78,7 @@ Crie e ative um ambiente virtual, se desejar, e depois instale as dependências:
 pip install -r requirements.txt
 ```
 
-## Execução
+## _Execução_
 
 No diretório do projeto, rode:
 
@@ -86,7 +86,9 @@ No diretório do projeto, rode:
 streamlit run app_streamlit_epidemiologia.py
 ```
 
-## Como usar
+## _Como usar_
+
+  Em construção -> O programa irá automaticamente ler os parquets disponíveis na release mais atual. Quando houver a disponibilização dos parquets referentes a todos os estados, o usuário poderá escolher qual análise ele irá fazer (todos os estados ou algum estado específico).
 
 ### Opção 1: upload
 Envie um ou mais arquivos `.parquet ou .duckdb` na respectiva aba do banco de dados desejado.
@@ -100,12 +102,12 @@ Bases_Datasus_Municipio_Rio_de_Janeiro/SIM/data/parquet/*.parquet
 Bases_Datasus_Municipio_Rio_de_Janeiro/CIHA/data/parquet/*.parquet
 ```
 
-## Observações importantes
+## _Observações importantes_
 
 - Se os parquets já estiverem filtrados para um município específico, os gráficos respeitarão esse recorte.
 - A comparação entre bases é **exploratória** e faz mais sentido quando o agravo, o território e a janela temporal são os mesmos.
 
-## Sugestões de uso epidemiológico
+## _Sugestões de uso epidemiológico_
 
 - Use a **série temporal** como gráfico principal para monitorar tendência.
 - Use o **heatmap ano × mês** para sazonalidade.
