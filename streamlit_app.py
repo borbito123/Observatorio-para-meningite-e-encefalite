@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import glob
 import hashlib
+import html as html_lib
+import json
 import tempfile
 import textwrap
 import unicodedata
@@ -31,6 +33,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 
 
 # =============================================================================
@@ -43,7 +46,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-05-14-v7-numeric-expr-fixes"
+APP_VERSION = "2026-05-14-v8-quimio-media-copy-table"
 
 
 CID_RULES = [
@@ -270,6 +273,7 @@ YES_NO_IGN = {
 # Campos do exame quimiocitológico do líquor no SINAN.
 # Os nomes abaixo seguem o dicionário SINAN NET para meningite; os seletores do app
 # também aceitam variações próximas caso o banco venha renomeado.
+SINAN_QUIMIO_MATERIAL = "Líquor (LCR)"
 SINAN_QUIMIO_PARAMS = {
     "hema": {"label": "Hemácias", "default_col": "LAB_HEMA"},
     "neutro": {"label": "Neutrófilos", "default_col": "LAB_NEUTRO"},
@@ -5990,8 +5994,8 @@ FIELD_GUIDE = {
         ("EVOLUCAO", "desfecho", "alta, óbito por meningite, óbito por outra causa"),
         ("CRITERIO", "critério de confirmação", "cultura, PCR, clínico, quimiocitológico etc."),
         ("LAB_PUNCAO", "investigação", "punção laboratorial/lombar realizada"),
-        ("LAB_LIQUOR", "exame", "quimiocitológico do líquor realizado"),
-        ("LAB_GLICO / LAB_PROT / LAB_LEUCO", "parâmetros do LCR", "glicose, proteínas e leucócitos do exame quimiocitológico"),
+        ("LAB_LIQUOR", "exame", "quimiocitológico do líquor (LCR) realizado"),
+        ("LAB_GLICO / LAB_PROT / LAB_LEUCO", "parâmetros do LCR", "glicose, proteínas e leucócitos do exame quimiocitológico do líquor (LCR)"),
         ("ID_AGRAVO", "CID bruto", "geralmente G039 neste recorte"),
     ],
     "SIM": [
@@ -6835,7 +6839,7 @@ def query_sinan_quimio_summary(table: LoadedTable, exprs: Dict[str, Optional[str
     for key, label, value_expr in params:
         unions.append(
             f"""
-            SELECT {qstr(key)} AS parametro_id, {qstr(label)} AS parametro, {value_expr} AS valor
+            SELECT {qstr(key)} AS parametro_id, {qstr(SINAN_QUIMIO_MATERIAL)} AS material_analisado, {qstr(label)} AS parametro, {value_expr} AS valor
             FROM {table.ref_sql}
             {where_sql}
             """
@@ -6845,6 +6849,7 @@ def query_sinan_quimio_summary(table: LoadedTable, exprs: Dict[str, Optional[str
             {' UNION ALL '.join(unions)}
         )
         SELECT parametro_id,
+               material_analisado,
                parametro,
                COUNT(*) AS registros_avaliados,
                COUNT(*) FILTER (WHERE valor IS NOT NULL AND valor >= 0) AS n_valido,
@@ -6853,11 +6858,11 @@ def query_sinan_quimio_summary(table: LoadedTable, exprs: Dict[str, Optional[str
                MIN(valor) FILTER (WHERE valor IS NOT NULL AND valor >= 0) AS minimo,
                quantile_cont(valor, 0.25) FILTER (WHERE valor IS NOT NULL AND valor >= 0) AS q1,
                median(valor) FILTER (WHERE valor IS NOT NULL AND valor >= 0) AS mediana,
-               AVG(valor) FILTER (WHERE valor IS NOT NULL AND valor >= 0) AS media,
+               ROUND(AVG(valor) FILTER (WHERE valor IS NOT NULL AND valor >= 0), 2) AS media,
                quantile_cont(valor, 0.75) FILTER (WHERE valor IS NOT NULL AND valor >= 0) AS q3,
                MAX(valor) FILTER (WHERE valor IS NOT NULL AND valor >= 0) AS maximo
         FROM valores
-        GROUP BY 1, 2
+        GROUP BY 1, 2, 3
         ORDER BY CASE parametro_id
             WHEN 'hema' THEN 1
             WHEN 'neutro' THEN 2
@@ -7248,7 +7253,7 @@ def query_enriched_preview(table: LoadedTable, sel: ColumnSelection, exprs: Dict
         ("sinan_evolucao", exprs.get("evol_label")),
         ("sinan_criterio", exprs.get("criterio_label")),
         ("sinan_puncao_laboratorial", exprs.get("puncao_label")),
-        ("sinan_exame_quimiocitologico", exprs.get("quimio_label")),
+        ("sinan_exame_quimiocitologico_liquor_lcr", exprs.get("quimio_label")),
         ("sinan_lab_glicose", exprs.get("lab_glico")),
         ("sinan_lab_proteinas", exprs.get("lab_prot")),
         ("sinan_lab_leucocitos", exprs.get("lab_leuco")),
@@ -7323,8 +7328,89 @@ def download_button(df: pd.DataFrame, filename: str, label: str = "Baixar CSV") 
     )
 
 
+def _copyable_table_payload(df: pd.DataFrame) -> Tuple[str, str]:
+    """Gera versões HTML e TSV para colagem em Google Docs/editores."""
+    if df is None or df.empty:
+        return "", ""
+    out = df.copy()
+    out = out.where(pd.notna(out), "")
+    html_table = out.to_html(index=False, escape=True, border=1)
+    tsv_table = out.to_csv(index=False, sep="\t", lineterminator="\n")
+    return html_table, tsv_table
+
+
+def copy_table_button(df: pd.DataFrame, label: str = "Copiar tabela para Google Docs/editores") -> None:
+    """Renderiza botão de cópia com HTML de tabela e fallback em TSV."""
+    if df is None or df.empty:
+        return
+    html_table, tsv_table = _copyable_table_payload(df)
+    if not html_table:
+        return
+    uid = hashlib.sha1((html_table[:4000] + str(df.shape)).encode("utf-8", errors="ignore")).hexdigest()[:12]
+    button_id = f"copy-table-{uid}"
+    status_id = f"copy-status-{uid}"
+    html_component = f"""
+    <div style="font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;">
+      <button id="{button_id}"
+              style="border: 1px solid #d0d7de; border-radius: 8px; background: #f6f8fa; padding: 6px 10px; cursor: pointer; font-size: 0.9rem;">
+        {html_lib.escape(label)}
+      </button>
+      <span id="{status_id}" style="margin-left: 8px; color: #57606a; font-size: 0.85rem;"></span>
+    </div>
+    <script>
+    const htmlTable_{uid} = {json.dumps(html_table, ensure_ascii=False)};
+    const plainText_{uid} = {json.dumps(tsv_table, ensure_ascii=False)};
+    const button_{uid} = document.getElementById({json.dumps(button_id)});
+    const status_{uid} = document.getElementById({json.dumps(status_id)});
+
+    async function copyRichTable_{uid}() {{
+      try {{
+        if (navigator.clipboard && window.ClipboardItem) {{
+          const item = new ClipboardItem({{
+            'text/html': new Blob([htmlTable_{uid}], {{type: 'text/html'}}),
+            'text/plain': new Blob([plainText_{uid}], {{type: 'text/plain'}})
+          }});
+          await navigator.clipboard.write([item]);
+        }} else if (navigator.clipboard) {{
+          await navigator.clipboard.writeText(plainText_{uid});
+        }} else {{
+          const textarea = document.createElement('textarea');
+          textarea.value = plainText_{uid};
+          textarea.style.position = 'fixed';
+          textarea.style.left = '-9999px';
+          document.body.appendChild(textarea);
+          textarea.focus();
+          textarea.select();
+          document.execCommand('copy');
+          textarea.remove();
+        }}
+        status_{uid}.textContent = 'Tabela copiada.';
+      }} catch (err) {{
+        const textarea = document.createElement('textarea');
+        textarea.value = plainText_{uid};
+        textarea.style.position = 'fixed';
+        textarea.style.left = '-9999px';
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+        const ok = document.execCommand('copy');
+        textarea.remove();
+        status_{uid}.textContent = ok ? 'Tabela copiada em texto tabulado.' : 'Copie manualmente pela tabela acima.';
+      }}
+    }}
+    button_{uid}.addEventListener('click', copyRichTable_{uid});
+    </script>
+    """
+    components.html(html_component, height=42, scrolling=False)
+
+
+def copyable_dataframe(df: pd.DataFrame, *args, **kwargs) -> None:
+    st.dataframe(df, *args, **kwargs)
+    copy_table_button(df)
+
+
 def render_field_guide(source: str) -> None:
-    st.dataframe(
+    copyable_dataframe(
         pd.DataFrame(FIELD_GUIDE[source], columns=["Campo", "Uso", "Leitura epidemiológica"]),
         use_container_width=True,
         hide_index=True,
@@ -7334,7 +7420,7 @@ def render_field_guide(source: str) -> None:
 
 
 def render_cid_reference() -> None:
-    st.dataframe(pd.DataFrame(CID_RULES)[["grupo", "padrao", "rotulo"]], use_container_width=True, hide_index=True)
+    copyable_dataframe(pd.DataFrame(CID_RULES)[["grupo", "padrao", "rotulo"]], use_container_width=True, hide_index=True)
     st.caption(
         "O app procura A17.0, A39.0, A87*, G00*, G01*, G02*, G03* e G04.2 nos campos selecionados. "
         "No SINAN, esse CID costuma ser apenas o agravo geral; a etiologia específica deve vir de CON_DIAGES e campos relacionados."
@@ -7448,13 +7534,13 @@ def render_column_config(source: str, columns: Sequence[str]) -> ColumnSelection
                 criterio_col = select("CRITERIO", defaults.criterio_col, f"criterio_{source}")
             with s3:
                 lab_puncao_col = select("LAB_PUNCAO — Punção Laboratorial", defaults.lab_puncao_col, f"puncao_{source}")
-                lab_liquor_col = select("LAB_LIQUOR — Exame Quimiocitológico", defaults.lab_liquor_col, f"quimio_{source}")
+                lab_liquor_col = select("LAB_LIQUOR — Exame Quimiocitológico do líquor (LCR)", defaults.lab_liquor_col, f"quimio_{source}")
             with s4:
                 ate_hospit_col = select("ATE_HOSPIT", defaults.ate_hospit_col, f"hospit_{source}")
                 dt_encerramento_col = select("DT_ENCERRA", defaults.dt_encerramento_col, f"dt_enc_{source}")
                 dt_notificacao_col = select("DT_NOTIFIC", defaults.dt_notificacao_col, f"dt_notif_{source}")
 
-            st.markdown("**Parâmetros do Exame Quimiocitológico do líquor**")
+            st.markdown("**Parâmetros do Exame Quimiocitológico do líquor (LCR)**")
             q1, q2, q3 = st.columns(3)
             with q1:
                 lab_hema_col = select("LAB_HEMA — Hemácias", defaults.lab_hema_col, f"lab_hema_{source}")
@@ -7769,7 +7855,7 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
         if ind.empty:
             st.warning("Não foi possível calcular indicadores do SINAN. Verifique CLASSI_FIN, EVOLUCAO e data.")
             return
-        st.dataframe(ind, use_container_width=True, hide_index=True)
+        copyable_dataframe(ind, use_container_width=True, hide_index=True)
         download_button(ind, "sinan_indicadores_anuais.csv")
 
         count_specs = [
@@ -7858,7 +7944,7 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
                     hover_data={"texto": False, "pct": ":.2f", "total_ano": True},
                 )
                 st.plotly_chart(fig_hosp, use_container_width=True)
-                st.dataframe(hosp, use_container_width=True, hide_index=True)
+                copyable_dataframe(hosp, use_container_width=True, hide_index=True)
                 download_button(hosp, "sinan_internacao_ate_hospit.csv")
         else:
             st.info("Para gerar o gráfico de internação, selecione o campo ATE_HOSPIT na configuração de colunas do SINAN.")
@@ -7866,7 +7952,7 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
         etio = query_sinan_etiology_lethality(table, exprs, base_where)
         if not etio.empty:
             st.markdown("**Letalidade por grupo etiológico entre confirmados**")
-            st.dataframe(etio, use_container_width=True, hide_index=True)
+            copyable_dataframe(etio, use_container_width=True, hide_index=True)
             etio = etio.copy()
             etio["texto"] = [f"{br_pct(p)} (n={br_int(n)})" for p, n in zip(etio["letalidade_pct"], etio["obitos_meningite"])]
             fig3 = px.bar(etio, x="letalidade_pct", y="grupo_etiologico", orientation="h", text="texto", title="Letalidade por grupo etiológico (%)", labels={"letalidade_pct": "%", "grupo_etiologico": "Grupo etiológico"})
@@ -7885,7 +7971,7 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
         if ind.empty:
             st.warning("Não foi possível calcular indicadores principais do SIM. Verifique data, CAUSABAS e campos CID.")
         else:
-            st.dataframe(ind, use_container_width=True, hide_index=True)
+            copyable_dataframe(ind, use_container_width=True, hide_index=True)
             download_button(ind, "sim_indicadores_anuais.csv")
             fig = px.line(ind, x="ano", y=["obitos_registros", "obitos_causa_basica_meningite", "obitos_com_mencao_meningite"], markers=True, title="SIM: óbitos por definição de CID")
             st.plotly_chart(fig, use_container_width=True)
@@ -7908,7 +7994,7 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
                     hover_data={"texto": False, "pct": ":.2f", "total_ano": True},
                 )
                 st.plotly_chart(fig_grav, use_container_width=True)
-                st.dataframe(grav, use_container_width=True, hide_index=True)
+                copyable_dataframe(grav, use_container_width=True, hide_index=True)
                 download_button(grav, "sim_obito_gravidez_obitograv.csv")
         else:
             st.info("Para o gráfico de óbito na gravidez, selecione o campo OBITOGRAV na configuração de colunas do SIM.")
@@ -7929,7 +8015,7 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
                     hover_data={"texto": False, "pct": ":.2f", "total_ano": True},
                 )
                 st.plotly_chart(fig_puer, use_container_width=True)
-                st.dataframe(puer, use_container_width=True, hide_index=True)
+                copyable_dataframe(puer, use_container_width=True, hide_index=True)
                 download_button(puer, "sim_obito_puerperio_obitopuerp.csv")
         return
 
@@ -7943,7 +8029,7 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
     if ind.empty:
         st.warning("Não foi possível calcular indicadores da CIHA. Verifique data, diagnóstico e campos MORTE/DIAS_PERM.")
     else:
-        st.dataframe(ind, use_container_width=True, hide_index=True)
+        copyable_dataframe(ind, use_container_width=True, hide_index=True)
         download_button(ind, "ciha_indicadores_anuais.csv")
         fig = px.line(ind, x="ano", y=["atendimentos", "atendimentos_diag_principal_meningite", "mortes_administrativas"], markers=True, title="CIHA: atendimentos e mortes administrativas")
         st.plotly_chart(fig, use_container_width=True)
@@ -7964,7 +8050,7 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
             hover_data={"texto": False, "pct": ":.2f", "denominador": True},
         )
         st.plotly_chart(fig_dias, use_container_width=True)
-        st.dataframe(dias_dist, use_container_width=True, hide_index=True)
+        copyable_dataframe(dias_dist, use_container_width=True, hide_index=True)
         download_button(dias_dist, "ciha_dias_permanencia_distribuicao.csv")
     else:
         st.info("Para gerar o gráfico de dias de permanência, selecione o campo DIAS_PERM na configuração de colunas da CIHA.")
@@ -8006,7 +8092,7 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
             )
             fig.update_layout(yaxis={"categoryorder": "total ascending"})
             st.plotly_chart(fig, use_container_width=True)
-            st.dataframe(cid_dist, use_container_width=True, hide_index=True)
+            copyable_dataframe(cid_dist, use_container_width=True, hide_index=True)
             download_button(cid_dist, f"{source.lower()}_cid10_distribuicao.csv")
 
         if source == "CIHA":
@@ -8040,7 +8126,7 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                         )
                         fig_death.update_layout(yaxis={"categoryorder": "total ascending"})
                         st.plotly_chart(fig_death, use_container_width=True)
-                        st.dataframe(death_cid, use_container_width=True, hide_index=True)
+                        copyable_dataframe(death_cid, use_container_width=True, hide_index=True)
                         download_button(death_cid, "ciha_obitos_cid10_distribuicao.csv")
         return
 
@@ -8049,6 +8135,7 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
         "No SINAN, o CID bruto do agravo pode estar como G039 para quase todos os registros. "
         "Por isso, nesta aba o gráfico bruto de distribuição por CID-10 foi substituído pela conversão de CON_DIAGES/grupo etiológico para famílias CID-10 comparáveis com SIM e CIHA."
     )
+    st.caption(f"No bloco do exame quimiocitológico, o material analisado é: {SINAN_QUIMIO_MATERIAL}.")
 
     # O gráfico CON_DIAGES detalhado foi removido porque o Grupo etiológico SINAN já é derivado do mesmo campo,
     # com agrupamento mais adequado para leitura epidemiológica.
@@ -8063,7 +8150,7 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                 fig = px.bar(df, x="n", y="categoria", orientation="h", text="pct", labels={"categoria": label, "n": "Registros"})
                 fig.update_layout(yaxis={"categoryorder": "total ascending"})
                 st.plotly_chart(fig, use_container_width=True)
-                st.dataframe(df, use_container_width=True, hide_index=True)
+                copyable_dataframe(df, use_container_width=True, hide_index=True)
 
         if label == "Grupo etiológico SINAN":
             conv = query_sinan_cid10_conversion(table, exprs, graph_where)
@@ -8088,7 +8175,7 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                     )
                     fig_conv.update_layout(yaxis={"categoryorder": "total ascending"})
                     st.plotly_chart(fig_conv, use_container_width=True)
-                    st.dataframe(
+                    copyable_dataframe(
                         conv_yes[["cid10_grupo", "cid10_classificacao", "n", "pct", "grupos_sinan", "conclusoes_sinan"]],
                         use_container_width=True,
                         hide_index=True,
@@ -8096,7 +8183,7 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                     download_button(conv_yes, "sinan_cid10_conversao_grupo_etiologico.csv")
 
                 with st.expander("Regra usada para converter CON_DIAGES em CID-10"):
-                    st.dataframe(pd.DataFrame(SINAN_CID10_MAPPING_ROWS), use_container_width=True, hide_index=True)
+                    copyable_dataframe(pd.DataFrame(SINAN_CID10_MAPPING_ROWS), use_container_width=True, hide_index=True)
                     st.caption(
                         "Observação: CON_DIAGES 01 (meningococcemia isolada) fica fora da conversão; "
                         "CON_DIAGES 02 e 03 entram como A39.0; CON_DIAGES 05 entra como G04.2 conforme a regra operacional solicitada. "
@@ -8105,7 +8192,7 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
 
                 if not conv_no.empty:
                     st.caption("Registros não convertidos para a comparação CID-10, mantendo transparência da exclusão/ausência de mapeamento:")
-                    st.dataframe(
+                    copyable_dataframe(
                         conv_no[["cid10_grupo", "cid10_classificacao", "n", "pct", "conclusoes_sinan"]],
                         use_container_width=True,
                         hide_index=True,
@@ -8115,7 +8202,7 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
         ("EVOLUCAO", exprs.get("evol_label")),
         ("Critério de confirmação para classificação do caso", exprs.get("criterio_label")),
         ("Punção Laboratorial", exprs.get("puncao_label")),
-        ("Exame Quimiocitológico", exprs.get("quimio_label")),
+        ("Exame Quimiocitológico do líquor (LCR)", exprs.get("quimio_label")),
     ]:
         if expr:
             df = query_category(table, expr, graph_where, top_n=40)
@@ -8133,44 +8220,15 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                 )
                 fig.update_layout(yaxis={"categoryorder": "total ascending"})
                 st.plotly_chart(fig, use_container_width=True)
-                st.dataframe(df, use_container_width=True, hide_index=True)
+                copyable_dataframe(df, use_container_width=True, hide_index=True)
 
     quimio_summary = query_sinan_quimio_summary(table, exprs, graph_where)
     if quimio_summary.empty:
         st.info(
-            "Para gerar o resumo do Exame Quimiocitológico, selecione os campos laboratoriais do SINAN "
+            "Para gerar o resumo do Exame Quimiocitológico do líquor (LCR), selecione os campos laboratoriais do SINAN "
             "na configuração de colunas, como LAB_GLICO, LAB_LEUCO e LAB_PROT."
         )
     else:
-        st.markdown("**Exame Quimiocitológico — valores dos parâmetros**")
-        resumo_plot = quimio_summary[quimio_summary["n_valido"] > 0].copy()
-        if not resumo_plot.empty:
-            resumo_plot["texto"] = [
-                f"mediana {float(med):.1f}".replace(".", ",") if pd.notna(med) else "—"
-                for med in resumo_plot["mediana"]
-            ]
-            fig_quimio = px.bar(
-                resumo_plot,
-                x="parametro",
-                y="mediana",
-                text="texto",
-                title="SINAN: mediana dos parâmetros do exame quimiocitológico",
-                labels={"parametro": "Parâmetro", "mediana": "Mediana", "n_valido": "Registros válidos"},
-                hover_data={
-                    "texto": False,
-                    "n_valido": True,
-                    "pct_preenchido": ":.2f",
-                    "minimo": ":.2f",
-                    "q1": ":.2f",
-                    "media": ":.2f",
-                    "q3": ":.2f",
-                    "maximo": ":.2f",
-                },
-            )
-            st.plotly_chart(fig_quimio, use_container_width=True)
-        st.dataframe(quimio_summary, use_container_width=True, hide_index=True)
-        download_button(quimio_summary, "sinan_quimiocitologico_resumo_parametros.csv")
-
         for key, titulo in [("glico", "Glicose"), ("prot", "Proteínas"), ("leuco", "Leucócitos")]:
             expr = exprs.get(f"lab_{key}")
             if not expr:
@@ -8192,8 +8250,44 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                 hover_data={"texto": False, "pct": ":.2f", "denominador": True, "faixa_inicio": ":.2f", "faixa_fim": ":.2f"},
             )
             st.plotly_chart(fig_dist, use_container_width=True)
-            st.dataframe(dist, use_container_width=True, hide_index=True)
+            copyable_dataframe(dist, use_container_width=True, hide_index=True)
             download_button(dist, f"sinan_quimiocitologico_distribuicao_{safe_filename(titulo)}.csv")
+
+        st.markdown("**Exame Quimiocitológico do líquor (LCR) — valores médios dos parâmetros**")
+        st.caption(f"Material analisado: {SINAN_QUIMIO_MATERIAL}.")
+        resumo_plot = quimio_summary[quimio_summary["n_valido"] > 0].copy()
+        if not resumo_plot.empty:
+            resumo_plot["texto"] = [
+                f"média {float(media):.1f}".replace(".", ",") if pd.notna(media) else "—"
+                for media in resumo_plot["media"]
+            ]
+            fig_quimio = px.bar(
+                resumo_plot,
+                x="parametro",
+                y="media",
+                text="texto",
+                title="SINAN: média dos parâmetros do exame quimiocitológico do líquor (LCR)",
+                labels={
+                    "parametro": "Parâmetro",
+                    "material_analisado": "Material analisado",
+                    "media": "Média",
+                    "n_valido": "Registros válidos",
+                },
+                hover_data={
+                    "texto": False,
+                    "material_analisado": True,
+                    "n_valido": True,
+                    "pct_preenchido": ":.2f",
+                    "minimo": ":.2f",
+                    "q1": ":.2f",
+                    "mediana": ":.2f",
+                    "q3": ":.2f",
+                    "maximo": ":.2f",
+                },
+            )
+            st.plotly_chart(fig_quimio, use_container_width=True)
+        copyable_dataframe(quimio_summary, use_container_width=True, hide_index=True)
+        download_button(quimio_summary, "sinan_quimiocitologico_liquor_resumo_parametros.csv")
 
 
 def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dict[str, Optional[str]]) -> None:
@@ -8289,7 +8383,7 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
                 else:
                     fig.update_layout(yaxis={"categoryorder": "total ascending"})
                 st.plotly_chart(fig, use_container_width=True)
-                st.dataframe(df, use_container_width=True, hide_index=True)
+                copyable_dataframe(df, use_container_width=True, hide_index=True)
                 download_button(df, filename)
 
 
@@ -8316,7 +8410,7 @@ def render_quality_tab(table: LoadedTable, source: str, base_where: str, exprs: 
             "EVOLUCAO": exprs.get("evol_code"),
             "CRITERIO": exprs.get("criterio_code"),
             "Punção Laboratorial": exprs.get("puncao_label"),
-            "Exame Quimiocitológico": exprs.get("quimio_label"),
+            "Exame Quimiocitológico do líquor (LCR)": exprs.get("quimio_label"),
             "Glicose": exprs.get("lab_glico"),
             "Proteínas": exprs.get("lab_prot"),
             "Leucócitos": exprs.get("lab_leuco"),
@@ -8367,7 +8461,7 @@ def render_quality_tab(table: LoadedTable, source: str, base_where: str, exprs: 
         fig.update_layout(yaxis={"categoryorder": "total ascending"})
         fig.update_traces(textposition="outside", cliponaxis=False)
         st.plotly_chart(fig, use_container_width=True)
-        st.dataframe(miss[["campo", "faltantes", "total", "pct_faltante", "texto"]], use_container_width=True, hide_index=True)
+        copyable_dataframe(miss[["campo", "faltantes", "total", "pct_faltante", "texto"]], use_container_width=True, hide_index=True)
         download_button(miss.drop(columns=["texto"], errors="ignore"), f"{source.lower()}_campos_importantes_nao_preenchidos.csv")
 
     by_year = query_missingness_by_year(table, fields, exprs.get("dt"), base_where)
@@ -8399,7 +8493,7 @@ def render_quality_tab(table: LoadedTable, source: str, base_where: str, exprs: 
         )
         fig.update_traces(textposition="top center")
         st.plotly_chart(fig, use_container_width=True)
-        st.dataframe(filtered[["ano", "campo", "faltantes", "total", "pct_faltante", "texto"]], use_container_width=True, hide_index=True)
+        copyable_dataframe(filtered[["ano", "campo", "faltantes", "total", "pct_faltante", "texto"]], use_container_width=True, hide_index=True)
         download_button(by_year.drop(columns=["texto"], errors="ignore"), f"{source.lower()}_campos_importantes_nao_preenchidos_por_ano.csv")
 
 def render_sql_lab(table: LoadedTable, source: str) -> None:
@@ -8447,7 +8541,7 @@ def render_sql_lab(table: LoadedTable, source: str) -> None:
         sql = sql_text.replace("{tabela}", table.ref_sql).replace("{{tabela}}", table.ref_sql)
         try:
             df = run_query(table, sql)
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            copyable_dataframe(df, use_container_width=True, hide_index=True)
             download_button(df, f"{source.lower()}_sql_lab.csv", "Baixar resultado")
         except Exception as exc:
             st.error(f"Erro ao executar SQL: {exc}")
@@ -8487,7 +8581,7 @@ def render_source(source: str) -> Optional[Dict[str, object]]:
         limit = st.slider("Número de linhas", 50, 20000, 200, step=50, key=f"preview_limit_{source}")
         try:
             df_prev = query_enriched_preview(table, sel, exprs, graph_where, limit)
-            st.dataframe(df_prev, use_container_width=True)
+            copyable_dataframe(df_prev, use_container_width=True)
             download_button(df_prev, f"{source.lower()}_previa_enriquecida.csv")
         except Exception as exc:
             st.error(f"Erro ao montar prévia: {exc}")
@@ -8585,7 +8679,7 @@ def render_comparison(loaded: Sequence[Dict[str, object]]) -> None:
 
     fig = px.line(comp, x="periodo", y="valor", color="serie", markers=True, title="Comparação de tendências", labels={"valor": "Índice" if normalize else "Registros", "periodo": "Período", "serie": "Série"})
     st.plotly_chart(fig, use_container_width=True)
-    st.dataframe(comp, use_container_width=True, hide_index=True)
+    copyable_dataframe(comp, use_container_width=True, hide_index=True)
     download_button(comp, "comparacao_series_bases.csv")
 
     st.markdown("**Cuidados de leitura**")
@@ -8608,7 +8702,7 @@ def render_methodology() -> None:
         """
     )
     st.markdown("### Definições principais usadas")
-    st.dataframe(
+    copyable_dataframe(
         pd.DataFrame(
             [
                 ["SINAN — notificação", "todos os registros após filtros"],
