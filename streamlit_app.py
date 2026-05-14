@@ -46,7 +46,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-05-14-v8-quimio-media-copy-table"
+APP_VERSION = "2026-05-14-v9-cid10-g00-g01-g04alert-quimio"
 
 
 CID_RULES = [
@@ -152,8 +152,8 @@ SINAN_CID10_FROM_CON_DIAGES = {
         "origem": "04 — meningite tuberculosa",
     },
     "05": {
-        "grupo": "G04.2",
-        "rotulo": "G04.2 — meningoencefalite e meningomielite bacterianas não classificadas em outra parte",
+        "grupo": "G00",
+        "rotulo": "G00 — meningite bacteriana não classificada em outra parte",
         "origem": "05 — meningite por outras bactérias",
     },
     "06": {
@@ -209,8 +209,8 @@ SINAN_CID10_MAPPING_ROWS = [
     {
         "CON_DIAGES": "05",
         "Grupo SINAN": "Meningite por outras bactérias",
-        "CID-10 convertido": "G04.2",
-        "Observação": "Mapeamento operacional solicitado para meningoencefalite/meningomielite bacterianas não classificadas em outra parte.",
+        "CID-10 convertido": "G00 ou G01",
+        "Observação": "Regra corrigida: não converter automaticamente para G04.2. Usa G01 quando o agente/doença é classificado em outra parte; caso contrário, usa G00, incluindo bactéria não especificada.",
     },
     {
         "CON_DIAGES": "09, 10",
@@ -235,6 +235,195 @@ SINAN_CID10_MAPPING_ROWS = [
         "Grupo SINAN": "Meningococcemia",
         "CID-10 convertido": "Não convertido",
         "Observação": "Excluído para evitar incluir pacientes sem meningite na comparação.",
+    },
+]
+
+
+# Especificações auxiliares do SINAN para refinar CON_DIAGES.
+# CLA_ME_BAC vem do Quadro II do dicionário SINAN NET Meningite.
+SINAN_CLA_ME_BAC = {
+    "09": "09 — Shigella sp",
+    "10": "10 — Staphylococcus (aureus, sp, epidermidis)",
+    "11": "11 — Salmonella sp",
+    "12": "12 — Escherichia coli",
+    "13": "13 — Klebsiella (sp, pneumoniae)",
+    "14": "14 — Streptococcus (sp, pyogenes, agalactiae)",
+    "15": "15 — Enterococcus",
+    "16": "16 — Pseudomonas (aeruginosa, sp)",
+    "18": "18 — Serratia (marcescens, sp)",
+    "19": "19 — Alcaligenes (sp, faecalis)",
+    "20": "20 — Proteus (sp, vulgaris, mirabilis)",
+    "21": "21 — Listeria monocytogenes",
+    "22": "22 — Enterobacter (sp, cloacae)",
+    "23": "23 — Acinetobacter (sp, baumannii)",
+    "26": "26 — Neisseria sp",
+    "28": "28 — outras bactérias",
+    "45": "45 — Treponema pallidum",
+    "46": "46 — Rickettsiae",
+    "49": "49 — Leptospira",
+    "81": "81 — bactéria não especificada",
+}
+
+# Códigos de CLA_ME_BAC que, para a finalidade de comparação por família CID-10,
+# são mais compatíveis com G01 por remeterem a doenças bacterianas classificadas em outra parte.
+SINAN_CLA_ME_BAC_G01_CODES = {"11", "21", "45", "49"}
+
+SINAN_CLA_ME_ASS = {
+    "37": "37 — caxumba",
+    "38": "38 — sarampo",
+    "39": "39 — herpes simples",
+    "40": "40 — varicela/catapora/herpes zoster",
+    "41": "41 — rubéola",
+    "55": "55 — influenza",
+    "56": "56 — echovirus",
+    "59": "59 — outros enterovírus",
+    "63": "63 — coxsackie",
+    "70": "70 — adenovírus",
+    "71": "71 — vírus do Nilo Ocidental",
+    "72": "72 — dengue",
+    "73": "73 — outros arbovírus",
+    "74": "74 — outros vírus",
+    "75": "75 — não identificado",
+}
+
+SINAN_CLA_ME_ETI = {
+    "42": "42 — outros fungos",
+    "43": "43 — Cryptococcus/Torula",
+    "44": "44 — Candida albicans/sp",
+    "47": "47 — Trypanosoma cruzi",
+    "48": "48 — Toxoplasma gondii/sp",
+    "50": "50 — cisticerco",
+    "52": "52 — outros parasitas",
+    "64": "64 — Aspergillus",
+    "76": "76 — Plasmodium sp",
+    "77": "77 — Taenia solium",
+}
+
+SINAN_OTHER_BACTERIA_CID10_RULE_ROWS = [
+    {
+        "Cenário": "CON_DIAGES 05 + CLA_ME_BAC 11, 21, 45 ou 49; ou texto compatível com salmonela, listeriose, neurossífilis/sífilis ou leptospirose",
+        "CID-10 convertido": "G01",
+        "Justificativa": "Meningite em doença bacteriana classificada em outra parte.",
+    },
+    {
+        "Cenário": "CON_DIAGES 05 + texto compatível com carbúnculo/antraz, Lyme/Borrelia, febre tifóide ou gonocócica",
+        "CID-10 convertido": "G01",
+        "Justificativa": "A doença bacteriana de base tem código próprio; a meningite entra como manifestação associada.",
+    },
+    {
+        "Cenário": "CON_DIAGES 05 + Streptococcus, Staphylococcus, Escherichia coli, Klebsiella/Friedländer ou demais bactérias do Quadro II não remetidas a G01",
+        "CID-10 convertido": "G00",
+        "Justificativa": "Meningite bacteriana não classificada em outra parte; usar subcategoria específica quando disponível.",
+    },
+    {
+        "Cenário": "CON_DIAGES 05 sem bactéria especificada ou CLA_ME_BAC 81",
+        "CID-10 convertido": "G00",
+        "Justificativa": "Equivale operacionalmente a meningite bacteriana não especificada/pyogênica/purulenta/supurativa SOE.",
+    },
+]
+
+SINAN_G04_2_ALERT_RULE_ROWS = [
+    {
+        "Regra": "Não usar G04.2 apenas por CON_DIAGES 05",
+        "Motivo": "Meningite por outras bactérias não confirma, por si só, meningoencefalite ou meningomielite.",
+    },
+    {
+        "Regra": "Sinalizar possível G04.2 somente se houver contexto bacteriano + menção textual de encefalite, meningoencefalite, mielite ou meningomielite",
+        "Motivo": "G04.2 exige comprometimento encefálico e/ou medular bacteriano, não apenas meningite bacteriana.",
+    },
+    {
+        "Regra": "Exibir como alerta operacional/auditoria, não como CID-10 convertido principal do SINAN",
+        "Motivo": "A ficha SINAN de meningite não possui campo estruturado específico para meningoencefalite/meningomielite.",
+    },
+]
+
+# Regex operacional para pistas textuais. Usado somente em campos auxiliares selecionados pelo usuário.
+SINAN_G01_DETAIL_REGEX = (
+    r"CARB[UÚ]NCULO|ANTRAZ|ANTHRAX|LYME|BORREL|TIF[OÓ]IDE|TYPHOID|"
+    r"GONOCOC|GONOCOCO|SALMONEL|LEPTOSPI|LISTERI|NEUROSS[ÍI]FIL|NEUROSYPH|"
+    r"S[ÍI]FIL|SYPHIL|TREPONEMA"
+)
+SINAN_G04_2_TEXT_REGEX = r"MENINGOENCEFALIT|ENCEFALIT|ENCEFALOMIELIT|MENINGOMIELIT|MIELIT"
+
+# Campos que o app tenta selecionar automaticamente como auxiliares para refino etiológico/textual.
+SINAN_AUXILIARY_CID10_CANDIDATES = [
+    "CLA_ME_BAC", "CLA_ME_ASS", "CLA_ME_ETI", "DS_OBSERVACAO", "OBSERVACAO", "OBSERVACOES",
+    "OUTROS_SINTOMAS", "OUTRO_SINTOMA", "OUTR_SINT", "SIN_OUT", "SINTOMAS", "SINAIS",
+    "DIAGNOSTICO", "DIAG_FINAL", "CLASSIFICACAO", "EVOLUCAO", "CID", "ID_AGRAVO",
+]
+
+SINAN_QUIMIO_INTERPRETATION_ROWS = [
+    {
+        "Parâmetro": "Hemácias",
+        "Bacteriana": "Geralmente ausentes/baixas; elevação sugere punção traumática, hemorragia ou quadro necro-hemorrágico associado.",
+        "Viral/asséptica": "Geralmente ausentes/baixas; herpes e alguns quadros encefalíticos podem cursar com hemácias.",
+        "Fúngica/TB": "Sem padrão específico; interpretar com aspecto do LCR e demais marcadores.",
+        "Helmintos/parasitária eosinofílica": "Sem padrão específico; pode haver pleocitose eosinofílica sem hemácias importantes.",
+        "Protozoários": "Naegleria/PAM pode simular bacteriana e pode ter LCR turvo/hemorrágico.",
+    },
+    {
+        "Parâmetro": "Neutrófilos",
+        "Bacteriana": "Predomínio neutrofílico, frequentemente muito aumentado.",
+        "Viral/asséptica": "Predomínio linfocitário; pode haver neutrófilos nas primeiras 24-48h.",
+        "Fúngica/TB": "Frequentemente linfocítica ou mista; TB pode ser mista no início.",
+        "Helmintos/parasitária eosinofílica": "Pode haver mistura celular; eosinófilos são a pista principal.",
+        "Protozoários": "PAM/Naegleria costuma ter pleocitose neutrofílica intensa, semelhante à bacteriana.",
+    },
+    {
+        "Parâmetro": "Glicose",
+        "Bacteriana": "Baixa ou muito baixa, muitas vezes <50% da glicemia sérica.",
+        "Viral/asséptica": "Usualmente normal.",
+        "Fúngica/TB": "Frequentemente baixa, sobretudo TB/criptococose.",
+        "Helmintos/parasitária eosinofílica": "Usualmente normal, mas pode variar em doença grave.",
+        "Protozoários": "Pode ser baixa, especialmente na PAM/Naegleria.",
+    },
+    {
+        "Parâmetro": "Leucócitos",
+        "Bacteriana": "Geralmente muito elevados; valores >1.000-2.000 células/µL favorecem bacteriana.",
+        "Viral/asséptica": "Elevação menor/moderada, tipicamente <300-1.000 células/µL conforme referência.",
+        "Fúngica/TB": "Elevação variável, geralmente menor que bacteriana aguda, mas pode ser importante.",
+        "Helmintos/parasitária eosinofílica": "Pleocitose com fração eosinofílica relevante.",
+        "Protozoários": "Pode ser muito alta na PAM/Naegleria.",
+    },
+    {
+        "Parâmetro": "Eosinófilos",
+        "Bacteriana": "Não costuma predominar.",
+        "Viral/asséptica": "Não costuma predominar.",
+        "Fúngica/TB": "Pode ocorrer em algumas micoses, mas não é o padrão principal.",
+        "Helmintos/parasitária eosinofílica": "Marcador-chave: eosinofilia no LCR sugere meningite eosinofílica, frequentemente helmíntica.",
+        "Protozoários": "Geralmente não é o marcador principal.",
+    },
+    {
+        "Parâmetro": "Proteínas",
+        "Bacteriana": "Elevadas; valores >220 mg/dL favorecem fortemente bacteriana em alguns critérios.",
+        "Viral/asséptica": "Normais a moderadamente elevadas.",
+        "Fúngica/TB": "Elevadas, muitas vezes de forma persistente/subaguda.",
+        "Helmintos/parasitária eosinofílica": "Normais a elevadas; podem aumentar com inflamação intensa.",
+        "Protozoários": "Frequentemente elevadas em PAM/Naegleria.",
+    },
+    {
+        "Parâmetro": "Monócitos",
+        "Bacteriana": "Menor participação no padrão típico agudo; pode aparecer após tratamento/evolução.",
+        "Viral/asséptica": "Pode compor o predomínio mononuclear.",
+        "Fúngica/TB": "Comum em padrões crônicos/subagudos mononucleares.",
+        "Helmintos/parasitária eosinofílica": "Pode compor a pleocitose junto a linfócitos/eosinófilos.",
+        "Protozoários": "Variável; não é a pista principal na PAM.",
+    },
+    {
+        "Parâmetro": "Linfócitos",
+        "Bacteriana": "Não é o padrão típico inicial, mas pode predominar em fases iniciais/atípicas ou após antibiótico.",
+        "Viral/asséptica": "Predomínio linfocitário é o padrão clássico.",
+        "Fúngica/TB": "Predomínio linfocitário ou misto é frequente.",
+        "Helmintos/parasitária eosinofílica": "Pode estar elevado junto a eosinófilos.",
+        "Protozoários": "PAM tende mais a neutrófilos; outros protozoários podem variar.",
+    },
+    {
+        "Parâmetro": "Cloreto",
+        "Bacteriana": "Pode estar reduzido, mas tem baixa especificidade isolada.",
+        "Viral/asséptica": "Geralmente preservado.",
+        "Fúngica/TB": "Redução de cloreto é classicamente descrita em TB, mas deve ser interpretada com cautela.",
+        "Helmintos/parasitária eosinofílica": "Sem padrão útil isolado.",
+        "Protozoários": "Sem padrão útil isolado.",
     },
 ]
 
@@ -5942,6 +6131,7 @@ SOURCE_CONFIG: Dict[str, SourceConfig] = {
         field_notes=[
             "No recorte enviado, o SINAN tende a ter ID_AGRAVO constante como G039.",
             "Para etiologia/forma clínica no SINAN, priorize CON_DIAGES; complemente com CLA_ME_BAC, CLA_ME_ASS, CLA_ME_ETI, CRITERIO e EVOLUCAO.",
+            "G04.2 não é inferido por CON_DIAGES=05; use os campos auxiliares para procurar meningoencefalite, meningomielite, encefalite ou mielite.",
         ],
     ),
     "SIM": SourceConfig(
@@ -5991,11 +6181,15 @@ FIELD_GUIDE = {
         ("DT_NOTIFIC", "data alternativa", "notificação"),
         ("CLASSI_FIN", "definição de caso", "confirmado, descartado, inconclusivo"),
         ("CON_DIAGES", "etiologia/forma", "conclusão diagnóstica específica"),
+        ("CLA_ME_BAC", "bactéria em outras bacterianas", "refina CON_DIAGES=05 em G00 ou G01"),
+        ("CLA_ME_ASS", "agente viral/asséptico", "detalha meningite asséptica/viral"),
+        ("CLA_ME_ETI", "outra etiologia", "detalha fungos, protozoários e parasitas"),
+        ("campos textuais/auxiliares", "alerta G04.2", "procura encefalite, mielite, meningomielite ou meningoencefalite"),
         ("EVOLUCAO", "desfecho", "alta, óbito por meningite, óbito por outra causa"),
         ("CRITERIO", "critério de confirmação", "cultura, PCR, clínico, quimiocitológico etc."),
         ("LAB_PUNCAO", "investigação", "punção laboratorial/lombar realizada"),
         ("LAB_LIQUOR", "exame", "quimiocitológico do líquor (LCR) realizado"),
-        ("LAB_GLICO / LAB_PROT / LAB_LEUCO", "parâmetros do LCR", "glicose, proteínas e leucócitos do exame quimiocitológico do líquor (LCR)"),
+        ("LAB_HEMA / LAB_NEUTRO / LAB_GLICO / LAB_LEUCO / LAB_EOSI / LAB_PROT / LAB_MONO / LAB_LINFO / LAB_CLOR", "parâmetros do LCR", "hemácias, diferenciais celulares, glicose, proteínas e cloreto"),
         ("ID_AGRAVO", "CID bruto", "geralmente G039 neste recorte"),
     ],
     "SIM": [
@@ -6202,35 +6396,135 @@ def cid_type_expr(cid_sql: str) -> str:
     return f"CASE WHEN {cid_sql} IS NULL THEN 'Sem CID de meningite detectado' {' '.join(clauses)} ELSE 'Outro CID capturado' END"
 
 
-def _case_from_con_diages_attr(con_code_sql: str, attr: str, default: str) -> str:
-    parts = [
-        f"WHEN {qstr(code)} THEN {qstr(info[attr])}"
-        for code, info in SINAN_CID10_FROM_CON_DIAGES.items()
-    ]
-    for code, label in SINAN_CID10_NOT_CONVERTED.items():
-        parts.append(f"WHEN {qstr(code)} THEN {qstr(label)}")
-    return f"CASE {con_code_sql} {' '.join(parts)} ELSE {qstr(default)} END"
+def text_concat_expr(cols: Sequence[str]) -> Optional[str]:
+    """Concatena campos textuais selecionados em uma expressão SQL única.
+
+    Usado para procurar menções como encefalite, mielite, meningomielite,
+    meningoencefalite e nomes de agentes que não aparecem em CON_DIAGES.
+    """
+    clean_cols = [c for c in cols if c]
+    if not clean_cols:
+        return None
+    parts = [f"COALESCE({clean_str_expr(c)}, '')" for c in clean_cols]
+    if len(parts) == 1:
+        return f"UPPER({parts[0]})"
+    return "UPPER(" + " || ' | ' || ".join(parts) + ")"
 
 
-def sinan_cid10_conversion_group_expr(con_code_sql: str) -> str:
-    return _case_from_con_diages_attr(
-        con_code_sql,
-        "grupo",
-        "Sem conversão — CON_DIAGES ausente ou não mapeado",
-    )
+def _regex_bool_expr(text_sql: Optional[str], pattern: str) -> str:
+    if not text_sql:
+        return "FALSE"
+    return f"regexp_matches(COALESCE({text_sql}, ''), {qstr(pattern)})"
 
 
-def sinan_cid10_conversion_type_expr(con_code_sql: str) -> str:
-    return _case_from_con_diages_attr(
-        con_code_sql,
-        "rotulo",
-        "Sem conversão — CON_DIAGES ausente ou não mapeado",
-    )
+def _sinan_other_bacteria_g01_condition(bacteria_code_sql: Optional[str] = None, aux_text_sql: Optional[str] = None) -> str:
+    conditions: List[str] = []
+    if bacteria_code_sql:
+        g01_codes = ", ".join(qstr(code) for code in sorted(SINAN_CLA_ME_BAC_G01_CODES))
+        conditions.append(f"{bacteria_code_sql} IN ({g01_codes})")
+    if aux_text_sql:
+        conditions.append(_regex_bool_expr(aux_text_sql, SINAN_G01_DETAIL_REGEX))
+    return " OR ".join(f"({c})" for c in conditions) if conditions else "FALSE"
+
+
+def _sinan_con05_detail_expr(bacteria_code_sql: Optional[str] = None, aux_text_sql: Optional[str] = None) -> str:
+    g01_condition = _sinan_other_bacteria_g01_condition(bacteria_code_sql, aux_text_sql)
+    return f"""
+    CASE
+        WHEN ({g01_condition}) THEN 'CON_DIAGES=05 refinado como G01 por CLA_ME_BAC/texto: agente/doença bacteriana classificada em outra parte.'
+        WHEN {bacteria_code_sql or 'NULL'} IS NULL THEN 'CON_DIAGES=05 sem CLA_ME_BAC selecionado/preenchido: classificado conservadoramente como G00, não como G04.2.'
+        WHEN {bacteria_code_sql or 'NULL'} IN ('81') THEN 'CON_DIAGES=05 com bactéria não especificada: G00, não G04.2.'
+        ELSE 'CON_DIAGES=05 com bactéria comum/outra bactéria: G00, não G04.2.'
+    END
+    """
+
+
+def sinan_cid10_conversion_group_expr(con_code_sql: str, bacteria_code_sql: Optional[str] = None, aux_text_sql: Optional[str] = None) -> str:
+    g01_condition = _sinan_other_bacteria_g01_condition(bacteria_code_sql, aux_text_sql)
+    return f"""
+    CASE
+        WHEN {con_code_sql} IN ('02', '03') THEN 'A39.0'
+        WHEN {con_code_sql} = '04' THEN 'A17.0'
+        WHEN {con_code_sql} = '05' AND ({g01_condition}) THEN 'G01'
+        WHEN {con_code_sql} = '05' THEN 'G00'
+        WHEN {con_code_sql} = '06' THEN 'G03'
+        WHEN {con_code_sql} = '07' THEN 'A87'
+        WHEN {con_code_sql} = '08' THEN 'G02'
+        WHEN {con_code_sql} IN ('09', '10') THEN 'G00'
+        WHEN {con_code_sql} = '01' THEN 'Não convertido — meningococcemia isolada'
+        ELSE 'Sem conversão — CON_DIAGES ausente ou não mapeado'
+    END
+    """
+
+
+def sinan_cid10_conversion_type_expr(con_code_sql: str, bacteria_code_sql: Optional[str] = None, aux_text_sql: Optional[str] = None) -> str:
+    g01_condition = _sinan_other_bacteria_g01_condition(bacteria_code_sql, aux_text_sql)
+    return f"""
+    CASE
+        WHEN {con_code_sql} IN ('02', '03') THEN 'A39.0 — meningite meningocócica'
+        WHEN {con_code_sql} = '04' THEN 'A17.0 — meningite tuberculosa'
+        WHEN {con_code_sql} = '05' AND ({g01_condition}) THEN 'G01 — meningite bacteriana em doença classificada em outra parte'
+        WHEN {con_code_sql} = '05' THEN 'G00 — meningite bacteriana não classificada em outra parte'
+        WHEN {con_code_sql} = '06' THEN 'G03 — meningite por outras causas / não especificada'
+        WHEN {con_code_sql} = '07' THEN 'A87 — meningite viral'
+        WHEN {con_code_sql} = '08' THEN 'G02 — meningite em outras doenças infecciosas/parasitárias'
+        WHEN {con_code_sql} IN ('09', '10') THEN 'G00 — meningite bacteriana não classificada em outra parte'
+        WHEN {con_code_sql} = '01' THEN 'Não convertido — meningococcemia isolada'
+        ELSE 'Sem conversão — CON_DIAGES ausente ou não mapeado'
+    END
+    """
+
+
+def sinan_cid10_conversion_reason_expr(con_code_sql: str, bacteria_code_sql: Optional[str] = None, aux_text_sql: Optional[str] = None) -> str:
+    con05_reason = _sinan_con05_detail_expr(bacteria_code_sql, aux_text_sql)
+    return f"""
+    CASE
+        WHEN {con_code_sql} IN ('02', '03') THEN 'Forma meningítica meningocócica: A39.0.'
+        WHEN {con_code_sql} = '04' THEN 'Meningite tuberculosa: A17.0.'
+        WHEN {con_code_sql} = '05' THEN ({con05_reason})
+        WHEN {con_code_sql} = '06' THEN 'Meningite não especificada: G03.'
+        WHEN {con_code_sql} = '07' THEN 'Meningite asséptica no SINAN: A87 como leitura operacional viral; validar etiologia quando disponível.'
+        WHEN {con_code_sql} = '08' THEN 'Outra etiologia infecciosa/parasitária: G02 como família comparável; validar CLA_ME_ETI.'
+        WHEN {con_code_sql} IN ('09', '10') THEN 'Haemophilus influenzae/pneumocócica: G00.'
+        WHEN {con_code_sql} = '01' THEN 'Meningococcemia isolada: fora da comparação de meningite.'
+        ELSE 'CON_DIAGES ausente ou sem regra.'
+    END
+    """
 
 
 def sinan_cid10_conversion_include_expr(con_code_sql: str) -> str:
     mapped = ", ".join(qstr(code) for code in SINAN_CID10_FROM_CON_DIAGES)
     return f"CASE WHEN {con_code_sql} IN ({mapped}) THEN 'Sim' ELSE 'Não' END"
+
+
+def sinan_g04_2_alert_expr(con_code_sql: Optional[str], aux_text_sql: Optional[str]) -> Optional[str]:
+    if not (con_code_sql and aux_text_sql):
+        return None
+    mention = _regex_bool_expr(aux_text_sql, SINAN_G04_2_TEXT_REGEX)
+    bacterial_context = f"{con_code_sql} IN ('02', '03', '05', '09', '10')"
+    return f"""
+    CASE
+        WHEN ({mention}) AND ({bacterial_context}) THEN 'Alerta G04.2 modificado — menção de encefalite/mielite em contexto bacteriano'
+        WHEN ({mention}) THEN 'Menção de encefalite/mielite sem contexto bacteriano estruturado — revisar, não converter automaticamente'
+        ELSE 'Sem menção textual de encefalite/mielite nos campos auxiliares selecionados'
+    END
+    """
+
+
+def sinan_g04_2_trigger_expr(aux_text_sql: Optional[str]) -> Optional[str]:
+    if not aux_text_sql:
+        return None
+    txt = f"COALESCE({aux_text_sql}, '')"
+    return f"""
+    CASE
+        WHEN regexp_matches({txt}, 'MENINGOENCEFALIT') THEN 'meningoencefalite'
+        WHEN regexp_matches({txt}, 'MENINGOMIELIT') THEN 'meningomielite'
+        WHEN regexp_matches({txt}, 'ENCEFALOMIELIT') THEN 'encefalomielite'
+        WHEN regexp_matches({txt}, 'ENCEFALIT') THEN 'encefalite'
+        WHEN regexp_matches({txt}, 'MIELIT') THEN 'mielite'
+        ELSE NULL
+    END
+    """
 
 
 def age_band_expr(age_sql: str, width: int = 5) -> str:
@@ -6421,6 +6715,10 @@ class ColumnSelection:
     # SINAN
     classi_fin_col: Optional[str] = None
     con_diages_col: Optional[str] = None
+    cla_me_bac_col: Optional[str] = None
+    cla_me_ass_col: Optional[str] = None
+    cla_me_eti_col: Optional[str] = None
+    sinan_auxiliary_cid10_cols: Optional[List[str]] = None
     evolucao_col: Optional[str] = None
     criterio_col: Optional[str] = None
     lab_puncao_col: Optional[str] = None
@@ -6480,6 +6778,10 @@ def default_selections(source: str, columns: Sequence[str]) -> ColumnSelection:
     if source == "SINAN":
         sel.classi_fin_col = choose_candidate(columns, ["CLASSI_FIN"])
         sel.con_diages_col = choose_candidate(columns, ["CON_DIAGES"])
+        sel.cla_me_bac_col = choose_candidate(columns, ["CLA_ME_BAC", "CLASSIFICACAO_BACTERIA", "CLASS_BACTERIA"])
+        sel.cla_me_ass_col = choose_candidate(columns, ["CLA_ME_ASS", "CLASSIFICACAO_ASSEPTICA", "CLASS_ASSEPTICA"])
+        sel.cla_me_eti_col = choose_candidate(columns, ["CLA_ME_ETI", "CLASSIFICACAO_ETIOLOGIA", "CLASS_ETIOLOGIA"])
+        sel.sinan_auxiliary_cid10_cols = choose_candidates(columns, SINAN_AUXILIARY_CID10_CANDIDATES, max_items=12)
         sel.evolucao_col = choose_candidate(columns, ["EVOLUCAO"])
         sel.criterio_col = choose_candidate(columns, ["CRITERIO"])
         sel.lab_puncao_col = choose_candidate(columns, ["LAB_PUNCAO", "PUNCAO", "PUNCAO_LCR", "PUNCAO_LOMBAR"])
@@ -6552,18 +6854,33 @@ def build_expressions(source: str, sel: ColumnSelection) -> Dict[str, Optional[s
         exprs["con_code"] = clean_code_expr(sel.con_diages_col, pad2=True) if sel.con_diages_col else None
         exprs["con_label"] = case_from_mapping(exprs["con_code"], SINAN_CON_DIAGES, "Sem conclusão diagnóstica/ignorado") if exprs["con_code"] else None
         exprs["con_group"] = case_from_mapping(exprs["con_code"], SINAN_CON_GROUP, "Sem conclusão diagnóstica/ignorado") if exprs["con_code"] else None
+        exprs["cla_me_bac_code"] = clean_code_expr(sel.cla_me_bac_col, pad2=True) if sel.cla_me_bac_col else None
+        exprs["cla_me_bac_label"] = case_from_mapping(exprs["cla_me_bac_code"], SINAN_CLA_ME_BAC, "Sem bactéria especificada/ignorado") if exprs["cla_me_bac_code"] else None
+        exprs["cla_me_ass_code"] = clean_code_expr(sel.cla_me_ass_col, pad2=True) if sel.cla_me_ass_col else None
+        exprs["cla_me_ass_label"] = case_from_mapping(exprs["cla_me_ass_code"], SINAN_CLA_ME_ASS, "Sem agente viral/asséptico especificado") if exprs["cla_me_ass_code"] else None
+        exprs["cla_me_eti_code"] = clean_code_expr(sel.cla_me_eti_col, pad2=True) if sel.cla_me_eti_col else None
+        exprs["cla_me_eti_label"] = case_from_mapping(exprs["cla_me_eti_code"], SINAN_CLA_ME_ETI, "Sem outra etiologia especificada") if exprs["cla_me_eti_code"] else None
+        exprs["sinan_aux_text"] = text_concat_expr(sel.sinan_auxiliary_cid10_cols or [])
         if exprs["con_code"]:
-            exprs["sinan_cid10_conversion_group"] = sinan_cid10_conversion_group_expr(exprs["con_code"])
-            exprs["sinan_cid10_conversion_type"] = sinan_cid10_conversion_type_expr(exprs["con_code"])
+            exprs["sinan_cid10_conversion_group"] = sinan_cid10_conversion_group_expr(exprs["con_code"], exprs.get("cla_me_bac_code"), exprs.get("sinan_aux_text"))
+            exprs["sinan_cid10_conversion_type"] = sinan_cid10_conversion_type_expr(exprs["con_code"], exprs.get("cla_me_bac_code"), exprs.get("sinan_aux_text"))
+            exprs["sinan_cid10_conversion_reason"] = sinan_cid10_conversion_reason_expr(exprs["con_code"], exprs.get("cla_me_bac_code"), exprs.get("sinan_aux_text"))
             exprs["sinan_cid10_conversion_include"] = sinan_cid10_conversion_include_expr(exprs["con_code"])
+            exprs["sinan_g04_2_alert"] = sinan_g04_2_alert_expr(exprs["con_code"], exprs.get("sinan_aux_text"))
+            exprs["sinan_g04_2_trigger"] = sinan_g04_2_trigger_expr(exprs.get("sinan_aux_text"))
         else:
             exprs["sinan_cid10_conversion_group"] = None
             exprs["sinan_cid10_conversion_type"] = None
+            exprs["sinan_cid10_conversion_reason"] = None
             exprs["sinan_cid10_conversion_include"] = None
+            exprs["sinan_g04_2_alert"] = None
+            exprs["sinan_g04_2_trigger"] = None
         exprs["criterio_code"] = clean_code_expr(sel.criterio_col) if sel.criterio_col else None
         exprs["criterio_label"] = case_from_mapping(exprs["criterio_code"], SINAN_CRITERIO, "Sem critério/ignorado") if exprs["criterio_code"] else None
-        exprs["puncao_label"] = case_from_mapping(clean_code_expr(sel.lab_puncao_col), YES_NO_IGN, "Sem informação") if sel.lab_puncao_col else None
-        exprs["quimio_label"] = case_from_mapping(clean_code_expr(sel.lab_liquor_col), YES_NO_IGN, "Sem informação") if sel.lab_liquor_col else None
+        exprs["puncao_code"] = clean_code_expr(sel.lab_puncao_col) if sel.lab_puncao_col else None
+        exprs["puncao_label"] = case_from_mapping(exprs["puncao_code"], YES_NO_IGN, "Sem informação") if exprs["puncao_code"] else None
+        exprs["quimio_code"] = clean_code_expr(sel.lab_liquor_col) if sel.lab_liquor_col else None
+        exprs["quimio_label"] = case_from_mapping(exprs["quimio_code"], YES_NO_IGN, "Sem informação") if exprs["quimio_code"] else None
         exprs["lab_hema"] = numeric_expr(sel.lab_hema_col) if sel.lab_hema_col else None
         exprs["lab_neutro"] = numeric_expr(sel.lab_neutro_col) if sel.lab_neutro_col else None
         exprs["lab_glico"] = numeric_expr(sel.lab_glico_col) if sel.lab_glico_col else None
@@ -6775,16 +7092,24 @@ def query_sinan_cid10_conversion(table: LoadedTable, exprs: Dict[str, Optional[s
         return pd.DataFrame()
     con_label = exprs.get("con_label") or "NULL"
     con_group = exprs.get("con_group") or "NULL"
+    bac_label = exprs.get("cla_me_bac_label") or "NULL"
+    ass_label = exprs.get("cla_me_ass_label") or "NULL"
+    eti_label = exprs.get("cla_me_eti_label") or "NULL"
     cid_group = exprs.get("sinan_cid10_conversion_group") or sinan_cid10_conversion_group_expr(con_code)
     cid_type = exprs.get("sinan_cid10_conversion_type") or sinan_cid10_conversion_type_expr(con_code)
+    cid_reason = exprs.get("sinan_cid10_conversion_reason") or "NULL"
     include = exprs.get("sinan_cid10_conversion_include") or sinan_cid10_conversion_include_expr(con_code)
     sql = f"""
         WITH base AS (
             SELECT {con_code} AS con_code,
                    {con_label} AS conclusao_diagnostica,
                    {con_group} AS grupo_etiologico_sinan,
+                   {bac_label} AS bacteria_sinan,
+                   {ass_label} AS agente_asseptica_sinan,
+                   {eti_label} AS outra_etiologia_sinan,
                    {cid_group} AS cid10_grupo,
                    {cid_type} AS cid10_classificacao,
+                   {cid_reason} AS justificativa_cid10,
                    {include} AS incluido_comparacao
             FROM {table.ref_sql}
             {where_sql}
@@ -6797,7 +7122,15 @@ def query_sinan_cid10_conversion(table: LoadedTable, exprs: Dict[str, Optional[s
                    string_agg(DISTINCT conclusao_diagnostica, '; ' ORDER BY conclusao_diagnostica)
                        FILTER (WHERE conclusao_diagnostica IS NOT NULL) AS conclusoes_sinan,
                    string_agg(DISTINCT grupo_etiologico_sinan, '; ' ORDER BY grupo_etiologico_sinan)
-                       FILTER (WHERE grupo_etiologico_sinan IS NOT NULL) AS grupos_sinan
+                       FILTER (WHERE grupo_etiologico_sinan IS NOT NULL) AS grupos_sinan,
+                   string_agg(DISTINCT bacteria_sinan, '; ' ORDER BY bacteria_sinan)
+                       FILTER (WHERE bacteria_sinan IS NOT NULL) AS bacterias_sinan,
+                   string_agg(DISTINCT agente_asseptica_sinan, '; ' ORDER BY agente_asseptica_sinan)
+                       FILTER (WHERE agente_asseptica_sinan IS NOT NULL) AS agentes_asseptica_sinan,
+                   string_agg(DISTINCT outra_etiologia_sinan, '; ' ORDER BY outra_etiologia_sinan)
+                       FILTER (WHERE outra_etiologia_sinan IS NOT NULL) AS outras_etiologias_sinan,
+                   string_agg(DISTINCT justificativa_cid10, '; ' ORDER BY justificativa_cid10)
+                       FILTER (WHERE justificativa_cid10 IS NOT NULL) AS justificativas
             FROM base
             GROUP BY 1, 2, 3
         )
@@ -6809,6 +7142,47 @@ def query_sinan_cid10_conversion(table: LoadedTable, exprs: Dict[str, Optional[s
         FROM agg
         ORDER BY CASE WHEN incluido_comparacao = 'Sim' THEN 0 ELSE 1 END,
                  n DESC, cid10_grupo
+    """
+    return run_query(table, sql)
+
+
+def query_sinan_g04_2_alert(table: LoadedTable, exprs: Dict[str, Optional[str]], where_sql: str) -> pd.DataFrame:
+    alert_expr = exprs.get("sinan_g04_2_alert")
+    if not alert_expr:
+        return pd.DataFrame()
+    trigger_expr = exprs.get("sinan_g04_2_trigger") or "NULL"
+    con_label = exprs.get("con_label") or "NULL"
+    con_group = exprs.get("con_group") or "NULL"
+    cid_type = exprs.get("sinan_cid10_conversion_type") or "NULL"
+    sql = f"""
+        WITH base AS (
+            SELECT {alert_expr} AS alerta_g04_2,
+                   {trigger_expr} AS termo_detectado,
+                   {con_label} AS conclusao_diagnostica,
+                   {con_group} AS grupo_etiologico_sinan,
+                   {cid_type} AS cid10_convertido_principal
+            FROM {table.ref_sql}
+            {where_sql}
+        ), agg AS (
+            SELECT alerta_g04_2,
+                   termo_detectado,
+                   COUNT(*) AS n,
+                   string_agg(DISTINCT conclusao_diagnostica, '; ' ORDER BY conclusao_diagnostica)
+                       FILTER (WHERE conclusao_diagnostica IS NOT NULL) AS conclusoes_sinan,
+                   string_agg(DISTINCT grupo_etiologico_sinan, '; ' ORDER BY grupo_etiologico_sinan)
+                       FILTER (WHERE grupo_etiologico_sinan IS NOT NULL) AS grupos_sinan,
+                   string_agg(DISTINCT cid10_convertido_principal, '; ' ORDER BY cid10_convertido_principal)
+                       FILTER (WHERE cid10_convertido_principal IS NOT NULL) AS cid10_convertido_principal
+            FROM base
+            GROUP BY 1, 2
+        )
+        SELECT *,
+               SUM(n) OVER () AS denominador,
+               CASE WHEN SUM(n) OVER () > 0 THEN ROUND(100.0 * n / SUM(n) OVER (), 2) ELSE NULL END AS pct
+        FROM agg
+        ORDER BY CASE WHEN alerta_g04_2 LIKE 'Alerta G04.2%' THEN 0
+                      WHEN alerta_g04_2 LIKE 'Menção%' THEN 1 ELSE 2 END,
+                 n DESC
     """
     return run_query(table, sql)
 
@@ -7247,16 +7621,28 @@ def query_enriched_preview(table: LoadedTable, sel: ColumnSelection, exprs: Dict
         ("sinan_classificacao_final", exprs.get("classi_label")),
         ("sinan_conclusao_diagnostica", exprs.get("con_label")),
         ("sinan_grupo_etiologico", exprs.get("con_group")),
+        ("sinan_cla_me_bac", exprs.get("cla_me_bac_label")),
+        ("sinan_cla_me_ass", exprs.get("cla_me_ass_label")),
+        ("sinan_cla_me_eti", exprs.get("cla_me_eti_label")),
         ("sinan_cid10_convertido_grupo", exprs.get("sinan_cid10_conversion_group")),
         ("sinan_cid10_convertido_tipo", exprs.get("sinan_cid10_conversion_type")),
+        ("sinan_cid10_justificativa", exprs.get("sinan_cid10_conversion_reason")),
         ("sinan_cid10_inclui_comparacao", exprs.get("sinan_cid10_conversion_include")),
+        ("sinan_alerta_g04_2_modificado", exprs.get("sinan_g04_2_alert")),
+        ("sinan_termo_g04_2_detectado", exprs.get("sinan_g04_2_trigger")),
         ("sinan_evolucao", exprs.get("evol_label")),
         ("sinan_criterio", exprs.get("criterio_label")),
         ("sinan_puncao_laboratorial", exprs.get("puncao_label")),
         ("sinan_exame_quimiocitologico_liquor_lcr", exprs.get("quimio_label")),
+        ("sinan_lab_hemacias", exprs.get("lab_hema")),
+        ("sinan_lab_neutrofilos", exprs.get("lab_neutro")),
         ("sinan_lab_glicose", exprs.get("lab_glico")),
-        ("sinan_lab_proteinas", exprs.get("lab_prot")),
         ("sinan_lab_leucocitos", exprs.get("lab_leuco")),
+        ("sinan_lab_eosinofilos", exprs.get("lab_eosi")),
+        ("sinan_lab_proteinas", exprs.get("lab_prot")),
+        ("sinan_lab_monocitos", exprs.get("lab_mono")),
+        ("sinan_lab_linfocitos", exprs.get("lab_linfo")),
+        ("sinan_lab_cloreto", exprs.get("lab_clor")),
         ("sim_obito_gravidez", exprs.get("obitograv_label")),
         ("sim_obito_puerperio", exprs.get("obitopuerp_label")),
         ("ciha_morte", exprs.get("morte_code")),
@@ -7278,6 +7664,10 @@ def query_enriched_preview(table: LoadedTable, sel: ColumnSelection, exprs: Dict
         *sel.cid_cols,
         sel.classi_fin_col,
         sel.con_diages_col,
+        sel.cla_me_bac_col,
+        sel.cla_me_ass_col,
+        sel.cla_me_eti_col,
+        *(sel.sinan_auxiliary_cid10_cols or []),
         sel.evolucao_col,
         sel.criterio_col,
         sel.lab_puncao_col,
@@ -7423,8 +7813,18 @@ def render_cid_reference() -> None:
     copyable_dataframe(pd.DataFrame(CID_RULES)[["grupo", "padrao", "rotulo"]], use_container_width=True, hide_index=True)
     st.caption(
         "O app procura A17.0, A39.0, A87*, G00*, G01*, G02*, G03* e G04.2 nos campos selecionados. "
-        "No SINAN, esse CID costuma ser apenas o agravo geral; a etiologia específica deve vir de CON_DIAGES e campos relacionados."
+        "No SINAN, esse CID costuma ser apenas o agravo geral; a etiologia específica deve vir de CON_DIAGES e campos relacionados. "
+        "G04.2 é tratado como alerta de meningoencefalite/meningomielite, não como conversão automática de CON_DIAGES=05."
     )
+
+
+def render_quimio_interpretation() -> None:
+    st.markdown("### Interpretação usual do exame quimiocitológico do líquor (LCR)")
+    st.caption(
+        "Padrões de LCR ajudam a levantar hipóteses, mas não substituem cultura, PCR, Gram, tinta nanquim, sorologia, "
+        "epidemiologia e avaliação clínica. Os limites variam com idade, coleta traumática, antibiótico prévio e laboratório."
+    )
+    copyable_dataframe(pd.DataFrame(SINAN_QUIMIO_INTERPRETATION_ROWS), use_container_width=True, hide_index=True)
 
 
 def render_loader(source: str) -> Optional[LoadedTable]:
@@ -7540,6 +7940,30 @@ def render_column_config(source: str, columns: Sequence[str]) -> ColumnSelection
                 dt_encerramento_col = select("DT_ENCERRA", defaults.dt_encerramento_col, f"dt_enc_{source}")
                 dt_notificacao_col = select("DT_NOTIFIC", defaults.dt_notificacao_col, f"dt_notif_{source}")
 
+            st.markdown("**Refinamento etiológico e CID-10 no SINAN**")
+            st.caption(
+                "Use estes campos para refinar CON_DIAGES=05 e para criar alertas de possível G04.2. "
+                "G04.2 não é aplicado automaticamente somente por 'meningite por outras bactérias'."
+            )
+            r1, r2, r3 = st.columns(3)
+            with r1:
+                cla_me_bac_col = select("CLA_ME_BAC — bactéria em outras bacterianas", defaults.cla_me_bac_col, f"cla_me_bac_{source}")
+            with r2:
+                cla_me_ass_col = select("CLA_ME_ASS — agente asséptica/viral", defaults.cla_me_ass_col, f"cla_me_ass_{source}")
+            with r3:
+                cla_me_eti_col = select("CLA_ME_ETI — outra etiologia", defaults.cla_me_eti_col, f"cla_me_eti_{source}")
+            sinan_auxiliary_cid10_cols = st.multiselect(
+                "Campos textuais/auxiliares para procurar agente, encefalite ou mielite",
+                options=list(columns),
+                default=[c for c in (defaults.sinan_auxiliary_cid10_cols or []) if c in columns],
+                key=f"sinan_aux_cid10_{source}",
+                help=(
+                    "Selecione campos como outros sintomas, observações, investigação, classificação bacteriana/etiológica, "
+                    "ou qualquer campo textual que possa mencionar encefalite, mielite, meningomielite, "
+                    "meningoencefalite, listeriose, leptospirose, sífilis etc."
+                ),
+            )
+
             st.markdown("**Parâmetros do Exame Quimiocitológico do líquor (LCR)**")
             q1, q2, q3 = st.columns(3)
             with q1:
@@ -7560,6 +7984,8 @@ def render_column_config(source: str, columns: Sequence[str]) -> ColumnSelection
                 race_col=race_col, municipality_res_col=mun_res, municipality_event_col=mun_event,
                 cid_cols=cid_cols, age_mode=age_mode,
                 classi_fin_col=classi_fin_col, con_diages_col=con_diages_col,
+                cla_me_bac_col=cla_me_bac_col, cla_me_ass_col=cla_me_ass_col,
+                cla_me_eti_col=cla_me_eti_col, sinan_auxiliary_cid10_cols=sinan_auxiliary_cid10_cols,
                 evolucao_col=evolucao_col, criterio_col=criterio_col,
                 lab_puncao_col=lab_puncao_col, lab_liquor_col=lab_liquor_col,
                 lab_hema_col=lab_hema_col, lab_neutro_col=lab_neutro_col,
@@ -8132,10 +8558,14 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
 
     st.markdown("### Classificação específica do SINAN")
     st.info(
-        "No SINAN, o CID bruto do agravo pode estar como G039 para quase todos os registros. "
-        "Por isso, nesta aba o gráfico bruto de distribuição por CID-10 foi substituído pela conversão de CON_DIAGES/grupo etiológico para famílias CID-10 comparáveis com SIM e CIHA."
+        "No SINAN, o CID bruto do agravo pode estar como G039 para muitos registros. "
+        "Por isso, esta aba prioriza CON_DIAGES e os campos complementares CLA_ME_BAC, CLA_ME_ASS e CLA_ME_ETI. "
+        "CON_DIAGES=05 deixou de ser convertido automaticamente para G04.2; ele é refinado como G00 ou G01 quando há informação suficiente."
     )
-    st.caption(f"No bloco do exame quimiocitológico, o material analisado é: {SINAN_QUIMIO_MATERIAL}.")
+    st.caption(
+        f"No bloco do exame quimiocitológico, o material analisado é: {SINAN_QUIMIO_MATERIAL}. "
+        "G04.2 aparece como alerta operacional somente quando campos auxiliares mencionam encefalite/mielite."
+    )
 
     # O gráfico CON_DIAGES detalhado foi removido porque o Grupo etiológico SINAN já é derivado do mesmo campo,
     # com agrupamento mais adequado para leitura epidemiológica.
@@ -8175,28 +8605,64 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                     )
                     fig_conv.update_layout(yaxis={"categoryorder": "total ascending"})
                     st.plotly_chart(fig_conv, use_container_width=True)
-                    copyable_dataframe(
-                        conv_yes[["cid10_grupo", "cid10_classificacao", "n", "pct", "grupos_sinan", "conclusoes_sinan"]],
-                        use_container_width=True,
-                        hide_index=True,
-                    )
+                    display_cols = [
+                        c for c in [
+                            "cid10_grupo", "cid10_classificacao", "n", "pct",
+                            "grupos_sinan", "conclusoes_sinan", "bacterias_sinan",
+                            "agentes_asseptica_sinan", "outras_etiologias_sinan", "justificativas",
+                        ]
+                        if c in conv_yes.columns
+                    ]
+                    copyable_dataframe(conv_yes[display_cols], use_container_width=True, hide_index=True)
                     download_button(conv_yes, "sinan_cid10_conversao_grupo_etiologico.csv")
 
                 with st.expander("Regra usada para converter CON_DIAGES em CID-10"):
+                    st.markdown("**Conversão principal CON_DIAGES -> família CID-10**")
                     copyable_dataframe(pd.DataFrame(SINAN_CID10_MAPPING_ROWS), use_container_width=True, hide_index=True)
+                    st.markdown("**Refinamento específico para CON_DIAGES=05 — meningite por outras bactérias**")
+                    copyable_dataframe(pd.DataFrame(SINAN_OTHER_BACTERIA_CID10_RULE_ROWS), use_container_width=True, hide_index=True)
+                    st.markdown("**Uso de G04.2 como alerta operacional, não como conversão etiológica simples**")
+                    copyable_dataframe(pd.DataFrame(SINAN_G04_2_ALERT_RULE_ROWS), use_container_width=True, hide_index=True)
                     st.caption(
                         "Observação: CON_DIAGES 01 (meningococcemia isolada) fica fora da conversão; "
-                        "CON_DIAGES 02 e 03 entram como A39.0; CON_DIAGES 05 entra como G04.2 conforme a regra operacional solicitada. "
-                        "A categoria 08 foi mapeada para G02 por coerência com o CID-10, pois no SINAN ela representa outras etiologias infecciosas/parasitárias."
+                        "CON_DIAGES 02 e 03 entram como A39.0; CON_DIAGES 05 entra como G00 por padrão e como G01 quando CLA_ME_BAC/texto sugerem doença bacteriana classificada em outra parte. "
+                        "G04.2 é reservado a alerta de possível meningoencefalite/meningomielite quando houver menção textual compatível."
                     )
 
                 if not conv_no.empty:
                     st.caption("Registros não convertidos para a comparação CID-10, mantendo transparência da exclusão/ausência de mapeamento:")
-                    copyable_dataframe(
-                        conv_no[["cid10_grupo", "cid10_classificacao", "n", "pct", "conclusoes_sinan"]],
-                        use_container_width=True,
-                        hide_index=True,
-                    )
+                    conv_no_cols = [c for c in ["cid10_grupo", "cid10_classificacao", "n", "pct", "conclusoes_sinan", "justificativas"] if c in conv_no.columns]
+                    copyable_dataframe(conv_no[conv_no_cols], use_container_width=True, hide_index=True)
+
+
+    if exprs.get("sinan_g04_2_alert"):
+        g04_alert = query_sinan_g04_2_alert(table, exprs, graph_where)
+        if not g04_alert.empty:
+            g04_alert = add_text(g04_alert)
+            st.markdown("**CID-10 G04.2 — alerta operacional modificado**")
+            st.caption(
+                "Este bloco não altera a conversão principal para G00/G01/G02/G03/A87/A39.0/A17.0. "
+                "Ele apenas destaca registros em que campos auxiliares mencionam encefalite, mielite, meningoencefalite ou meningomielite."
+            )
+            fig_g04 = px.bar(
+                g04_alert,
+                x="n",
+                y="alerta_g04_2",
+                orientation="h",
+                text="texto",
+                title="SINAN: alerta operacional para possível G04.2",
+                labels={"alerta_g04_2": "Alerta", "n": "Registros", "pct": "%"},
+                hover_data={"texto": False, "pct": ":.2f", "termo_detectado": True, "conclusoes_sinan": True, "cid10_convertido_principal": True},
+            )
+            fig_g04.update_layout(yaxis={"categoryorder": "total ascending"})
+            st.plotly_chart(fig_g04, use_container_width=True)
+            copyable_dataframe(g04_alert, use_container_width=True, hide_index=True)
+            download_button(g04_alert, "sinan_alerta_g04_2_modificado.csv")
+    else:
+        st.info(
+            "Para gerar o alerta operacional de G04.2, selecione ao menos um campo textual/auxiliar do SINAN "
+            "na configuração de colunas, como outros sintomas, observações ou campos de investigação."
+        )
 
     for label, expr in [
         ("EVOLUCAO", exprs.get("evol_label")),
@@ -8221,6 +8687,9 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                 fig.update_layout(yaxis={"categoryorder": "total ascending"})
                 st.plotly_chart(fig, use_container_width=True)
                 copyable_dataframe(df, use_container_width=True, hide_index=True)
+
+    with st.expander("Como os parâmetros do LCR costumam se comportar por etiologia"):
+        render_quimio_interpretation()
 
     quimio_summary = query_sinan_quimio_summary(table, exprs, graph_where)
     if quimio_summary.empty:
@@ -8407,13 +8876,22 @@ def render_quality_tab(table: LoadedTable, source: str, base_where: str, exprs: 
         fields.update({
             "CLASSI_FIN": exprs.get("classi_code"),
             "CON_DIAGES": exprs.get("con_code"),
+            "CLA_ME_BAC": exprs.get("cla_me_bac_code"),
+            "CLA_ME_ASS": exprs.get("cla_me_ass_code"),
+            "CLA_ME_ETI": exprs.get("cla_me_eti_code"),
             "EVOLUCAO": exprs.get("evol_code"),
             "CRITERIO": exprs.get("criterio_code"),
-            "Punção Laboratorial": exprs.get("puncao_label"),
-            "Exame Quimiocitológico do líquor (LCR)": exprs.get("quimio_label"),
+            "Punção Laboratorial": exprs.get("puncao_code"),
+            "Exame Quimiocitológico do líquor (LCR)": exprs.get("quimio_code"),
+            "Hemácias": exprs.get("lab_hema"),
+            "Neutrófilos": exprs.get("lab_neutro"),
             "Glicose": exprs.get("lab_glico"),
-            "Proteínas": exprs.get("lab_prot"),
             "Leucócitos": exprs.get("lab_leuco"),
+            "Eosinófilos": exprs.get("lab_eosi"),
+            "Proteínas": exprs.get("lab_prot"),
+            "Monócitos": exprs.get("lab_mono"),
+            "Linfócitos": exprs.get("lab_linfo"),
+            "Cloreto": exprs.get("lab_clor"),
         })
     elif source == "CIHA":
         fields.update({"MORTE": exprs.get("morte_code"), "DIAS_PERM": exprs.get("dias_perm"), "MODALIDADE": exprs.get("modalidade_label")})
@@ -8723,6 +9201,7 @@ def render_methodology() -> None:
     )
     st.markdown("### Referência CID-10")
     render_cid_reference()
+    render_quimio_interpretation()
 
 
 def main() -> None:
