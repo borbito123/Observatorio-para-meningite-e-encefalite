@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import glob
 import hashlib
-import os
 import tempfile
 import textwrap
 import unicodedata
@@ -44,7 +43,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-05-13-v6-cid-g042-sinan"
+APP_VERSION = "2026-05-14-v7-numeric-expr-fixes"
 
 
 CID_RULES = [
@@ -6130,6 +6129,27 @@ def direct_age_expr(col: str) -> str:
     return f"TRY_CAST(REPLACE({txt}, ',', '.') AS DOUBLE)"
 
 
+def numeric_expr(col: str) -> str:
+    """Expressão SQL segura para converter campos numéricos DATASUS em DOUBLE.
+
+    Alguns campos laboratoriais chegam como inteiros, outros como texto, e alguns
+    podem vir com vírgula decimal. TRY_CAST evita que valores sujos interrompam
+    a execução do painel.
+    """
+    txt = clean_str_expr(col)
+    cleaned = f"regexp_replace({txt}, '[^0-9,\\.\\-+]', '', 'g')"
+    return f"""
+    CASE
+        WHEN {txt} IS NULL THEN NULL
+        WHEN regexp_matches({txt}, '^\\s*[-+]?\\d{{1,3}}(\\.\\d{{3}})+(,\\d+)?\\s*$')
+            THEN TRY_CAST(REPLACE(REPLACE({txt}, '.', ''), ',', '.') AS DOUBLE)
+        WHEN regexp_matches({txt}, '^\\s*[-+]?\\d+(,\\d+)?\\s*$')
+            THEN TRY_CAST(REPLACE({txt}, ',', '.') AS DOUBLE)
+        ELSE TRY_CAST(REPLACE({cleaned}, ',', '.') AS DOUBLE)
+    END
+    """
+
+
 def sex_expr(col: str) -> str:
     txt = clean_str_expr(col)
     return f"""
@@ -7388,7 +7408,6 @@ def render_loader(source: str) -> Optional[LoadedTable]:
 
 
 def render_column_config(source: str, columns: Sequence[str]) -> ColumnSelection:
-    cfg = SOURCE_CONFIG[source]
     defaults = default_selections(source, columns)
     age_options = ["Automático", "Anos diretos", "DATASUS codificada", "DATASUS com coluna de unidade"]
 
@@ -8386,9 +8405,9 @@ def render_quality_tab(table: LoadedTable, source: str, base_where: str, exprs: 
 def render_sql_lab(table: LoadedTable, source: str) -> None:
     st.markdown("### Laboratório SQL")
     st.caption("Use `{{tabela}}` como placeholder para a tabela carregada. O app substituirá pelo nome/referência SQL correta.")
-    example = f"""
+    example = """
     SELECT COUNT(*) AS registros
-    FROM {{tabela}};
+    FROM {tabela};
     """
     if source == "SINAN":
         example = """
