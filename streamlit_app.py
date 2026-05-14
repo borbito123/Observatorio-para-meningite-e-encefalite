@@ -46,7 +46,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-05-14-v9-cid10-g00-g01-g04alert-quimio"
+APP_VERSION = "2026-05-14-v11-cid10-g01-base-lcr-neutro-auto"
 
 
 CID_RULES = [
@@ -105,6 +105,9 @@ CID_MENINGITE_REGEX = (
     r"(A17[\.]?0|A39[\.]?0|A87[\.]?[0-9A-Z]?|G00[\.]?[0-9A-Z]?|"
     r"G01[\.]?[0-9A-Z]?|G02[\.]?[0-9A-Z]?|G03[\.]?[0-9A-Z]?|G04[\.]?2)"
 )
+
+CID_G01_PRESENT_REGEX = r"\*?G01[\.]?[0-9A-Z]?\*?"
+CID_G02_PRESENT_REGEX = r"\*?G02[\.]?[0-9A-Z]?\*?"
 
 SINAN_CON_DIAGES = {
     "01": "01 — meningococcemia",
@@ -322,28 +325,64 @@ SINAN_OTHER_BACTERIA_CID10_RULE_ROWS = [
     },
 ]
 
-SINAN_G04_2_ALERT_RULE_ROWS = [
+
+SINAN_G01_BASE_DISEASE_REFERENCE_ROWS = [
     {
-        "Regra": "Não usar G04.2 apenas por CON_DIAGES 05",
-        "Motivo": "Meningite por outras bactérias não confirma, por si só, meningoencefalite ou meningomielite.",
+        "Critério no SINAN": "CLA_ME_BAC 11 ou texto com Salmonella/salmonela",
+        "Doença de base provável": "Infecção por Salmonella sp / salmonelose invasiva",
+        "CID-10 da doença de base": "A02.2†",
+        "CID-10 da manifestação": "G01*",
     },
     {
-        "Regra": "Sinalizar possível G04.2 somente se houver contexto bacteriano + menção textual de encefalite, meningoencefalite, mielite ou meningomielite",
-        "Motivo": "G04.2 exige comprometimento encefálico e/ou medular bacteriano, não apenas meningite bacteriana.",
+        "Critério no SINAN": "CLA_ME_BAC 21 ou texto com Listeria/listeriose",
+        "Doença de base provável": "Listeriose / Listeria monocytogenes",
+        "CID-10 da doença de base": "A32.1†",
+        "CID-10 da manifestação": "G01*",
     },
     {
-        "Regra": "Exibir como alerta operacional/auditoria, não como CID-10 convertido principal do SINAN",
-        "Motivo": "A ficha SINAN de meningite não possui campo estruturado específico para meningoencefalite/meningomielite.",
+        "Critério no SINAN": "CLA_ME_BAC 45 ou texto com Treponema, sífilis ou neurossífilis",
+        "Doença de base provável": "Sífilis / neurossífilis",
+        "CID-10 da doença de base": "A52.1†; avaliar A50.4†/A51.4† conforme contexto",
+        "CID-10 da manifestação": "G01*",
+    },
+    {
+        "Critério no SINAN": "CLA_ME_BAC 49 ou texto com Leptospira/leptospirose",
+        "Doença de base provável": "Leptospirose",
+        "CID-10 da doença de base": "A27.-†",
+        "CID-10 da manifestação": "G01*",
+    },
+    {
+        "Critério no SINAN": "texto com carbúnculo/antraz",
+        "Doença de base provável": "Carbúnculo / antraz",
+        "CID-10 da doença de base": "A22.8†",
+        "CID-10 da manifestação": "G01*",
+    },
+    {
+        "Critério no SINAN": "texto com Lyme/Borrelia",
+        "Doença de base provável": "Doença de Lyme / borreliose",
+        "CID-10 da doença de base": "A69.2†",
+        "CID-10 da manifestação": "G01*",
+    },
+    {
+        "Critério no SINAN": "texto com febre tifóide/typhoid",
+        "Doença de base provável": "Febre tifóide",
+        "CID-10 da doença de base": "A01.0†",
+        "CID-10 da manifestação": "G01*",
+    },
+    {
+        "Critério no SINAN": "texto com gonococo/gonocócica",
+        "Doença de base provável": "Infecção gonocócica",
+        "CID-10 da doença de base": "A54.8†",
+        "CID-10 da manifestação": "G01*",
     },
 ]
 
-# Regex operacional para pistas textuais. Usado somente em campos auxiliares selecionados pelo usuário.
+# Regex operacional para pistas textuais. Usado somente em campos auxiliares detectados automaticamente.
 SINAN_G01_DETAIL_REGEX = (
     r"CARB[UÚ]NCULO|ANTRAZ|ANTHRAX|LYME|BORREL|TIF[OÓ]IDE|TYPHOID|"
     r"GONOCOC|GONOCOCO|SALMONEL|LEPTOSPI|LISTERI|NEUROSS[ÍI]FIL|NEUROSYPH|"
     r"S[ÍI]FIL|SYPHIL|TREPONEMA"
 )
-SINAN_G04_2_TEXT_REGEX = r"MENINGOENCEFALIT|ENCEFALIT|ENCEFALOMIELIT|MENINGOMIELIT|MIELIT"
 
 # Campos que o app tenta selecionar automaticamente como auxiliares para refino etiológico/textual.
 SINAN_AUXILIARY_CID10_CANDIDATES = [
@@ -424,6 +463,30 @@ SINAN_QUIMIO_INTERPRETATION_ROWS = [
         "Fúngica/TB": "Redução de cloreto é classicamente descrita em TB, mas deve ser interpretada com cautela.",
         "Helmintos/parasitária eosinofílica": "Sem padrão útil isolado.",
         "Protozoários": "Sem padrão útil isolado.",
+    },
+]
+
+
+SINAN_QUIMIO_REFERENCES = [
+    {
+        "Referência": "Bennett JE, Dolin R, Blaser MJ, eds. Mandell, Douglas, and Bennett's Principles and Practice of Infectious Diseases. Elsevier.",
+        "Uso no painel": "Base clínica geral para padrões de LCR em meningites bacterianas, virais, fúngicas, tuberculosas e parasitárias.",
+    },
+    {
+        "Referência": "Tunkel AR et al. Practice Guidelines for the Management of Bacterial Meningitis. Clinical Infectious Diseases. 2004;39:1267-1284.",
+        "Uso no painel": "Interpretação de meningite bacteriana e limitações dos marcadores de LCR isolados.",
+    },
+    {
+        "Referência": "MSD/Merck Manual Professional. Cerebrospinal Fluid Findings in Meningitis; Cerebrospinal Fluid Abnormalities in Various Disorders.",
+        "Uso no painel": "Resumo prático de predominância celular, proteína e glicose por síndrome/etiologia.",
+    },
+    {
+        "Referência": "Tunkel AR et al. 2017 IDSA Clinical Practice Guidelines for Healthcare-Associated Ventriculitis and Meningitis.",
+        "Uso no painel": "Ressalva de que normalidade de celularidade, glicose ou proteína não exclui infecção em contextos associados à assistência/neurocirurgia.",
+    },
+    {
+        "Referência": "WHO. Guidelines on meningitis diagnosis, treatment and care. 2025.",
+        "Uso no painel": "Reforço do papel de glicose, proteína, contagem total e diferencial de leucócitos, hemácias e Gram como investigação inicial do LCR.",
     },
 ]
 
@@ -6131,7 +6194,7 @@ SOURCE_CONFIG: Dict[str, SourceConfig] = {
         field_notes=[
             "No recorte enviado, o SINAN tende a ter ID_AGRAVO constante como G039.",
             "Para etiologia/forma clínica no SINAN, priorize CON_DIAGES; complemente com CLA_ME_BAC, CLA_ME_ASS, CLA_ME_ETI, CRITERIO e EVOLUCAO.",
-            "G04.2 não é inferido por CON_DIAGES=05; use os campos auxiliares para procurar meningoencefalite, meningomielite, encefalite ou mielite.",
+            "G04.2 não é inferido por CON_DIAGES=05; a classificação de 'outras bactérias' é refinada como G00 ou G01 conforme CLA_ME_BAC e campos complementares.",
         ],
     ),
     "SIM": SourceConfig(
@@ -6184,7 +6247,6 @@ FIELD_GUIDE = {
         ("CLA_ME_BAC", "bactéria em outras bacterianas", "refina CON_DIAGES=05 em G00 ou G01"),
         ("CLA_ME_ASS", "agente viral/asséptico", "detalha meningite asséptica/viral"),
         ("CLA_ME_ETI", "outra etiologia", "detalha fungos, protozoários e parasitas"),
-        ("campos textuais/auxiliares", "alerta G04.2", "procura encefalite, mielite, meningomielite ou meningoencefalite"),
         ("EVOLUCAO", "desfecho", "alta, óbito por meningite, óbito por outra causa"),
         ("CRITERIO", "critério de confirmação", "cultura, PCR, clínico, quimiocitológico etc."),
         ("LAB_PUNCAO", "investigação", "punção laboratorial/lombar realizada"),
@@ -6386,6 +6448,16 @@ def cid_source_expr(cols: Sequence[str]) -> Optional[str]:
     return None if not tests else "CASE " + " ".join(tests) + " ELSE NULL END"
 
 
+def cid_presence_expr(cols: Sequence[str], pattern: str) -> Optional[str]:
+    tests = []
+    for col in cols:
+        txt = f"UPPER(COALESCE({clean_str_expr(col)}, ''))"
+        tests.append(f"regexp_matches({txt}, {qstr(pattern)})")
+    if not tests:
+        return None
+    return " OR ".join(f"({t})" for t in tests)
+
+
 def cid_group_expr(cid_sql: str) -> str:
     clauses = [f"WHEN {cid_sql} LIKE {qstr(rule['prefixo'] + '%')} THEN {qstr(rule['grupo'])}" for rule in CID_RULES]
     return f"CASE WHEN {cid_sql} IS NULL THEN 'Sem CID de meningite detectado' {' '.join(clauses)} ELSE 'Outro CID capturado' END"
@@ -6397,10 +6469,9 @@ def cid_type_expr(cid_sql: str) -> str:
 
 
 def text_concat_expr(cols: Sequence[str]) -> Optional[str]:
-    """Concatena campos textuais selecionados em uma expressão SQL única.
+    """Concatena campos textuais detectados automaticamente em uma expressão SQL única.
 
-    Usado para procurar menções como encefalite, mielite, meningomielite,
-    meningoencefalite e nomes de agentes que não aparecem em CON_DIAGES.
+    Usado para procurar nomes de agentes e doenças de base que não aparecem de forma estruturada em CON_DIAGES.
     """
     clean_cols = [c for c in cols if c]
     if not clean_cols:
@@ -6432,9 +6503,9 @@ def _sinan_con05_detail_expr(bacteria_code_sql: Optional[str] = None, aux_text_s
     return f"""
     CASE
         WHEN ({g01_condition}) THEN 'CON_DIAGES=05 refinado como G01 por CLA_ME_BAC/texto: agente/doença bacteriana classificada em outra parte.'
-        WHEN {bacteria_code_sql or 'NULL'} IS NULL THEN 'CON_DIAGES=05 sem CLA_ME_BAC selecionado/preenchido: classificado conservadoramente como G00, não como G04.2.'
-        WHEN {bacteria_code_sql or 'NULL'} IN ('81') THEN 'CON_DIAGES=05 com bactéria não especificada: G00, não G04.2.'
-        ELSE 'CON_DIAGES=05 com bactéria comum/outra bactéria: G00, não G04.2.'
+        WHEN {bacteria_code_sql or 'NULL'} IS NULL THEN 'CON_DIAGES=05 sem CLA_ME_BAC detectado/preenchido: classificado conservadoramente como G00.'
+        WHEN {bacteria_code_sql or 'NULL'} IN ('81') THEN 'CON_DIAGES=05 com bactéria não especificada: G00.'
+        ELSE 'CON_DIAGES=05 com bactéria comum/outra bactéria: G00.'
     END
     """
 
@@ -6497,32 +6568,35 @@ def sinan_cid10_conversion_include_expr(con_code_sql: str) -> str:
     return f"CASE WHEN {con_code_sql} IN ({mapped}) THEN 'Sim' ELSE 'Não' END"
 
 
-def sinan_g04_2_alert_expr(con_code_sql: Optional[str], aux_text_sql: Optional[str]) -> Optional[str]:
-    if not (con_code_sql and aux_text_sql):
-        return None
-    mention = _regex_bool_expr(aux_text_sql, SINAN_G04_2_TEXT_REGEX)
-    bacterial_context = f"{con_code_sql} IN ('02', '03', '05', '09', '10')"
-    return f"""
-    CASE
-        WHEN ({mention}) AND ({bacterial_context}) THEN 'Alerta G04.2 modificado — menção de encefalite/mielite em contexto bacteriano'
-        WHEN ({mention}) THEN 'Menção de encefalite/mielite sem contexto bacteriano estruturado — revisar, não converter automaticamente'
-        ELSE 'Sem menção textual de encefalite/mielite nos campos auxiliares selecionados'
-    END
+
+def sinan_g01_base_disease_expr(bacteria_code_sql: Optional[str] = None, aux_text_sql: Optional[str] = None) -> str:
+    """Retorna a doença bacteriana de base provável quando a conversão do SINAN cai em G01.
+
+    G01 é uma manifestação em doença bacteriana classificada em outra parte. Assim, esta
+    expressão não tenta transformar todos os casos bacterianos em G01; ela só descreve a
+    doença de base provável quando os mesmos sinais usados no refinamento G01 aparecem em
+    CLA_ME_BAC ou em campos textuais/auxiliares.
     """
-
-
-def sinan_g04_2_trigger_expr(aux_text_sql: Optional[str]) -> Optional[str]:
-    if not aux_text_sql:
-        return None
-    txt = f"COALESCE({aux_text_sql}, '')"
+    bacteria = bacteria_code_sql or "NULL"
+    salmonella_text = _regex_bool_expr(aux_text_sql, r"SALMONEL")
+    listeria_text = _regex_bool_expr(aux_text_sql, r"LISTERI")
+    syphilis_text = _regex_bool_expr(aux_text_sql, r"NEUROSS[ÍI]FIL|NEUROSYPH|S[ÍI]FIL|SYPHIL|TREPONEMA")
+    leptospirosis_text = _regex_bool_expr(aux_text_sql, r"LEPTOSPI")
+    anthrax_text = _regex_bool_expr(aux_text_sql, r"CARB[UÚ]NCULO|ANTRAZ|ANTHRAX")
+    lyme_text = _regex_bool_expr(aux_text_sql, r"LYME|BORREL")
+    typhoid_text = _regex_bool_expr(aux_text_sql, r"TIF[OÓ]IDE|TYPHOID")
+    gonococcal_text = _regex_bool_expr(aux_text_sql, r"GONOCOC|GONOCOCO")
     return f"""
     CASE
-        WHEN regexp_matches({txt}, 'MENINGOENCEFALIT') THEN 'meningoencefalite'
-        WHEN regexp_matches({txt}, 'MENINGOMIELIT') THEN 'meningomielite'
-        WHEN regexp_matches({txt}, 'ENCEFALOMIELIT') THEN 'encefalomielite'
-        WHEN regexp_matches({txt}, 'ENCEFALIT') THEN 'encefalite'
-        WHEN regexp_matches({txt}, 'MIELIT') THEN 'mielite'
-        ELSE NULL
+        WHEN {bacteria} = '11' OR ({salmonella_text}) THEN 'Infecção por Salmonella sp / salmonelose invasiva — A02.2†'
+        WHEN {bacteria} = '21' OR ({listeria_text}) THEN 'Listeriose / Listeria monocytogenes — A32.1†'
+        WHEN {bacteria} = '45' OR ({syphilis_text}) THEN 'Sífilis / neurossífilis — A52.1†; avaliar A50.4†/A51.4† conforme contexto'
+        WHEN {bacteria} = '49' OR ({leptospirosis_text}) THEN 'Leptospirose — A27.-†'
+        WHEN ({anthrax_text}) THEN 'Carbúnculo / antraz — A22.8†'
+        WHEN ({lyme_text}) THEN 'Doença de Lyme / borreliose — A69.2†'
+        WHEN ({typhoid_text}) THEN 'Febre tifóide — A01.0†'
+        WHEN ({gonococcal_text}) THEN 'Infecção gonocócica — A54.8†'
+        ELSE 'G01 sem doença de base provável identificada nos campos disponíveis'
     END
     """
 
@@ -6838,6 +6912,8 @@ def build_expressions(source: str, sel: ColumnSelection) -> Dict[str, Optional[s
         "mun_event_label": municipality_display_expr(sel.municipality_event_col) if sel.municipality_event_col else None,
         "cid": cid_extract_expr(sel.cid_cols),
         "cid_source": cid_source_expr(sel.cid_cols),
+        "cid_g01_present": cid_presence_expr(sel.cid_cols, CID_G01_PRESENT_REGEX),
+        "cid_g02_present": cid_presence_expr(sel.cid_cols, CID_G02_PRESENT_REGEX),
     }
     if exprs["cid"]:
         exprs["cid_group"] = cid_group_expr(exprs["cid"])
@@ -6866,15 +6942,13 @@ def build_expressions(source: str, sel: ColumnSelection) -> Dict[str, Optional[s
             exprs["sinan_cid10_conversion_type"] = sinan_cid10_conversion_type_expr(exprs["con_code"], exprs.get("cla_me_bac_code"), exprs.get("sinan_aux_text"))
             exprs["sinan_cid10_conversion_reason"] = sinan_cid10_conversion_reason_expr(exprs["con_code"], exprs.get("cla_me_bac_code"), exprs.get("sinan_aux_text"))
             exprs["sinan_cid10_conversion_include"] = sinan_cid10_conversion_include_expr(exprs["con_code"])
-            exprs["sinan_g04_2_alert"] = sinan_g04_2_alert_expr(exprs["con_code"], exprs.get("sinan_aux_text"))
-            exprs["sinan_g04_2_trigger"] = sinan_g04_2_trigger_expr(exprs.get("sinan_aux_text"))
+            exprs["sinan_g01_base_disease"] = sinan_g01_base_disease_expr(exprs.get("cla_me_bac_code"), exprs.get("sinan_aux_text"))
         else:
             exprs["sinan_cid10_conversion_group"] = None
             exprs["sinan_cid10_conversion_type"] = None
             exprs["sinan_cid10_conversion_reason"] = None
             exprs["sinan_cid10_conversion_include"] = None
-            exprs["sinan_g04_2_alert"] = None
-            exprs["sinan_g04_2_trigger"] = None
+            exprs["sinan_g01_base_disease"] = None
         exprs["criterio_code"] = clean_code_expr(sel.criterio_col) if sel.criterio_col else None
         exprs["criterio_label"] = case_from_mapping(exprs["criterio_code"], SINAN_CRITERIO, "Sem critério/ignorado") if exprs["criterio_code"] else None
         exprs["puncao_code"] = clean_code_expr(sel.lab_puncao_col) if sel.lab_puncao_col else None
@@ -7086,6 +7160,46 @@ def query_cid_distribution(table: LoadedTable, exprs: Dict[str, Optional[str]], 
     return df
 
 
+def query_g01_g02_cid_distribution(table: LoadedTable, exprs: Dict[str, Optional[str]], where_sql: str) -> pd.DataFrame:
+    """Tabula G01/G02 em SIM/CIHA a partir do CID-10 bruto detectado.
+
+    A verificação usa presença de G01*/G02* em qualquer campo CID detectado, não apenas
+    o primeiro CID priorizado pela distribuição geral. Assim, G01/G02 não são perdidos
+    quando aparecem como diagnóstico/menção associado após outro CID de meningite.
+    """
+    g01 = exprs.get("cid_g01_present")
+    g02 = exprs.get("cid_g02_present")
+    if not (g01 or g02):
+        return pd.DataFrame()
+    g01_sql = g01 or "FALSE"
+    g02_sql = g02 or "FALSE"
+    sql = f"""
+        WITH base AS (
+            SELECT ({g01_sql}) AS tem_g01,
+                   ({g02_sql}) AS tem_g02
+            FROM {table.ref_sql}
+            {where_sql}
+        ), agg AS (
+            SELECT 'G01' AS grupo,
+                   'G01 — meningite bacteriana em doença classificada em outra parte' AS tipo,
+                   COUNT(*) FILTER (WHERE tem_g01) AS n
+            FROM base
+            UNION ALL
+            SELECT 'G02' AS grupo,
+                   'G02 — meningite em outras doenças infecciosas/parasitárias' AS tipo,
+                   COUNT(*) FILTER (WHERE tem_g02) AS n
+            FROM base
+        )
+        SELECT *,
+               SUM(n) OVER () AS denominador,
+               CASE WHEN SUM(n) OVER () > 0 THEN ROUND(100.0 * n / SUM(n) OVER (), 2) ELSE NULL END AS pct
+        FROM agg
+        WHERE n > 0
+        ORDER BY grupo
+    """
+    return run_query(table, sql)
+
+
 def query_sinan_cid10_conversion(table: LoadedTable, exprs: Dict[str, Optional[str]], where_sql: str) -> pd.DataFrame:
     con_code = exprs.get("con_code")
     if not con_code:
@@ -7099,6 +7213,7 @@ def query_sinan_cid10_conversion(table: LoadedTable, exprs: Dict[str, Optional[s
     cid_type = exprs.get("sinan_cid10_conversion_type") or sinan_cid10_conversion_type_expr(con_code)
     cid_reason = exprs.get("sinan_cid10_conversion_reason") or "NULL"
     include = exprs.get("sinan_cid10_conversion_include") or sinan_cid10_conversion_include_expr(con_code)
+    g01_base = exprs.get("sinan_g01_base_disease") or "NULL"
     sql = f"""
         WITH base AS (
             SELECT {con_code} AS con_code,
@@ -7110,6 +7225,7 @@ def query_sinan_cid10_conversion(table: LoadedTable, exprs: Dict[str, Optional[s
                    {cid_group} AS cid10_grupo,
                    {cid_type} AS cid10_classificacao,
                    {cid_reason} AS justificativa_cid10,
+                   {g01_base} AS doenca_base_g01_provavel,
                    {include} AS incluido_comparacao
             FROM {table.ref_sql}
             {where_sql}
@@ -7129,6 +7245,8 @@ def query_sinan_cid10_conversion(table: LoadedTable, exprs: Dict[str, Optional[s
                        FILTER (WHERE agente_asseptica_sinan IS NOT NULL) AS agentes_asseptica_sinan,
                    string_agg(DISTINCT outra_etiologia_sinan, '; ' ORDER BY outra_etiologia_sinan)
                        FILTER (WHERE outra_etiologia_sinan IS NOT NULL) AS outras_etiologias_sinan,
+                   string_agg(DISTINCT doenca_base_g01_provavel, '; ' ORDER BY doenca_base_g01_provavel)
+                       FILTER (WHERE cid10_grupo = 'G01' AND doenca_base_g01_provavel IS NOT NULL) AS doencas_base_g01_provaveis,
                    string_agg(DISTINCT justificativa_cid10, '; ' ORDER BY justificativa_cid10)
                        FILTER (WHERE justificativa_cid10 IS NOT NULL) AS justificativas
             FROM base
@@ -7146,43 +7264,45 @@ def query_sinan_cid10_conversion(table: LoadedTable, exprs: Dict[str, Optional[s
     return run_query(table, sql)
 
 
-def query_sinan_g04_2_alert(table: LoadedTable, exprs: Dict[str, Optional[str]], where_sql: str) -> pd.DataFrame:
-    alert_expr = exprs.get("sinan_g04_2_alert")
-    if not alert_expr:
-        return pd.DataFrame()
-    trigger_expr = exprs.get("sinan_g04_2_trigger") or "NULL"
+
+def query_sinan_g01_base_disease(table: LoadedTable, exprs: Dict[str, Optional[str]], where_sql: str) -> pd.DataFrame:
+    con_code = exprs.get("con_code")
+    cid_group = exprs.get("sinan_cid10_conversion_group")
+    include = exprs.get("sinan_cid10_conversion_include")
+    base_disease = exprs.get("sinan_g01_base_disease")
     con_label = exprs.get("con_label") or "NULL"
-    con_group = exprs.get("con_group") or "NULL"
-    cid_type = exprs.get("sinan_cid10_conversion_type") or "NULL"
+    bacteria = exprs.get("cla_me_bac_label") or "NULL"
+    reason = exprs.get("sinan_cid10_conversion_reason") or "NULL"
+    if not (con_code and cid_group and include and base_disease):
+        return pd.DataFrame()
     sql = f"""
         WITH base AS (
-            SELECT {alert_expr} AS alerta_g04_2,
-                   {trigger_expr} AS termo_detectado,
-                   {con_label} AS conclusao_diagnostica,
-                   {con_group} AS grupo_etiologico_sinan,
-                   {cid_type} AS cid10_convertido_principal
+            SELECT {cid_group} AS cid10_grupo,
+                   {include} AS incluido_comparacao,
+                   {base_disease} AS doenca_base_provavel,
+                   {con_label} AS conclusao_sinan,
+                   {bacteria} AS bacteria_sinan,
+                   {reason} AS justificativa
             FROM {table.ref_sql}
             {where_sql}
         ), agg AS (
-            SELECT alerta_g04_2,
-                   termo_detectado,
+            SELECT doenca_base_provavel,
                    COUNT(*) AS n,
-                   string_agg(DISTINCT conclusao_diagnostica, '; ' ORDER BY conclusao_diagnostica)
-                       FILTER (WHERE conclusao_diagnostica IS NOT NULL) AS conclusoes_sinan,
-                   string_agg(DISTINCT grupo_etiologico_sinan, '; ' ORDER BY grupo_etiologico_sinan)
-                       FILTER (WHERE grupo_etiologico_sinan IS NOT NULL) AS grupos_sinan,
-                   string_agg(DISTINCT cid10_convertido_principal, '; ' ORDER BY cid10_convertido_principal)
-                       FILTER (WHERE cid10_convertido_principal IS NOT NULL) AS cid10_convertido_principal
+                   string_agg(DISTINCT conclusao_sinan, '; ' ORDER BY conclusao_sinan)
+                       FILTER (WHERE conclusao_sinan IS NOT NULL) AS conclusoes_sinan,
+                   string_agg(DISTINCT bacteria_sinan, '; ' ORDER BY bacteria_sinan)
+                       FILTER (WHERE bacteria_sinan IS NOT NULL) AS bacterias_sinan,
+                   string_agg(DISTINCT justificativa, '; ' ORDER BY justificativa)
+                       FILTER (WHERE justificativa IS NOT NULL) AS justificativas
             FROM base
-            GROUP BY 1, 2
+            WHERE cid10_grupo = 'G01' AND incluido_comparacao = 'Sim'
+            GROUP BY 1
         )
         SELECT *,
                SUM(n) OVER () AS denominador,
                CASE WHEN SUM(n) OVER () > 0 THEN ROUND(100.0 * n / SUM(n) OVER (), 2) ELSE NULL END AS pct
         FROM agg
-        ORDER BY CASE WHEN alerta_g04_2 LIKE 'Alerta G04.2%' THEN 0
-                      WHEN alerta_g04_2 LIKE 'Menção%' THEN 1 ELSE 2 END,
-                 n DESC
+        ORDER BY n DESC, doenca_base_provavel
     """
     return run_query(table, sql)
 
@@ -7412,19 +7532,25 @@ def query_sinan_etiology_lethality(table: LoadedTable, exprs: Dict[str, Optional
 
 
 def query_sinan_diagnostics_by_year(table: LoadedTable, exprs: Dict[str, Optional[str]], where_sql: str) -> pd.DataFrame:
-    dt, classi, con_group = exprs.get("dt"), exprs.get("classi_code"), exprs.get("con_group")
-    if not (dt and classi and con_group):
+    dt = exprs.get("dt")
+    classi = exprs.get("classi_code")
+    cid_type = exprs.get("sinan_cid10_conversion_type")
+    include = exprs.get("sinan_cid10_conversion_include")
+    if not (dt and classi and cid_type and include):
         return pd.DataFrame()
     sql = f"""
         WITH base AS (
-            SELECT {dt} AS dt, {classi} AS classi, {con_group} AS grupo_etiologico
+            SELECT {dt} AS dt,
+                   {classi} AS classi,
+                   {cid_type} AS grupo_etiologico
             FROM {table.ref_sql}
-            {where_sql}
+            {append_clause(where_sql, f"{classi} = '1' AND {include} = 'Sim'")}
         )
-        SELECT EXTRACT(YEAR FROM dt) AS ano, grupo_etiologico,
-               COUNT(*) FILTER (WHERE classi = '1') AS confirmados
+        SELECT EXTRACT(YEAR FROM dt) AS ano,
+               grupo_etiologico,
+               COUNT(*) AS confirmados
         FROM base
-        WHERE dt IS NOT NULL
+        WHERE dt IS NOT NULL AND grupo_etiologico IS NOT NULL
         GROUP BY 1, 2
         ORDER BY 1, 2
     """
@@ -7628,8 +7754,7 @@ def query_enriched_preview(table: LoadedTable, sel: ColumnSelection, exprs: Dict
         ("sinan_cid10_convertido_tipo", exprs.get("sinan_cid10_conversion_type")),
         ("sinan_cid10_justificativa", exprs.get("sinan_cid10_conversion_reason")),
         ("sinan_cid10_inclui_comparacao", exprs.get("sinan_cid10_conversion_include")),
-        ("sinan_alerta_g04_2_modificado", exprs.get("sinan_g04_2_alert")),
-        ("sinan_termo_g04_2_detectado", exprs.get("sinan_g04_2_trigger")),
+        ("sinan_g01_doenca_base_provavel", exprs.get("sinan_g01_base_disease")),
         ("sinan_evolucao", exprs.get("evol_label")),
         ("sinan_criterio", exprs.get("criterio_label")),
         ("sinan_puncao_laboratorial", exprs.get("puncao_label")),
@@ -7812,9 +7937,9 @@ def render_field_guide(source: str) -> None:
 def render_cid_reference() -> None:
     copyable_dataframe(pd.DataFrame(CID_RULES)[["grupo", "padrao", "rotulo"]], use_container_width=True, hide_index=True)
     st.caption(
-        "O app procura A17.0, A39.0, A87*, G00*, G01*, G02*, G03* e G04.2 nos campos selecionados. "
-        "No SINAN, esse CID costuma ser apenas o agravo geral; a etiologia específica deve vir de CON_DIAGES e campos relacionados. "
-        "G04.2 é tratado como alerta de meningoencefalite/meningomielite, não como conversão automática de CON_DIAGES=05."
+        "O app procura A17.0, A39.0, A87*, G00*, G01*, G02*, G03* e G04.2 nos campos de CID-10. "
+        "No SIM e na CIHA, G01* e G02* são classificados diretamente a partir do CID-10 bruto informado. "
+        "No SINAN, a etiologia específica é derivada de CON_DIAGES e campos complementares; CON_DIAGES=05 não é convertido para G04.2."
     )
 
 
@@ -7825,6 +7950,8 @@ def render_quimio_interpretation() -> None:
         "epidemiologia e avaliação clínica. Os limites variam com idade, coleta traumática, antibiótico prévio e laboratório."
     )
     copyable_dataframe(pd.DataFrame(SINAN_QUIMIO_INTERPRETATION_ROWS), use_container_width=True, hide_index=True)
+    st.markdown("#### Referências bibliográficas usadas para esta síntese")
+    copyable_dataframe(pd.DataFrame(SINAN_QUIMIO_REFERENCES), use_container_width=True, hide_index=True)
 
 
 def render_loader(source: str) -> Optional[LoadedTable]:
@@ -7894,136 +8021,12 @@ def render_loader(source: str) -> Optional[LoadedTable]:
 
 
 def render_column_config(source: str, columns: Sequence[str]) -> ColumnSelection:
-    defaults = default_selections(source, columns)
-    age_options = ["Automático", "Anos diretos", "DATASUS codificada", "DATASUS com coluna de unidade"]
+    """Detecta automaticamente as colunas esperadas para cada base.
 
-    def select(label: str, default: Optional[str], key: str, help_text: Optional[str] = None) -> Optional[str]:
-        idx = columns.index(default) + 1 if default in columns else 0
-        return st.selectbox(label, [None] + list(columns), index=idx, key=key, format_func=lambda x: "(não usar)" if x is None else x, help=help_text)
-
-    with st.expander("1) Configuração de colunas", expanded=True):
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            date_col = select("Data principal", defaults.date_col, f"date_{source}")
-            sex_col = select("Sexo", defaults.sex_col, f"sex_{source}")
-            race_col = select("Raça/cor", defaults.race_col, f"race_{source}")
-        with c2:
-            age_col = select("Idade", defaults.age_col, f"age_{source}")
-            age_unit_col = select("Unidade da idade", defaults.age_unit_col, f"age_unit_{source}")
-            age_mode = st.selectbox("Interpretação da idade", age_options, index=age_options.index(defaults.age_mode) if defaults.age_mode in age_options else 0, key=f"age_mode_{source}")
-        with c3:
-            mun_res = select("Município de residência", defaults.municipality_res_col, f"mun_res_{source}")
-            mun_event = select("Município de ocorrência/atendimento/notificação", defaults.municipality_event_col, f"mun_event_{source}")
-        with c4:
-            cid_cols = st.multiselect(
-                "Campos para localizar CID-10",
-                options=list(columns),
-                default=[c for c in defaults.cid_cols if c in columns],
-                key=f"cid_cols_{source}",
-                help="No SIM/CIHA use causa básica/diagnósticos. No SINAN, ID_AGRAVO costuma ser G039; a etiologia específica fica em CON_DIAGES.",
-            )
-
-        if source == "SINAN":
-            st.markdown("**Campos específicos do SINAN**")
-            s1, s2, s3, s4 = st.columns(4)
-            with s1:
-                classi_fin_col = select("CLASSI_FIN", defaults.classi_fin_col, f"classi_{source}")
-                con_diages_col = select("CON_DIAGES", defaults.con_diages_col, f"con_{source}")
-            with s2:
-                evolucao_col = select("EVOLUCAO", defaults.evolucao_col, f"evol_{source}")
-                criterio_col = select("CRITERIO", defaults.criterio_col, f"criterio_{source}")
-            with s3:
-                lab_puncao_col = select("LAB_PUNCAO — Punção Laboratorial", defaults.lab_puncao_col, f"puncao_{source}")
-                lab_liquor_col = select("LAB_LIQUOR — Exame Quimiocitológico do líquor (LCR)", defaults.lab_liquor_col, f"quimio_{source}")
-            with s4:
-                ate_hospit_col = select("ATE_HOSPIT", defaults.ate_hospit_col, f"hospit_{source}")
-                dt_encerramento_col = select("DT_ENCERRA", defaults.dt_encerramento_col, f"dt_enc_{source}")
-                dt_notificacao_col = select("DT_NOTIFIC", defaults.dt_notificacao_col, f"dt_notif_{source}")
-
-            st.markdown("**Refinamento etiológico e CID-10 no SINAN**")
-            st.caption(
-                "Use estes campos para refinar CON_DIAGES=05 e para criar alertas de possível G04.2. "
-                "G04.2 não é aplicado automaticamente somente por 'meningite por outras bactérias'."
-            )
-            r1, r2, r3 = st.columns(3)
-            with r1:
-                cla_me_bac_col = select("CLA_ME_BAC — bactéria em outras bacterianas", defaults.cla_me_bac_col, f"cla_me_bac_{source}")
-            with r2:
-                cla_me_ass_col = select("CLA_ME_ASS — agente asséptica/viral", defaults.cla_me_ass_col, f"cla_me_ass_{source}")
-            with r3:
-                cla_me_eti_col = select("CLA_ME_ETI — outra etiologia", defaults.cla_me_eti_col, f"cla_me_eti_{source}")
-            sinan_auxiliary_cid10_cols = st.multiselect(
-                "Campos textuais/auxiliares para procurar agente, encefalite ou mielite",
-                options=list(columns),
-                default=[c for c in (defaults.sinan_auxiliary_cid10_cols or []) if c in columns],
-                key=f"sinan_aux_cid10_{source}",
-                help=(
-                    "Selecione campos como outros sintomas, observações, investigação, classificação bacteriana/etiológica, "
-                    "ou qualquer campo textual que possa mencionar encefalite, mielite, meningomielite, "
-                    "meningoencefalite, listeriose, leptospirose, sífilis etc."
-                ),
-            )
-
-            st.markdown("**Parâmetros do Exame Quimiocitológico do líquor (LCR)**")
-            q1, q2, q3 = st.columns(3)
-            with q1:
-                lab_hema_col = select("LAB_HEMA — Hemácias", defaults.lab_hema_col, f"lab_hema_{source}")
-                lab_neutro_col = select("LAB_NEUTRO — Neutrófilos", defaults.lab_neutro_col, f"lab_neutro_{source}")
-                lab_glico_col = select("LAB_GLICO — Glicose", defaults.lab_glico_col, f"lab_glico_{source}")
-            with q2:
-                lab_leuco_col = select("LAB_LEUCO — Leucócitos", defaults.lab_leuco_col, f"lab_leuco_{source}")
-                lab_eosi_col = select("LAB_EOSI — Eosinófilos", defaults.lab_eosi_col, f"lab_eosi_{source}")
-                lab_prot_col = select("LAB_PROT — Proteínas", defaults.lab_prot_col, f"lab_prot_{source}")
-            with q3:
-                lab_mono_col = select("LAB_MONO — Monócitos", defaults.lab_mono_col, f"lab_mono_{source}")
-                lab_linfo_col = select("LAB_LINFO — Linfócitos", defaults.lab_linfo_col, f"lab_linfo_{source}")
-                lab_clor_col = select("LAB_CLOR — Cloreto", defaults.lab_clor_col, f"lab_clor_{source}")
-
-            return ColumnSelection(
-                date_col=date_col, sex_col=sex_col, age_col=age_col, age_unit_col=age_unit_col,
-                race_col=race_col, municipality_res_col=mun_res, municipality_event_col=mun_event,
-                cid_cols=cid_cols, age_mode=age_mode,
-                classi_fin_col=classi_fin_col, con_diages_col=con_diages_col,
-                cla_me_bac_col=cla_me_bac_col, cla_me_ass_col=cla_me_ass_col,
-                cla_me_eti_col=cla_me_eti_col, sinan_auxiliary_cid10_cols=sinan_auxiliary_cid10_cols,
-                evolucao_col=evolucao_col, criterio_col=criterio_col,
-                lab_puncao_col=lab_puncao_col, lab_liquor_col=lab_liquor_col,
-                lab_hema_col=lab_hema_col, lab_neutro_col=lab_neutro_col,
-                lab_glico_col=lab_glico_col, lab_leuco_col=lab_leuco_col,
-                lab_eosi_col=lab_eosi_col, lab_prot_col=lab_prot_col,
-                lab_mono_col=lab_mono_col, lab_linfo_col=lab_linfo_col, lab_clor_col=lab_clor_col,
-                ate_hospit_col=ate_hospit_col, dt_encerramento_col=dt_encerramento_col,
-                dt_notificacao_col=dt_notificacao_col,
-            )
-
-        if source == "SIM":
-            st.markdown("**Campos específicos do SIM**")
-            s1, s2, s3, s4 = st.columns(4)
-            with s1:
-                causabas_col = select("CAUSABAS", defaults.causabas_col, f"causabas_{source}")
-            with s2:
-                causabas_o_col = select("CAUSABAS_O", defaults.causabas_o_col, f"causabaso_{source}")
-            with s3:
-                obitograv_col = select("OBITOGRAV — óbito na gravidez", defaults.obitograv_col, f"obitograv_{source}")
-            with s4:
-                obitopuerp_col = select("OBITOPUERP — puerpério", defaults.obitopuerp_col, f"obitopuerp_{source}")
-            return ColumnSelection(
-                date_col, sex_col, age_col, age_unit_col, race_col, mun_res, mun_event, cid_cols, age_mode,
-                causabas_col=causabas_col, causabas_o_col=causabas_o_col,
-                obitograv_col=obitograv_col, obitopuerp_col=obitopuerp_col,
-            )
-
-        st.markdown("**Campos específicos da CIHA**")
-        s1, s2, s3 = st.columns(3)
-        with s1:
-            diag_princ_col = select("DIAG_PRINC", defaults.diag_princ_col, f"diagp_{source}")
-            diag_secun_col = select("DIAG_SECUN", defaults.diag_secun_col, f"diags_{source}")
-        with s2:
-            morte_col = select("MORTE", defaults.morte_col, f"morte_{source}")
-            dias_perm_col = select("DIAS_PERM", defaults.dias_perm_col, f"dias_{source}")
-        with s3:
-            modalidade_col = select("MODALIDADE", defaults.modalidade_col, f"modalidade_{source}")
-        return ColumnSelection(date_col, sex_col, age_col, age_unit_col, race_col, mun_res, mun_event, cid_cols, age_mode, diag_princ_col=diag_princ_col, diag_secun_col=diag_secun_col, morte_col=morte_col, dias_perm_col=dias_perm_col, modalidade_col=modalidade_col)
+    A interface manual de seleção de colunas foi omitida para manter o painel mais limpo.
+    Quando uma coluna não é encontrada, as abas correspondentes exibem avisos operacionais.
+    """
+    return default_selections(source, columns)
 
 
 def case_definition_clause(source: str, definition: str, exprs: Dict[str, Optional[str]]) -> Optional[str]:
@@ -8195,7 +8198,7 @@ def render_kpis(table: LoadedTable, source: str, base_where: str, graph_where: s
         cause = count_rows(table, append_clause(base_where, f"{exprs['causabas_cid']} IS NOT NULL"))
         k5.metric("Causa básica meningite", f"{cause:,}".replace(",", "."), f"{cause / total_base * 100:.1f}%" if total_base else None)
     else:
-        k5.metric("Tipo CID-10", "configurado" if exprs.get("cid") else "não configurado")
+        k5.metric("Tipo CID-10", "detectado" if exprs.get("cid") else "não detectado")
 
 
 def render_temporal_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dict[str, Optional[str]]) -> None:
@@ -8373,7 +8376,7 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
                 copyable_dataframe(hosp, use_container_width=True, hide_index=True)
                 download_button(hosp, "sinan_internacao_ate_hospit.csv")
         else:
-            st.info("Para gerar o gráfico de internação, selecione o campo ATE_HOSPIT na configuração de colunas do SINAN.")
+            st.info("Para gerar o gráfico de internação, o campo ATE_HOSPIT precisa existir no SINAN e ser detectado automaticamente.")
 
         etio = query_sinan_etiology_lethality(table, exprs, base_where)
         if not etio.empty:
@@ -8387,9 +8390,19 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
             download_button(etio, "sinan_letalidade_por_etiologia.csv")
         by_year = query_sinan_diagnostics_by_year(table, exprs, base_where)
         if not by_year.empty:
-            fig4 = px.area(by_year, x="ano", y="confirmados", color="grupo_etiologico", title="Confirmados por grupo etiológico — SINAN")
+            st.markdown("**Confirmados por grupo etiológico convertido em CID-10**")
+            st.caption("Usa a classificação CID-10 derivada de CON_DIAGES, CLA_ME_BAC e campos complementares do SINAN, restrita a casos confirmados.")
+            fig4 = px.area(
+                by_year,
+                x="ano",
+                y="confirmados",
+                color="grupo_etiologico",
+                title="Confirmados por grupo etiológico convertido em CID-10 — SINAN",
+                labels={"grupo_etiologico": "CID-10 convertido / grupo etiológico", "confirmados": "Confirmados", "ano": "Ano"},
+            )
             st.plotly_chart(fig4, use_container_width=True)
-            download_button(by_year, "sinan_confirmados_por_etiologia_ano.csv")
+            copyable_dataframe(by_year, use_container_width=True, hide_index=True)
+            download_button(by_year, "sinan_confirmados_por_cid10_convertido_ano.csv")
         return
 
     if source == "SIM":
@@ -8423,7 +8436,7 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
                 copyable_dataframe(grav, use_container_width=True, hide_index=True)
                 download_button(grav, "sim_obito_gravidez_obitograv.csv")
         else:
-            st.info("Para o gráfico de óbito na gravidez, selecione o campo OBITOGRAV na configuração de colunas do SIM.")
+            st.info("Para o gráfico de óbito na gravidez, o campo OBITOGRAV precisa existir no SIM e ser detectado automaticamente.")
 
         if exprs.get("dt") and exprs.get("obitopuerp_label"):
             puer = query_yearly_category(table, exprs["dt"], exprs["obitopuerp_label"], base_where)
@@ -8479,7 +8492,7 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
         copyable_dataframe(dias_dist, use_container_width=True, hide_index=True)
         download_button(dias_dist, "ciha_dias_permanencia_distribuicao.csv")
     else:
-        st.info("Para gerar o gráfico de dias de permanência, selecione o campo DIAS_PERM na configuração de colunas da CIHA.")
+        st.info("Para gerar o gráfico de dias de permanência, o campo DIAS_PERM precisa existir na CIHA e ser detectado automaticamente.")
 
 
 def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dict[str, Optional[str]]) -> None:
@@ -8503,7 +8516,7 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
         render_cid_reference()
         cid_dist = query_cid_distribution(table, exprs, graph_where)
         if cid_dist.empty:
-            st.warning("Selecione ao menos um campo CID-10 válido para ativar esta análise.")
+            st.warning("Não localizei campo CID-10 válido pela detecção automática para ativar esta análise.")
         else:
             cid_dist = add_text(cid_dist)
             fig = px.bar(
@@ -8521,13 +8534,36 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
             copyable_dataframe(cid_dist, use_container_width=True, hide_index=True)
             download_button(cid_dist, f"{source.lower()}_cid10_distribuicao.csv")
 
+            g01_g02 = query_g01_g02_cid_distribution(table, exprs, graph_where)
+            if not g01_g02.empty:
+                g01_g02 = add_text(g01_g02)
+                st.markdown("**Verificação específica — G01 e G02 em SIM/CIHA**")
+                st.caption(
+                    "Este bloco usa apenas CID-10 bruto informado no próprio SIM/CIHA. "
+                    "Não há conversão automática da doença de base para G01/G02 quando o código G01/G02 não aparece no campo CID."
+                )
+                fig_g01_g02 = px.bar(
+                    g01_g02,
+                    x="n",
+                    y="tipo",
+                    orientation="h",
+                    text="texto",
+                    title=f"{source}: registros classificados como G01 ou G02",
+                    labels={"tipo": "Tipo CID-10", "n": "Registros", "pct": "%"},
+                    hover_data={"texto": False, "pct": ":.2f", "denominador": True},
+                )
+                fig_g01_g02.update_layout(yaxis={"categoryorder": "total ascending"})
+                st.plotly_chart(fig_g01_g02, use_container_width=True)
+                copyable_dataframe(g01_g02, use_container_width=True, hide_index=True)
+                download_button(g01_g02, f"{source.lower()}_verificacao_g01_g02.csv")
+
         if source == "CIHA":
             st.markdown("### Óbitos CIHA — CID-10 destes")
             morte = exprs.get("morte_code")
             if not morte:
-                st.info("Para mostrar os óbitos da CIHA e seus CID-10, selecione o campo MORTE na configuração de colunas.")
+                st.info("Para mostrar os óbitos da CIHA e seus CID-10, o campo MORTE precisa existir na CIHA e ser detectado automaticamente.")
             elif not exprs.get("cid"):
-                st.info("Para mostrar o CID-10 dos óbitos da CIHA, selecione ao menos um campo de diagnóstico/CID-10.")
+                st.info("Para mostrar o CID-10 dos óbitos da CIHA, ao menos um campo de diagnóstico/CID-10 precisa existir e ser detectado automaticamente.")
             else:
                 death_where = append_clause(graph_where, f"{morte} = '1'")
                 total_deaths = count_rows(table, death_where)
@@ -8563,8 +8599,7 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
         "CON_DIAGES=05 deixou de ser convertido automaticamente para G04.2; ele é refinado como G00 ou G01 quando há informação suficiente."
     )
     st.caption(
-        f"No bloco do exame quimiocitológico, o material analisado é: {SINAN_QUIMIO_MATERIAL}. "
-        "G04.2 aparece como alerta operacional somente quando campos auxiliares mencionam encefalite/mielite."
+        f"No bloco do exame quimiocitológico, o material analisado é: {SINAN_QUIMIO_MATERIAL}."
     )
 
     # O gráfico CON_DIAGES detalhado foi removido porque o Grupo etiológico SINAN já é derivado do mesmo campo,
@@ -8609,7 +8644,8 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                         c for c in [
                             "cid10_grupo", "cid10_classificacao", "n", "pct",
                             "grupos_sinan", "conclusoes_sinan", "bacterias_sinan",
-                            "agentes_asseptica_sinan", "outras_etiologias_sinan", "justificativas",
+                            "agentes_asseptica_sinan", "outras_etiologias_sinan",
+                            "doencas_base_g01_provaveis", "justificativas",
                         ]
                         if c in conv_yes.columns
                     ]
@@ -8621,12 +8657,11 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                     copyable_dataframe(pd.DataFrame(SINAN_CID10_MAPPING_ROWS), use_container_width=True, hide_index=True)
                     st.markdown("**Refinamento específico para CON_DIAGES=05 — meningite por outras bactérias**")
                     copyable_dataframe(pd.DataFrame(SINAN_OTHER_BACTERIA_CID10_RULE_ROWS), use_container_width=True, hide_index=True)
-                    st.markdown("**Uso de G04.2 como alerta operacional, não como conversão etiológica simples**")
-                    copyable_dataframe(pd.DataFrame(SINAN_G04_2_ALERT_RULE_ROWS), use_container_width=True, hide_index=True)
+                    st.markdown("**G01 — doença bacteriana de base provável**")
+                    copyable_dataframe(pd.DataFrame(SINAN_G01_BASE_DISEASE_REFERENCE_ROWS), use_container_width=True, hide_index=True)
                     st.caption(
                         "Observação: CON_DIAGES 01 (meningococcemia isolada) fica fora da conversão; "
-                        "CON_DIAGES 02 e 03 entram como A39.0; CON_DIAGES 05 entra como G00 por padrão e como G01 quando CLA_ME_BAC/texto sugerem doença bacteriana classificada em outra parte. "
-                        "G04.2 é reservado a alerta de possível meningoencefalite/meningomielite quando houver menção textual compatível."
+                        "CON_DIAGES 02 e 03 entram como A39.0; CON_DIAGES 05 entra como G00 por padrão e como G01 quando CLA_ME_BAC/texto sugerem doença bacteriana classificada em outra parte."
                     )
 
                 if not conv_no.empty:
@@ -8635,34 +8670,29 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                     copyable_dataframe(conv_no[conv_no_cols], use_container_width=True, hide_index=True)
 
 
-    if exprs.get("sinan_g04_2_alert"):
-        g04_alert = query_sinan_g04_2_alert(table, exprs, graph_where)
-        if not g04_alert.empty:
-            g04_alert = add_text(g04_alert)
-            st.markdown("**CID-10 G04.2 — alerta operacional modificado**")
-            st.caption(
-                "Este bloco não altera a conversão principal para G00/G01/G02/G03/A87/A39.0/A17.0. "
-                "Ele apenas destaca registros em que campos auxiliares mencionam encefalite, mielite, meningoencefalite ou meningomielite."
-            )
-            fig_g04 = px.bar(
-                g04_alert,
-                x="n",
-                y="alerta_g04_2",
-                orientation="h",
-                text="texto",
-                title="SINAN: alerta operacional para possível G04.2",
-                labels={"alerta_g04_2": "Alerta", "n": "Registros", "pct": "%"},
-                hover_data={"texto": False, "pct": ":.2f", "termo_detectado": True, "conclusoes_sinan": True, "cid10_convertido_principal": True},
-            )
-            fig_g04.update_layout(yaxis={"categoryorder": "total ascending"})
-            st.plotly_chart(fig_g04, use_container_width=True)
-            copyable_dataframe(g04_alert, use_container_width=True, hide_index=True)
-            download_button(g04_alert, "sinan_alerta_g04_2_modificado.csv")
-    else:
-        st.info(
-            "Para gerar o alerta operacional de G04.2, selecione ao menos um campo textual/auxiliar do SINAN "
-            "na configuração de colunas, como outros sintomas, observações ou campos de investigação."
-        )
+                g01_base = query_sinan_g01_base_disease(table, exprs, graph_where)
+                if not g01_base.empty:
+                    g01_base = add_text(g01_base)
+                    st.markdown("**G01 + doença de base provável**")
+                    st.caption(
+                        "Este gráfico mostra apenas registros cuja conversão operacional resultou em G01. "
+                        "A doença de base provável é inferida de CLA_ME_BAC e dos campos textuais/auxiliares detectados automaticamente."
+                    )
+                    fig_g01 = px.bar(
+                        g01_base,
+                        x="n",
+                        y="doenca_base_provavel",
+                        orientation="h",
+                        text="texto",
+                        title="SINAN: G01 + doença bacteriana de base provável",
+                        labels={"doenca_base_provavel": "Doença de base provável", "n": "Registros", "pct": "%"},
+                        hover_data={"texto": False, "pct": ":.2f", "denominador": True, "conclusoes_sinan": True, "bacterias_sinan": True},
+                    )
+                    fig_g01.update_layout(yaxis={"categoryorder": "total ascending"})
+                    st.plotly_chart(fig_g01, use_container_width=True)
+                    copyable_dataframe(g01_base, use_container_width=True, hide_index=True)
+                    download_button(g01_base, "sinan_g01_doenca_base_provavel.csv")
+
 
     for label, expr in [
         ("EVOLUCAO", exprs.get("evol_label")),
@@ -8694,14 +8724,14 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
     quimio_summary = query_sinan_quimio_summary(table, exprs, graph_where)
     if quimio_summary.empty:
         st.info(
-            "Para gerar o resumo do Exame Quimiocitológico do líquor (LCR), selecione os campos laboratoriais do SINAN "
-            "na configuração de colunas, como LAB_GLICO, LAB_LEUCO e LAB_PROT."
+            "Para gerar o resumo do Exame Quimiocitológico do líquor (LCR), os campos laboratoriais do SINAN precisam existir "
+            "e ser detectados automaticamente, como LAB_GLICO, LAB_LEUCO, LAB_NEUTRO e LAB_PROT."
         )
     else:
-        for key, titulo in [("glico", "Glicose"), ("prot", "Proteínas"), ("leuco", "Leucócitos")]:
+        for key, titulo in [("glico", "Glicose"), ("prot", "Proteínas"), ("leuco", "Leucócitos"), ("neutro", "Neutrófilos")]:
             expr = exprs.get(f"lab_{key}")
             if not expr:
-                st.info(f"Para gerar a distribuição de {titulo}, selecione o campo correspondente na configuração de colunas do SINAN.")
+                st.info(f"Para gerar a distribuição de {titulo}, o campo correspondente precisa existir no SINAN e ser detectado automaticamente.")
                 continue
             dist = query_sinan_numeric_distribution(table, expr, graph_where)
             if dist.empty:
@@ -8859,7 +8889,7 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
 def render_quality_tab(table: LoadedTable, source: str, base_where: str, exprs: Dict[str, Optional[str]]) -> None:
     st.markdown("### Campos importantes não preenchidos")
     st.caption(
-        "Esta aba usa os filtros-base e mede, para cada campo-chave configurado, quantos registros estão sem preenchimento válido. "
+        "Esta aba usa os filtros-base e mede, para cada campo-chave detectado, quantos registros estão sem preenchimento válido. "
         "Os gráficos mostram a porcentagem e também o número absoluto de registros não preenchidos sobre o total analisado."
     )
 
@@ -8918,7 +8948,7 @@ def render_quality_tab(table: LoadedTable, source: str, base_where: str, exprs: 
 
     miss = query_missingness(table, fields, exprs.get("dt"), base_where)
     if miss.empty:
-        st.info("Sem campos configurados para avaliar preenchimento.")
+        st.info("Sem campos detectados automaticamente para avaliar preenchimento.")
     else:
         miss = add_missing_text(miss)
         fig = px.bar(
@@ -9083,7 +9113,7 @@ def render_comparison(loaded: Sequence[Dict[str, object]]) -> None:
     st.markdown("### Comparação entre bases")
     available = [x for x in loaded if x and x.get("exprs", {}).get("dt")]
     if len(available) < 2:
-        st.info("Carregue ao menos duas bases com data configurada para comparar séries.")
+        st.info("Carregue ao menos duas bases com data detectada para comparar séries.")
         return
     source_names = [x["source"] for x in available]
     chosen = st.multiselect("Bases", source_names, default=source_names, key="comp_sources")
@@ -9112,7 +9142,7 @@ def render_comparison(loaded: Sequence[Dict[str, object]]) -> None:
         if source_name == "SINAN":
             classi = exprs.get("classi_code")
             if not classi:
-                st.warning("SINAN foi ignorado na comparação porque CLASSI_FIN não está configurado; não é possível isolar confirmados.")
+                st.warning("SINAN foi ignorado na comparação porque CLASSI_FIN não foi detectado automaticamente; não é possível isolar confirmados.")
                 continue
             series_where = append_clause(item["base_where"], f"{classi} = '1'")
             series_label = "Confirmados (CLASSI_FIN = 1)"
