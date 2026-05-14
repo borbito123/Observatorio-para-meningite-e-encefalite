@@ -46,7 +46,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-05-14-v11-cid10-g01-base-lcr-neutro-auto"
+APP_VERSION = "2026-05-14-v12-ciha-sim-percentuais-gravidez-puerperio"
 
 
 CID_RULES = [
@@ -7621,6 +7621,8 @@ def query_ciha_indicators(table: LoadedTable, exprs: Dict[str, Optional[str]], w
             GROUP BY 1
         )
         SELECT *,
+               {pct_expr('atendimentos_diag_principal_meningite', 'atendimentos')} AS pct_atendimentos_diag_principal_meningite,
+               {pct_expr('atendimentos_qualquer_cid_meningite', 'atendimentos')} AS pct_atendimentos_qualquer_cid_meningite,
                {pct_expr('mortes_administrativas', 'atendimentos')} AS pct_morte_administrativa,
                {pct_expr('permanencia_zero', 'atendimentos')} AS pct_permanencia_zero
         FROM agg
@@ -8412,50 +8414,138 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
         else:
             copyable_dataframe(ind, use_container_width=True, hide_index=True)
             download_button(ind, "sim_indicadores_anuais.csv")
-            fig = px.line(ind, x="ano", y=["obitos_registros", "obitos_causa_basica_meningite", "obitos_com_mencao_meningite"], markers=True, title="SIM: óbitos por definição de CID")
+
+            sim_cid_specs = [
+                ("obitos_com_mencao_meningite", "Meningite mencionada", "pct_mencao_meningite"),
+                ("obitos_causa_basica_meningite", "Meningite como causa básica", "pct_causa_basica_meningite"),
+            ]
+            sim_cid_rows = []
+            for _, row in ind.iterrows():
+                for n_col, label, pct_col in sim_cid_specs:
+                    pct = row[pct_col] if pct_col in ind.columns else None
+                    sim_cid_rows.append({
+                        "ano": row["ano"],
+                        "definicao": label,
+                        "n": row[n_col],
+                        "pct": pct,
+                        "denominador": row["obitos_registros"],
+                        "texto": count_pct_text(row[n_col], pct),
+                    })
+            sim_cid_long = pd.DataFrame(sim_cid_rows)
+            fig = px.line(
+                sim_cid_long,
+                x="ano",
+                y="n",
+                color="definicao",
+                markers=True,
+                text="texto",
+                title="SIM: Óbitos com meningite sendo mencionada ou como causa básica",
+                labels={
+                    "ano": "Ano",
+                    "n": "Óbitos",
+                    "definicao": "Definição de CID",
+                    "pct": "% dos óbitos no recorte",
+                    "denominador": "Óbitos no recorte",
+                },
+                hover_data={"texto": False, "pct": ":.2f", "denominador": True},
+            )
+            fig.update_traces(textposition="top center")
             st.plotly_chart(fig, use_container_width=True)
             fig2 = px.line(ind, x="ano", y=["pct_causa_basica_meningite", "pct_mencao_meningite"], markers=True, title="SIM: percentual com causa básica/menção de meningite")
             st.plotly_chart(fig2, use_container_width=True)
 
+        def render_sim_cycle_chart(
+            category_sql: Optional[str],
+            field_label: str,
+            where_sql: Optional[str],
+            markdown_title: str,
+            figure_title: str,
+            caption: str,
+            filename: str,
+        ) -> None:
+            if not (exprs.get("dt") and category_sql and where_sql):
+                return
+            df = query_yearly_category(table, exprs["dt"], category_sql, where_sql)
+            if df.empty:
+                st.info(f"Sem dados para {markdown_title.lower()} com esta definição de meningite.")
+                return
+            st.markdown(f"**{markdown_title}**")
+            st.caption(caption)
+            df = add_text_column(df)
+            fig_cycle = px.bar(
+                df,
+                x="ano",
+                y="n",
+                color="categoria",
+                text="texto",
+                title=figure_title,
+                labels={"ano": "Ano", "n": "Óbitos", "categoria": field_label, "pct": "% no ano"},
+                hover_data={"texto": False, "pct": ":.2f", "total_ano": True},
+            )
+            st.plotly_chart(fig_cycle, use_container_width=True)
+            copyable_dataframe(df, use_container_width=True, hide_index=True)
+            download_button(df, filename)
+
+        cid_any = exprs.get("cid")
+        causabas = exprs.get("causabas_cid")
+        mention_where = append_clause(base_where, f"{cid_any} IS NOT NULL") if cid_any else None
+        primary_cause_where = append_clause(base_where, f"{causabas} IS NOT NULL") if causabas else None
+
         if exprs.get("dt") and exprs.get("obitograv_label"):
-            grav = query_yearly_category(table, exprs["dt"], exprs["obitograv_label"], base_where)
-            if not grav.empty:
-                st.markdown("**Óbito na gravidez — gráfico específico**")
-                grav = add_text_column(grav)
-                fig_grav = px.bar(
-                    grav,
-                    x="ano",
-                    y="n",
-                    color="categoria",
-                    text="texto",
-                    title="SIM: óbito na gravidez (OBITOGRAV)",
-                    labels={"ano": "Ano", "n": "Óbitos", "categoria": "OBITOGRAV", "pct": "% no ano"},
-                    hover_data={"texto": False, "pct": ":.2f", "total_ano": True},
+            if mention_where:
+                render_sim_cycle_chart(
+                    exprs["obitograv_label"],
+                    "OBITOGRAV",
+                    mention_where,
+                    "Óbito na gravidez — menção de meningite",
+                    "SIM: óbito na gravidez (OBITOGRAV) — óbitos com menção de meningite",
+                    "Observação: este gráfico foi construído com base nos óbitos em que houve menção de CID de meningite em qualquer campo do SIM.",
+                    "sim_obito_gravidez_obitograv_mencao_meningite.csv",
                 )
-                st.plotly_chart(fig_grav, use_container_width=True)
-                copyable_dataframe(grav, use_container_width=True, hide_index=True)
-                download_button(grav, "sim_obito_gravidez_obitograv.csv")
+            else:
+                st.info("Para gerar o gráfico de gravidez por menção de meningite, é necessário detectar algum campo CID no SIM.")
+            if primary_cause_where:
+                render_sim_cycle_chart(
+                    exprs["obitograv_label"],
+                    "OBITOGRAV",
+                    primary_cause_where,
+                    "Óbito na gravidez — meningite como causa primária/básica",
+                    "SIM: óbito na gravidez (OBITOGRAV) — meningite como causa primária/básica",
+                    "Este gráfico foi construído apenas com óbitos cuja causa primária/básica contém CID de meningite em CAUSABAS.",
+                    "sim_obito_gravidez_obitograv_causa_basica_meningite.csv",
+                )
+            else:
+                st.info("Para gerar o gráfico de gravidez por causa primária/básica, o campo CAUSABAS precisa existir no SIM e ser detectado automaticamente.")
         else:
             st.info("Para o gráfico de óbito na gravidez, o campo OBITOGRAV precisa existir no SIM e ser detectado automaticamente.")
 
         if exprs.get("dt") and exprs.get("obitopuerp_label"):
-            puer = query_yearly_category(table, exprs["dt"], exprs["obitopuerp_label"], base_where)
-            if not puer.empty:
-                st.markdown("**Óbito no puerpério — gráfico específico**")
-                puer = add_text_column(puer)
-                fig_puer = px.bar(
-                    puer,
-                    x="ano",
-                    y="n",
-                    color="categoria",
-                    text="texto",
-                    title="SIM: óbito no puerpério (OBITOPUERP)",
-                    labels={"ano": "Ano", "n": "Óbitos", "categoria": "OBITOPUERP", "pct": "% no ano"},
-                    hover_data={"texto": False, "pct": ":.2f", "total_ano": True},
+            if mention_where:
+                render_sim_cycle_chart(
+                    exprs["obitopuerp_label"],
+                    "OBITOPUERP",
+                    mention_where,
+                    "Óbito no puerpério — menção de meningite",
+                    "SIM: óbito no puerpério (OBITOPUERP) — óbitos com menção de meningite",
+                    "Observação: este gráfico foi construído com base nos óbitos em que houve menção de CID de meningite em qualquer campo do SIM.",
+                    "sim_obito_puerperio_obitopuerp_mencao_meningite.csv",
                 )
-                st.plotly_chart(fig_puer, use_container_width=True)
-                copyable_dataframe(puer, use_container_width=True, hide_index=True)
-                download_button(puer, "sim_obito_puerperio_obitopuerp.csv")
+            else:
+                st.info("Para gerar o gráfico de puerpério por menção de meningite, é necessário detectar algum campo CID no SIM.")
+            if primary_cause_where:
+                render_sim_cycle_chart(
+                    exprs["obitopuerp_label"],
+                    "OBITOPUERP",
+                    primary_cause_where,
+                    "Óbito no puerpério — meningite como causa primária/básica",
+                    "SIM: óbito no puerpério (OBITOPUERP) — meningite como causa primária/básica",
+                    "Este gráfico foi construído apenas com óbitos cuja causa primária/básica contém CID de meningite em CAUSABAS.",
+                    "sim_obito_puerperio_obitopuerp_causa_basica_meningite.csv",
+                )
+            else:
+                st.info("Para gerar o gráfico de puerpério por causa primária/básica, o campo CAUSABAS precisa existir no SIM e ser detectado automaticamente.")
+        else:
+            st.info("Para o gráfico de óbito no puerpério, o campo OBITOPUERP precisa existir no SIM e ser detectado automaticamente.")
         return
 
     ind = query_ciha_indicators(table, exprs, base_where)
@@ -8470,10 +8560,37 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
     else:
         copyable_dataframe(ind, use_container_width=True, hide_index=True)
         download_button(ind, "ciha_indicadores_anuais.csv")
-        fig = px.line(ind, x="ano", y=["atendimentos", "atendimentos_diag_principal_meningite", "mortes_administrativas"], markers=True, title="CIHA: atendimentos e mortes administrativas")
+        ciha_count_specs = [
+            ("atendimentos", "Atendimentos", None),
+            ("atendimentos_diag_principal_meningite", "Diagnóstico principal de meningite", "pct_atendimentos_diag_principal_meningite"),
+            ("mortes_administrativas", "Mortes administrativas", "pct_morte_administrativa"),
+        ]
+        ciha_count_rows = []
+        for _, row in ind.iterrows():
+            for n_col, label, pct_col in ciha_count_specs:
+                pct = 100.0 if pct_col is None else row[pct_col]
+                ciha_count_rows.append({
+                    "ano": row["ano"],
+                    "indicador": label,
+                    "n": row[n_col],
+                    "pct": pct,
+                    "denominador": row["atendimentos"],
+                    "texto": count_pct_text(row[n_col], pct),
+                })
+        ciha_count_long = pd.DataFrame(ciha_count_rows)
+        fig = px.line(
+            ciha_count_long,
+            x="ano",
+            y="n",
+            color="indicador",
+            markers=True,
+            text="texto",
+            title="CIHA: atendimentos e mortes administrativas",
+            labels={"ano": "Ano", "n": "Atendimentos/registros", "indicador": "Indicador", "pct": "% dos atendimentos"},
+            hover_data={"texto": False, "pct": ":.2f", "denominador": True},
+        )
+        fig.update_traces(textposition="top center")
         st.plotly_chart(fig, use_container_width=True)
-        fig2 = px.line(ind, x="ano", y=["pct_morte_administrativa", "pct_permanencia_zero"], markers=True, title="CIHA: morte administrativa e permanência zero (%)")
-        st.plotly_chart(fig2, use_container_width=True)
 
     dias_dist = query_ciha_dias_perm_distribution(table, exprs, base_where)
     if not dias_dist.empty:
