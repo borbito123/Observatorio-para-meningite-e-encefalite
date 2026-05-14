@@ -44,7 +44,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-05-13-v5-cid-sinan"
+APP_VERSION = "2026-05-13-v6-cid-g042-sinan"
 
 
 CID_RULES = [
@@ -90,12 +90,18 @@ CID_RULES = [
         "rotulo": "G03 — meningite por outras causas / não especificada",
         "padrao": "G03*",
     },
+    {
+        "grupo": "G04.2",
+        "prefixo": "G042",
+        "rotulo": "G04.2 — meningoencefalite e meningomielite bacterianas não classificadas em outra parte",
+        "padrao": "G04.2",
+    },
 ]
 
 # Aceita CIDs com ponto, sem ponto, precedidos de * e dentro de campos compostos.
 CID_MENINGITE_REGEX = (
     r"(A17[\.]?0|A39[\.]?0|A87[\.]?[0-9A-Z]?|G00[\.]?[0-9A-Z]?|"
-    r"G01[\.]?[0-9A-Z]?|G02[\.]?[0-9A-Z]?|G03[\.]?[0-9A-Z]?)"
+    r"G01[\.]?[0-9A-Z]?|G02[\.]?[0-9A-Z]?|G03[\.]?[0-9A-Z]?|G04[\.]?2)"
 )
 
 SINAN_CON_DIAGES = {
@@ -144,8 +150,8 @@ SINAN_CID10_FROM_CON_DIAGES = {
         "origem": "04 — meningite tuberculosa",
     },
     "05": {
-        "grupo": "G00",
-        "rotulo": "G00 — meningite bacteriana não classificada em outra parte",
+        "grupo": "G04.2",
+        "rotulo": "G04.2 — meningoencefalite e meningomielite bacterianas não classificadas em outra parte",
         "origem": "05 — meningite por outras bactérias",
     },
     "06": {
@@ -199,10 +205,16 @@ SINAN_CID10_MAPPING_ROWS = [
         "Observação": "No SINAN, a categoria asséptica é tratada operacionalmente como viral; usar G03 somente para asséptica sem evidência/definição viral em CID bruto externo.",
     },
     {
-        "CON_DIAGES": "05, 09, 10",
-        "Grupo SINAN": "Outras bacterianas; Haemophilus influenzae; pneumocócica",
+        "CON_DIAGES": "05",
+        "Grupo SINAN": "Meningite por outras bactérias",
+        "CID-10 convertido": "G04.2",
+        "Observação": "Mapeamento operacional solicitado para meningoencefalite/meningomielite bacterianas não classificadas em outra parte.",
+    },
+    {
+        "CON_DIAGES": "09, 10",
+        "Grupo SINAN": "Haemophilus influenzae; pneumocócica",
         "CID-10 convertido": "G00",
-        "Observação": "Agrega G00.0, G00.1 e G00.8/G00.9 para comparação por família CID.",
+        "Observação": "Mantém Haemophilus influenzae e pneumocócica agregadas em G00.0/G00.1 para comparação por família CID.",
     },
     {
         "CON_DIAGES": "08",
@@ -7304,7 +7316,7 @@ def render_field_guide(source: str) -> None:
 def render_cid_reference() -> None:
     st.dataframe(pd.DataFrame(CID_RULES)[["grupo", "padrao", "rotulo"]], use_container_width=True, hide_index=True)
     st.caption(
-        "O app procura A17.0, A39.0, A87*, G00*, G01*, G02* e G03* nos campos selecionados. "
+        "O app procura A17.0, A39.0, A87*, G00*, G01*, G02*, G03* e G04.2 nos campos selecionados. "
         "No SINAN, esse CID costuma ser apenas o agravo geral; a etiologia específica deve vir de CON_DIAGES e campos relacionados."
     )
 
@@ -8068,8 +8080,8 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                     st.dataframe(pd.DataFrame(SINAN_CID10_MAPPING_ROWS), use_container_width=True, hide_index=True)
                     st.caption(
                         "Observação: CON_DIAGES 01 (meningococcemia isolada) fica fora da conversão; "
-                        "CON_DIAGES 02 e 03 entram como A39.0. A categoria 08 foi mapeada para G02 por coerência com o CID-10, "
-                        "pois no SINAN ela representa outras etiologias infecciosas/parasitárias."
+                        "CON_DIAGES 02 e 03 entram como A39.0; CON_DIAGES 05 entra como G04.2 conforme a regra operacional solicitada. "
+                        "A categoria 08 foi mapeada para G02 por coerência com o CID-10, pois no SINAN ela representa outras etiologias infecciosas/parasitárias."
                     )
 
                 if not conv_no.empty:
@@ -8488,7 +8500,7 @@ def render_comparison(loaded: Sequence[Dict[str, object]]) -> None:
     freq = {"Ano": "year", "Mês": "month", "Semana": "week"}[freq_label]
     normalize = st.checkbox("Normalizar em índice 100 no primeiro período não-zero", value=False, key="comp_norm")
     stratify_cid = st.checkbox("Estratificar por tipo CID-10 quando disponível", value=False, key="comp_cid")
-    st.caption("Na comparação, o SINAN entra sempre como casos confirmados (CLASSI_FIN = 1), independentemente da definição exploratória escolhida na aba SINAN. Na agregação mensal, meses sem registros são mantidos com valor zero.")
+    st.caption("Na comparação, o SINAN entra sempre como casos confirmados (CLASSI_FIN = 1), independentemente da definição exploratória escolhida na aba SINAN. Quando há estratificação por CID-10, o SINAN usa a conversão de CON_DIAGES; SIM/CIHA usam o CID bruto detectado. Na agregação mensal, meses sem registros são mantidos com valor zero.")
 
     frames = []
     for item in available:
@@ -8497,7 +8509,13 @@ def render_comparison(loaded: Sequence[Dict[str, object]]) -> None:
             continue
         table: LoadedTable = item["table"]
         exprs = item["exprs"]
-        cat = exprs.get("cid_type") if stratify_cid else None
+        if stratify_cid:
+            if source_name == "SINAN" and exprs.get("sinan_cid10_conversion_type"):
+                cat = exprs.get("sinan_cid10_conversion_type")
+            else:
+                cat = exprs.get("cid_type")
+        else:
+            cat = None
         series_where = item["graph_where"]
         series_label = item.get("definition", "")
         if source_name == "SINAN":
