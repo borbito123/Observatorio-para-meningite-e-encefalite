@@ -10,9 +10,9 @@ Este aplicativo cumpre duas funções:
 2) Fornecer uma plataforma dinâmica de análise de dados via streamlit.
 
 # Baixando os bancos de dados
-Ao extrair os arquivos "SINAN - scripts", "CIHA - scripts" e "SIM - scripts" que estão em formato RAR, haverão scripts separados para as diferentes etapas - baixar os arquivos do datasus, processar e compilar o que foi baixado para o formato parquet e para o formato duckdb, separado por ano.Alternativamente, pode-se baixar os arquivos já compilados diretamente através dos "Banco de Dados" em formato .RAR. 
+Ao extrair os arquivos "SINAN - scripts", "CIHA - scripts" e "SIM - scripts" que estão em formato RAR, haverão scripts separados para as diferentes etapas - baixar os arquivos do datasus, processar e compilar o que foi baixado para o formato parquet e para o formato duckdb, separado por ano. Alternativamente, pode-se baixar os arquivos já compilados diretamente através dos "Banco de Dados" em formato .RAR. 
 
-Os  CID-10 incluídos são: "A170", "A390", "A87", "G00", "G01", "G02", "G03", "G04.2". Caso deseje saber o que eles significam: http://www2.datasus.gov.br/cid10/V2008/WebHelp/g00_g09.htm.
+Os  CID-10 incluídos são: "A170", "A390", "A87", "G00", "G01", "G02", "G03", "G04.2". Caso deseje saber o porquê eles foram escolhidos: http://www2.datasus.gov.br/cid10/V2008/WebHelp/g00_g09.htm.
 
 Observação: Como os dados disponibilizados pelo CIHA são separados por mês para cada respectivo ano, optou-se por mesclar os meses referentes a um dado ano.
 
