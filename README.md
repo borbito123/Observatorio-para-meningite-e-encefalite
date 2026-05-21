@@ -81,7 +81,7 @@ Explicando o que foi feito na tabela de conversão encontrada no CIHA:
 
 Observação: - A comparação entre bases é **exploratória** e faz mais sentido quando o agravo, o território e a janela temporal são os mesmos.
 
-# Instalação
+# _Instalação_
 
 Crie e ative um ambiente virtual, se desejar, e depois instale as dependências:
 
