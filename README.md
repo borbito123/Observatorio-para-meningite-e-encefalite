@@ -79,7 +79,9 @@ Explicando o que foi feito na tabela de conversão encontrada no CIHA:
 - Comparação temporal (semanas, meses, anos)
 - Possibilidade de estratiificar por CID-10.
 
-3) Instalação
+Observação: - A comparação entre bases é **exploratória** e faz mais sentido quando o agravo, o território e a janela temporal são os mesmos.
+
+# Instalação
 
 Crie e ative um ambiente virtual, se desejar, e depois instale as dependências:
 
@@ -97,12 +99,15 @@ streamlit run app_streamlit_app.py
 
 ## _Como usar_
 
-  Em construção -> O programa irá automaticamente ler os parquets disponíveis na release mais atual. Quando houver a disponibilização dos parquets referentes a todos os estados, o usuário poderá escolher qual análise ele irá fazer (todos os estados ou algum estado específico).
+Disclaimer: Atenção ao limite de parquets / duckdbs em vigor. Isso pode ser alterado, mas bastante cuidado em quantos arquivos são carregados simultaneamente.
 
-### Opção 1: upload
+### Opção 1: leitura automático dos parquets disponibilizados na release mais atual do github
+Basta selecionar quais anos deseja-se analisar. 
+
+### Opção 2: upload
 Envie um ou mais arquivos `.parquet ou .duckdb` na respectiva aba do banco de dados desejado.
 
-### Opção 2: pasta/glob local
+### Opção 3: pasta/glob local
 Informe um padrão local, por exemplo:
 
 ```text
@@ -110,8 +115,3 @@ Bases_Datasus_Municipio_Rio_de_Janeiro/SINAN/data/parquet/*.parquet
 Bases_Datasus_Municipio_Rio_de_Janeiro/SIM/data/parquet/*.parquet
 Bases_Datasus_Municipio_Rio_de_Janeiro/CIHA/data/parquet/*.parquet
 ```
-
-4) Observações importantes
-
-- Se os parquets já estiverem filtrados para um município específico, os gráficos respeitarão esse recorte.
-- A comparação entre bases é **exploratória** e faz mais sentido quando o agravo, o território e a janela temporal são os mesmos.
