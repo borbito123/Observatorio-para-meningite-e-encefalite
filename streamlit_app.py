@@ -50,7 +50,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-05-20-v16-otimizado-carregamento-lazy"
+APP_VERSION = "2026-05-20-v17-cid10-encefalite-conversao"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos
@@ -186,19 +186,157 @@ CID_RULES = [
         "grupo": "A17.0",
         "prefixo": "A170",
         "rotulo": "A17.0 — meningite tuberculosa",
-        "padrao": "A170",
+        "padrao": "A17.0",
+    },
+    {
+        "grupo": "A22.8",
+        "prefixo": "A228",
+        "rotulo": "A22.8 — meningite por carbúnculo",
+        "padrao": "A22.8",
+    },
+    {
+        "grupo": "A32.1",
+        "prefixo": "A321",
+        "rotulo": "A32.1 — meningite e meningoencefalite por listéria",
+        "padrao": "A32.1",
     },
     {
         "grupo": "A39.0",
         "prefixo": "A390",
         "rotulo": "A39.0 — meningite meningocócica",
-        "padrao": "A390",
+        "padrao": "A39.0",
+    },
+    {
+        "grupo": "A83",
+        "prefixo": "A83",
+        "rotulo": "A83 — encefalite por vírus transmitidos por mosquitos",
+        "padrao": "A83*",
+    },
+    {
+        "grupo": "A84",
+        "prefixo": "A84",
+        "rotulo": "A84 — encefalite por vírus transmitido por carrapatos",
+        "padrao": "A84*",
+    },
+    {
+        "grupo": "A85",
+        "prefixo": "A85",
+        "rotulo": "A85 — outras encefalites virais, não classificadas em outra parte",
+        "padrao": "A85*",
+    },
+    {
+        "grupo": "A86",
+        "prefixo": "A86",
+        "rotulo": "A86 — encefalite viral não especificada",
+        "padrao": "A86*",
     },
     {
         "grupo": "A87",
         "prefixo": "A87",
         "rotulo": "A87 — meningite viral",
         "padrao": "A87*",
+    },
+    {
+        "grupo": "B00.3",
+        "prefixo": "B003",
+        "rotulo": "B00.3 — meningite devida ao vírus do herpes",
+        "padrao": "B00.3",
+    },
+    {
+        "grupo": "B00.4",
+        "prefixo": "B004",
+        "rotulo": "B00.4 — encefalite devida ao vírus do herpes",
+        "padrao": "B00.4",
+    },
+    {
+        "grupo": "B01.0",
+        "prefixo": "B010",
+        "rotulo": "B01.0 — meningite por varicela",
+        "padrao": "B01.0",
+    },
+    {
+        "grupo": "B01.1",
+        "prefixo": "B011",
+        "rotulo": "B01.1 — encefalite por varicela",
+        "padrao": "B01.1",
+    },
+    {
+        "grupo": "B02.0",
+        "prefixo": "B020",
+        "rotulo": "B02.0 — encefalite pelo vírus do herpes zoster",
+        "padrao": "B02.0",
+    },
+    {
+        "grupo": "B02.1",
+        "prefixo": "B021",
+        "rotulo": "B02.1 — meningite pelo vírus do herpes zoster",
+        "padrao": "B02.1",
+    },
+    {
+        "grupo": "B05.0",
+        "prefixo": "B050",
+        "rotulo": "B05.0 — sarampo complicado por encefalite",
+        "padrao": "B05.0",
+    },
+    {
+        "grupo": "B05.1",
+        "prefixo": "B051",
+        "rotulo": "B05.1 — sarampo complicado por meningite",
+        "padrao": "B05.1",
+    },
+    {
+        "grupo": "B06",
+        "prefixo": "B06",
+        "rotulo": "B06 — rubéola com complicações neurológicas",
+        "padrao": "B06*",
+    },
+    {
+        "grupo": "B26.1",
+        "prefixo": "B261",
+        "rotulo": "B26.1 — meningite por caxumba / parotidite epidêmica",
+        "padrao": "B26.1",
+    },
+    {
+        "grupo": "B26.2",
+        "prefixo": "B262",
+        "rotulo": "B26.2 — encefalite por caxumba / parotidite epidêmica",
+        "padrao": "B26.2",
+    },
+    {
+        "grupo": "B37.5",
+        "prefixo": "B375",
+        "rotulo": "B37.5 — meningite por Candida",
+        "padrao": "B37.5",
+    },
+    {
+        "grupo": "B38.4",
+        "prefixo": "B384",
+        "rotulo": "B38.4 — meningite por coccidioidomicose",
+        "padrao": "B38.4",
+    },
+    {
+        "grupo": "B45.1",
+        "prefixo": "B451",
+        "rotulo": "B45.1 — criptococose cerebral",
+        "padrao": "B45.1",
+    },
+    {
+        "grupo": "B57.4",
+        "prefixo": "B574",
+        "rotulo": "B57.4 — doença de Chagas crônica com comprometimento do sistema nervoso",
+        "padrao": "B57.4",
+    },
+    {
+        "grupo": "B58.2",
+        "prefixo": "B582",
+        "rotulo": "B58.2 — meningoencefalite por Toxoplasma",
+        "padrao": "B58.2",
+    },
+    {
+        "grupo": "B60.2",
+        "prefixo": "B602",
+        "rotulo": "B60.2 — naegleríase",
+        "padrao": "B60.2",
     },
     {
         "grupo": "G00",
@@ -225,21 +363,199 @@ CID_RULES = [
         "padrao": "G03*",
     },
     {
-        "grupo": "G04.2",
-        "prefixo": "G042",
-        "rotulo": "G04.2 — meningoencefalite e meningomielite bacterianas não classificadas em outra parte",
-        "padrao": "G04.2",
+        "grupo": "G04",
+        "prefixo": "G04",
+        "rotulo": "G04 — encefalite, mielite e encefalomielite",
+        "padrao": "G04*",
+    },
+    {
+        "grupo": "G05",
+        "prefixo": "G05",
+        "rotulo": "G05 — encefalite, mielite e encefalomielite em doenças classificadas em outra parte",
+        "padrao": "G05*",
     },
 ]
 
 # Aceita CIDs com ponto, sem ponto, precedidos de * e dentro de campos compostos.
+# G04 e G05 são tratados como prefixos; os códigos A/B abaixo ampliam o recorte para encefalite/meningoencefalite.
 CID_MENINGITE_REGEX = (
-    r"(A17[\.]?0|A39[\.]?0|A87[\.]?[0-9A-Z]?|G00[\.]?[0-9A-Z]?|"
-    r"G01[\.]?[0-9A-Z]?|G02[\.]?[0-9A-Z]?|G03[\.]?[0-9A-Z]?|G04[\.]?2)"
+    r"(A17[\.]?0|A22[\.]?8|A32[\.]?1|A39[\.]?0|A83[\.]?[0-9A-Z]?|"
+    r"A84[\.]?[0-9A-Z]?|A85[\.]?[0-9A-Z]?|A86[\.]?[0-9A-Z]?|A87[\.]?[0-9A-Z]?|"
+    r"B00[\.]?[34]|B01[\.]?[01]|B02[\.]?[01]|B05[\.]?[01]|B06[\.]?[0-9A-Z]?|"
+    r"B26[\.]?[12]|B37[\.]?5|B38[\.]?4|B45[\.]?1|B57[\.]?4|B58[\.]?2|B60[\.]?2|"
+    r"G00[\.]?[0-9A-Z]?|G01[\.]?[0-9A-Z]?|G02[\.]?[0-9A-Z]?|G03[\.]?[0-9A-Z]?|"
+    r"G04[\.]?[0-9A-Z]?|G05[\.]?[0-9A-Z]?)"
 )
 
 CID_G01_PRESENT_REGEX = r"\*?G01[\.]?[0-9A-Z]?\*?"
 CID_G02_PRESENT_REGEX = r"\*?G02[\.]?[0-9A-Z]?\*?"
+
+CID10_ADEQUACY_TARGET_LABELS = {
+    "G01": "G01 — meningite bacteriana em doença classificada em outra parte",
+    "G02": "G02 — meningite em outras doenças infecciosas/parasitárias",
+    "G02.0": "G02.0 — meningite em doenças virais classificadas em outra parte",
+    "G05": "G05 — encefalite, mielite e encefalomielite em doenças classificadas em outra parte",
+}
+
+CID10_ADEQUACY_CONVERSION_RULES = [
+    {
+        "origem_grupo": "A22.8", "origem_prefixo": "A228", "origem_padrao": "A22.8", "match": "exact",
+        "origem_rotulo": "A22.8 — meningite por carbúnculo",
+        "destino_grupo": "G01", "destino_rotulo": CID10_ADEQUACY_TARGET_LABELS["G01"],
+        "observacao": "A22.8 — meningite por carbúnculo convertida para G01.",
+    },
+    {
+        "origem_grupo": "A32.1", "origem_prefixo": "A321", "origem_padrao": "A32.1", "match": "exact",
+        "origem_rotulo": "A32.1 — meningite e meningoencefalite por listéria",
+        "destino_grupo": "G05", "destino_rotulo": CID10_ADEQUACY_TARGET_LABELS["G05"],
+        "observacao": "A32.1 — meningite/meningoencefalite por listéria convertida para G05.",
+    },
+    {
+        "origem_grupo": "A83", "origem_prefixo": "A83", "origem_padrao": "A83*", "match": "prefix",
+        "origem_rotulo": "A83 — encefalite por vírus transmitidos por mosquitos",
+        "destino_grupo": "G05", "destino_rotulo": CID10_ADEQUACY_TARGET_LABELS["G05"],
+        "observacao": "A83* — encefalite por vírus transmitidos por mosquitos convertida para G05.",
+    },
+    {
+        "origem_grupo": "A84", "origem_prefixo": "A84", "origem_padrao": "A84*", "match": "prefix",
+        "origem_rotulo": "A84 — encefalite por vírus transmitido por carrapatos",
+        "destino_grupo": "G05", "destino_rotulo": CID10_ADEQUACY_TARGET_LABELS["G05"],
+        "observacao": "A84* — encefalite por vírus transmitido por carrapatos convertida para G05.",
+    },
+    {
+        "origem_grupo": "A85", "origem_prefixo": "A85", "origem_padrao": "A85*", "match": "prefix",
+        "origem_rotulo": "A85 — outras encefalites virais, não classificadas em outra parte",
+        "destino_grupo": "G05", "destino_rotulo": CID10_ADEQUACY_TARGET_LABELS["G05"],
+        "observacao": "A85* — outras encefalites virais convertidas para G05.",
+    },
+    {
+        "origem_grupo": "A86", "origem_prefixo": "A86", "origem_padrao": "A86*", "match": "prefix",
+        "origem_rotulo": "A86 — encefalite viral não especificada",
+        "destino_grupo": "G05", "destino_rotulo": CID10_ADEQUACY_TARGET_LABELS["G05"],
+        "observacao": "A86* — encefalite viral não especificada convertida para G05.",
+    },
+    {
+        "origem_grupo": "B00.3", "origem_prefixo": "B003", "origem_padrao": "B00.3", "match": "exact",
+        "origem_rotulo": "B00.3 — meningite devida ao vírus do herpes",
+        "destino_grupo": "G02.0", "destino_rotulo": CID10_ADEQUACY_TARGET_LABELS["G02.0"],
+        "observacao": "B00.3 — meningite devida ao vírus do herpes convertida para G02.0.",
+    },
+    {
+        "origem_grupo": "B00.4", "origem_prefixo": "B004", "origem_padrao": "B00.4", "match": "exact",
+        "origem_rotulo": "B00.4 — encefalite devida ao vírus do herpes",
+        "destino_grupo": "G02.0", "destino_rotulo": CID10_ADEQUACY_TARGET_LABELS["G02.0"],
+        "observacao": "B00.4 — encefalite devida ao vírus do herpes convertida para G02.0.",
+    },
+    {
+        "origem_grupo": "B01.0", "origem_prefixo": "B010", "origem_padrao": "B01.0", "match": "exact",
+        "origem_rotulo": "B01.0 — meningite por varicela",
+        "destino_grupo": "G02", "destino_rotulo": CID10_ADEQUACY_TARGET_LABELS["G02"],
+        "observacao": "B01.0 — meningite por varicela convertida para G02.",
+    },
+    {
+        "origem_grupo": "B01.1", "origem_prefixo": "B011", "origem_padrao": "B01.1", "match": "exact",
+        "origem_rotulo": "B01.1 — encefalite por varicela",
+        "destino_grupo": "G05", "destino_rotulo": CID10_ADEQUACY_TARGET_LABELS["G05"],
+        "observacao": "B01.1 — encefalite por varicela convertida para G05.",
+    },
+    {
+        "origem_grupo": "B02.0", "origem_prefixo": "B020", "origem_padrao": "B02.0", "match": "exact",
+        "origem_rotulo": "B02.0 — encefalite pelo vírus do herpes zoster",
+        "destino_grupo": "G05", "destino_rotulo": CID10_ADEQUACY_TARGET_LABELS["G05"],
+        "observacao": "B02.0 — encefalite pelo vírus do herpes zoster convertida para G05.",
+    },
+    {
+        "origem_grupo": "B02.1", "origem_prefixo": "B021", "origem_padrao": "B02.1", "match": "exact",
+        "origem_rotulo": "B02.1 — meningite pelo vírus do herpes zoster",
+        "destino_grupo": "G05", "destino_rotulo": CID10_ADEQUACY_TARGET_LABELS["G05"],
+        "observacao": "B02.1 — meningite pelo vírus do herpes zoster convertida para G05.",
+    },
+    {
+        "origem_grupo": "B05.0", "origem_prefixo": "B050", "origem_padrao": "B05.0", "match": "exact",
+        "origem_rotulo": "B05.0 — sarampo complicado por encefalite",
+        "destino_grupo": "G05", "destino_rotulo": CID10_ADEQUACY_TARGET_LABELS["G05"],
+        "observacao": "B05.0 — sarampo complicado por encefalite convertido para G05.",
+    },
+    {
+        "origem_grupo": "B05.1", "origem_prefixo": "B051", "origem_padrao": "B05.1", "match": "exact",
+        "origem_rotulo": "B05.1 — sarampo complicado por meningite",
+        "destino_grupo": "G02", "destino_rotulo": CID10_ADEQUACY_TARGET_LABELS["G02"],
+        "observacao": "B05.1 — sarampo complicado por meningite convertido para G02.",
+    },
+    {
+        "origem_grupo": "B06", "origem_prefixo": "B06", "origem_padrao": "B06*", "match": "prefix",
+        "origem_rotulo": "B06 — rubéola com complicações neurológicas",
+        "destino_grupo": "G05", "destino_rotulo": CID10_ADEQUACY_TARGET_LABELS["G05"],
+        "observacao": "B06* — rubéola com complicações neurológicas convertida para G05.",
+    },
+    {
+        "origem_grupo": "B26.1", "origem_prefixo": "B261", "origem_padrao": "B26.1", "match": "exact",
+        "origem_rotulo": "B26.1 — meningite por caxumba / parotidite epidêmica",
+        "destino_grupo": "G02", "destino_rotulo": CID10_ADEQUACY_TARGET_LABELS["G02"],
+        "observacao": "B26.1 — meningite por caxumba convertida para G02.",
+    },
+    {
+        "origem_grupo": "B26.2", "origem_prefixo": "B262", "origem_padrao": "B26.2", "match": "exact",
+        "origem_rotulo": "B26.2 — encefalite por caxumba / parotidite epidêmica",
+        "destino_grupo": "G05", "destino_rotulo": CID10_ADEQUACY_TARGET_LABELS["G05"],
+        "observacao": "B26.2 — encefalite por caxumba convertida para G05.",
+    },
+    {
+        "origem_grupo": "B37.5", "origem_prefixo": "B375", "origem_padrao": "B37.5", "match": "exact",
+        "origem_rotulo": "B37.5 — meningite por Candida",
+        "destino_grupo": "G02", "destino_rotulo": CID10_ADEQUACY_TARGET_LABELS["G02"],
+        "observacao": "B37.5 — meningite por Candida convertida para G02.",
+    },
+    {
+        "origem_grupo": "B38.4", "origem_prefixo": "B384", "origem_padrao": "B38.4", "match": "exact",
+        "origem_rotulo": "B38.4 — meningite por coccidioidomicose",
+        "destino_grupo": "G02", "destino_rotulo": CID10_ADEQUACY_TARGET_LABELS["G02"],
+        "observacao": "B38.4 — meningite por coccidioidomicose convertida para G02.",
+    },
+    {
+        "origem_grupo": "B45.1", "origem_prefixo": "B451", "origem_padrao": "B45.1", "match": "exact",
+        "origem_rotulo": "B45.1 — criptococose cerebral",
+        "destino_grupo": "G02", "destino_rotulo": CID10_ADEQUACY_TARGET_LABELS["G02"],
+        "observacao": "B45.1 — criptococose cerebral convertida para G02.",
+    },
+    {
+        "origem_grupo": "B58.2", "origem_prefixo": "B582", "origem_padrao": "B58.2", "match": "exact",
+        "origem_rotulo": "B58.2 — meningoencefalite por Toxoplasma",
+        "destino_grupo": "G05", "destino_rotulo": CID10_ADEQUACY_TARGET_LABELS["G05"],
+        "observacao": "B58.2 — meningoencefalite por Toxoplasma convertida para G05.",
+    },
+    {
+        "origem_grupo": "B57.4", "origem_prefixo": "B574", "origem_padrao": "B57.4", "match": "exact",
+        "origem_rotulo": "B57.4 — doença de Chagas crônica com comprometimento do sistema nervoso",
+        "destino_grupo": "G05", "destino_rotulo": CID10_ADEQUACY_TARGET_LABELS["G05"],
+        "observacao": "B57.4 — doença de Chagas crônica com comprometimento do sistema nervoso convertida para G05.",
+    },
+    {
+        "origem_grupo": "B60.2", "origem_prefixo": "B602", "origem_padrao": "B60.2", "match": "exact",
+        "origem_rotulo": "B60.2 — naegleríase",
+        "destino_grupo": "G05", "destino_rotulo": CID10_ADEQUACY_TARGET_LABELS["G05"],
+        "observacao": "B60.2 — naegleríase convertida para G05.",
+    },
+]
+
+CID10_ADEQUACY_MAPPING_ROWS = [
+    {
+        "CID-10 original": rule["origem_padrao"],
+        "Descrição original": rule["origem_rotulo"],
+        "CID-10 convertido": rule["destino_grupo"],
+        "Categoria convertida": rule["destino_rotulo"],
+        "Observação": rule["observacao"],
+    }
+    for rule in CID10_ADEQUACY_CONVERSION_RULES
+]
+
+CID10_ADEQUACY_OBSERVATION = (
+    "Observação: A22.8 é convertido para G01; A32.1, A83*, A84*, A85*, A86*, "
+    "B01.1, B02.0, B02.1, B05.0, B06*, B26.2, B57.4, B58.2 e B60.2 são convertidos para G05; "
+    "B00.3 e B00.4 são convertidos para G02.0; B01.0, B05.1, B26.1, B37.5, B38.4 e B45.1 são convertidos para G02. "
+    "Os demais CID-10 detectados ficam fora da conversão e permanecem no denominador para preservar o total de casos do recorte/ano."
+)
+
 
 SINAN_CON_DIAGES = {
     "01": "01 — meningococcemia",
@@ -6610,6 +6926,67 @@ def cid_type_expr(cid_sql: str) -> str:
     return f"CASE WHEN {cid_sql} IS NULL THEN 'Sem CID de meningite detectado' {' '.join(clauses)} ELSE 'Outro CID capturado' END"
 
 
+def _cid10_adequacy_condition(cid_sql: str, rule: Dict[str, str]) -> str:
+    if rule.get("match") == "prefix":
+        return f"{cid_sql} LIKE {qstr(rule['origem_prefixo'] + '%')}"
+    return f"{cid_sql} = {qstr(rule['origem_prefixo'])}"
+
+
+def cid10_adequacy_original_display_expr(cid_sql: str) -> str:
+    clauses = [
+        f"WHEN {_cid10_adequacy_condition(cid_sql, rule)} THEN {qstr(rule['origem_padrao'])}"
+        for rule in CID10_ADEQUACY_CONVERSION_RULES
+    ]
+    return f"CASE WHEN {cid_sql} IS NULL THEN NULL {' '.join(clauses)} ELSE {cid_group_expr(cid_sql)} END"
+
+
+def cid10_adequacy_group_expr(cid_sql: str) -> str:
+    clauses = [
+        f"WHEN {_cid10_adequacy_condition(cid_sql, rule)} THEN {qstr(rule['destino_grupo'])}"
+        for rule in CID10_ADEQUACY_CONVERSION_RULES
+    ]
+    return f"CASE WHEN {cid_sql} IS NULL THEN 'Sem CID de meningite/encefalite detectado' {' '.join(clauses)} ELSE {cid_group_expr(cid_sql)} END"
+
+
+def cid10_adequacy_type_expr(cid_sql: str) -> str:
+    clauses = [
+        f"WHEN {_cid10_adequacy_condition(cid_sql, rule)} THEN {qstr(rule['destino_rotulo'])}"
+        for rule in CID10_ADEQUACY_CONVERSION_RULES
+    ]
+    return f"CASE WHEN {cid_sql} IS NULL THEN 'Sem CID de meningite/encefalite detectado' {' '.join(clauses)} ELSE {cid_type_expr(cid_sql)} END"
+
+
+def cid10_adequacy_status_expr(cid_sql: str) -> str:
+    clauses = [
+        f"WHEN {_cid10_adequacy_condition(cid_sql, rule)} THEN 'Convertido'"
+        for rule in CID10_ADEQUACY_CONVERSION_RULES
+    ]
+    return f"CASE WHEN {cid_sql} IS NULL THEN 'Sem CID detectado' {' '.join(clauses)} ELSE 'Fora da conversão — mantido no total' END"
+
+
+def cid10_adequacy_reason_expr(cid_sql: str) -> str:
+    clauses = [
+        f"WHEN {_cid10_adequacy_condition(cid_sql, rule)} THEN {qstr(rule['observacao'])}"
+        for rule in CID10_ADEQUACY_CONVERSION_RULES
+    ]
+    return (
+        f"CASE WHEN {cid_sql} IS NULL THEN 'Sem CID de meningite/encefalite detectado.' "
+        f"{' '.join(clauses)} "
+        f"ELSE CONCAT('Fora da conversão operacional: ', {cid_type_expr(cid_sql)}, ' foi mantido no total como CID-10 detectado/não mapeado.') END"
+    )
+
+
+def cid10_adequacy_plot_label_expr(cid_sql: str) -> str:
+    original = cid10_adequacy_original_display_expr(cid_sql)
+    target = cid10_adequacy_type_expr(cid_sql)
+    status = cid10_adequacy_status_expr(cid_sql)
+    return (
+        f"CASE WHEN {cid_sql} IS NULL THEN 'Sem CID de meningite/encefalite detectado' "
+        f"WHEN {status} = 'Convertido' THEN CONCAT({original}, ' → ', {target}) "
+        f"ELSE CONCAT({original}, ' — fora da conversão; mantido como ', {target}) END"
+    )
+
+
 def text_concat_expr(cols: Sequence[str]) -> Optional[str]:
     """Concatena campos textuais detectados automaticamente em uma expressão SQL única.
 
@@ -7344,9 +7721,19 @@ def build_expressions(source: str, sel: ColumnSelection) -> Dict[str, Optional[s
     if exprs["cid"]:
         exprs["cid_group"] = cid_group_expr(exprs["cid"])
         exprs["cid_type"] = cid_type_expr(exprs["cid"])
+        exprs["cid10_adequacy_group"] = cid10_adequacy_group_expr(exprs["cid"])
+        exprs["cid10_adequacy_type"] = cid10_adequacy_type_expr(exprs["cid"])
+        exprs["cid10_adequacy_status"] = cid10_adequacy_status_expr(exprs["cid"])
+        exprs["cid10_adequacy_reason"] = cid10_adequacy_reason_expr(exprs["cid"])
+        exprs["cid10_adequacy_plot_label"] = cid10_adequacy_plot_label_expr(exprs["cid"])
     else:
         exprs["cid_group"] = None
         exprs["cid_type"] = None
+        exprs["cid10_adequacy_group"] = None
+        exprs["cid10_adequacy_type"] = None
+        exprs["cid10_adequacy_status"] = None
+        exprs["cid10_adequacy_reason"] = None
+        exprs["cid10_adequacy_plot_label"] = None
 
     if source == "SINAN":
         exprs["classi_code"] = clean_code_expr(sel.classi_fin_col) if sel.classi_fin_col else None
@@ -7631,6 +8018,64 @@ def query_g01_g02_cid_distribution(table: LoadedTable, exprs: Dict[str, Optional
     return run_query(table, sql)
 
 
+
+def query_cid10_adequacy_conversion(table: LoadedTable, exprs: Dict[str, Optional[str]], where_sql: str) -> pd.DataFrame:
+    cid = exprs.get("cid")
+    if not cid:
+        return pd.DataFrame()
+    source_expr = exprs.get("cid_source") or "NULL"
+    original_display = cid10_adequacy_original_display_expr(cid)
+    original_type = cid_type_expr(cid)
+    converted_group = exprs.get("cid10_adequacy_group") or cid10_adequacy_group_expr(cid)
+    converted_type = exprs.get("cid10_adequacy_type") or cid10_adequacy_type_expr(cid)
+    status = exprs.get("cid10_adequacy_status") or cid10_adequacy_status_expr(cid)
+    reason = exprs.get("cid10_adequacy_reason") or cid10_adequacy_reason_expr(cid)
+    plot_label = exprs.get("cid10_adequacy_plot_label") or cid10_adequacy_plot_label_expr(cid)
+    sql = f"""
+        WITH base AS (
+            SELECT {cid} AS cid10_detectado,
+                   {original_display} AS cid10_original,
+                   {original_type} AS cid10_original_classificacao,
+                   {converted_group} AS cid10_adequado_grupo,
+                   {converted_type} AS cid10_adequado_classificacao,
+                   {status} AS status_conversao,
+                   {reason} AS observacao_conversao,
+                   {plot_label} AS categoria_grafico,
+                   {source_expr} AS coluna_origem
+            FROM {table.ref_sql}
+            {where_sql}
+        ), agg AS (
+            SELECT cid10_original,
+                   cid10_adequado_grupo,
+                   cid10_adequado_classificacao,
+                   status_conversao,
+                   categoria_grafico,
+                   COUNT(*) AS n,
+                   COUNT(DISTINCT cid10_detectado) AS cids_distintos,
+                   string_agg(DISTINCT cid10_detectado, ', ' ORDER BY cid10_detectado)
+                       FILTER (WHERE cid10_detectado IS NOT NULL) AS cids_detectados,
+                   string_agg(DISTINCT cid10_original_classificacao, '; ' ORDER BY cid10_original_classificacao)
+                       FILTER (WHERE cid10_original_classificacao IS NOT NULL) AS classificacoes_originais,
+                   string_agg(DISTINCT observacao_conversao, '; ' ORDER BY observacao_conversao)
+                       FILTER (WHERE observacao_conversao IS NOT NULL) AS observacoes,
+                   string_agg(DISTINCT coluna_origem, ', ' ORDER BY coluna_origem)
+                       FILTER (WHERE coluna_origem IS NOT NULL) AS campos_origem
+            FROM base
+            WHERE cid10_detectado IS NOT NULL
+            GROUP BY 1, 2, 3, 4, 5
+        ), with_totals AS (
+            SELECT *, SUM(n) OVER () AS denominador
+            FROM agg
+        )
+        SELECT *,
+               CASE WHEN denominador > 0 THEN ROUND(100.0 * n / denominador, 2) ELSE NULL END AS pct
+        FROM with_totals
+        ORDER BY CASE WHEN status_conversao = 'Convertido' THEN 0 ELSE 1 END,
+                 n DESC, cid10_original, cid10_adequado_grupo
+    """
+    return run_query(table, sql)
+
+
 def query_sinan_cid10_conversion(table: LoadedTable, exprs: Dict[str, Optional[str]], where_sql: str) -> pd.DataFrame:
     con_code = exprs.get("con_code")
     if not con_code:
@@ -7684,7 +8129,7 @@ def query_sinan_cid10_conversion(table: LoadedTable, exprs: Dict[str, Optional[s
             GROUP BY 1, 2, 3
         ), with_totals AS (
             SELECT *,
-                   SUM(n) OVER (PARTITION BY incluido_comparacao) AS denominador
+                   SUM(n) OVER () AS denominador
             FROM agg
         )
         SELECT *,
@@ -7987,7 +8432,8 @@ def query_sinan_diagnostics_by_year(table: LoadedTable, exprs: Dict[str, Optiona
             WHEN 'G01' THEN 5
             WHEN 'G02' THEN 6
             WHEN 'G03' THEN 7
-            WHEN 'G04.2' THEN 8
+            WHEN 'G04' THEN 8
+            WHEN 'G05' THEN 9
             ELSE 99
         END
     """
@@ -8217,8 +8663,12 @@ def query_enriched_preview(table: LoadedTable, sel: ColumnSelection, exprs: Dict
         ("raca_cor", exprs.get("race")),
         ("municipio_residencia", exprs.get("mun_res_label") or exprs.get("mun_res")),
         ("municipio_evento_atendimento", exprs.get("mun_event_label") or exprs.get("mun_event")),
-        ("cid_meningite_detectado", exprs.get("cid")),
+        ("cid_meningite_encefalite_detectado", exprs.get("cid")),
         ("tipo_cid10", exprs.get("cid_type")),
+        ("cid10_adequado_grupo", exprs.get("cid10_adequacy_group")),
+        ("cid10_adequado_tipo", exprs.get("cid10_adequacy_type")),
+        ("cid10_status_conversao", exprs.get("cid10_adequacy_status")),
+        ("cid10_observacao_conversao", exprs.get("cid10_adequacy_reason")),
         ("campo_origem_cid", exprs.get("cid_source")),
         ("sinan_classificacao_final", exprs.get("classi_label")),
         ("sinan_conclusao_diagnostica", exprs.get("con_label")),
@@ -8444,9 +8894,9 @@ def render_field_guide(source: str) -> None:
 def render_cid_reference() -> None:
     copyable_dataframe(pd.DataFrame(CID_RULES)[["grupo", "padrao", "rotulo"]], use_container_width=True, hide_index=True)
     st.caption(
-        "O app procura A17.0, A39.0, A87*, G00*, G01*, G02*, G03* e G04.2 nos campos de CID-10. "
-        "No SIM e na CIHA, G01* e G02* são classificados diretamente a partir do CID-10 bruto informado. "
-        "No SINAN, a etiologia específica é derivada de CON_DIAGES e campos complementares; CON_DIAGES=05 não é convertido para G04.2."
+        "O app procura os padrões CID-10 listados acima nos campos de diagnóstico/causa. "
+        "G04* e G05* são tratados como prefixos. A22.8, A32.1, A83*, A84*, A85*, A86*, B00.3, B00.4, B01.0, B01.1, B02.0, B02.1, B05.0, B05.1, B06*, B26.1, B26.2, B37.5, B38.4, B45.1, B57.4, B58.2 e B60.2 foram adicionados ao recorte de meningite/encefalite/meningoencefalite. "
+        "No SINAN, a etiologia específica continua derivada de CON_DIAGES e campos complementares; CON_DIAGES=05 não é convertido para G04.2."
     )
 
 
@@ -8813,11 +9263,12 @@ def render_filters(source: str, table: LoadedTable, exprs: Dict[str, Optional[st
                 if selected_con:
                     clauses.append(f"{exprs['con_group']} IN ({', '.join(qstr(x) for x in selected_con)})")
         else:
-            cid_type = exprs.get("cid_type")
+            cid_type = exprs.get("cid10_adequacy_type") or exprs.get("cid_type")
             if cid_type:
                 with c5:
-                    cid_opts = top_values(table, cid_type, limit=20)
-                    selected_cid = st.multiselect("Tipo CID-10", cid_opts, default=[], key=f"cidtype_filter_{source}")
+                    cid_opts = top_values(table, cid_type, limit=25)
+                    selected_cid = st.multiselect("CID-10 adequado/conversão", cid_opts, default=[], key=f"cidtype_filter_{source}")
+                    st.caption("Filtro baseado na conversão de adequação quando aplicável; os CID-10 fora da conversão permanecem como categoria original.")
                 if selected_cid:
                     clauses.append(f"{cid_type} IN ({', '.join(qstr(x) for x in selected_cid)})")
             if source == "CIHA" and exprs.get("modalidade_label"):
@@ -9321,6 +9772,45 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
             st.plotly_chart(fig, use_container_width=True)
             copyable_dataframe(cid_dist, use_container_width=True, hide_index=True)
             download_button(cid_dist, f"{source.lower()}_cid10_distribuicao.csv")
+
+            conv_adequacy = query_cid10_adequacy_conversion(table, exprs, graph_where)
+            if not conv_adequacy.empty:
+                conv_adequacy = add_text(conv_adequacy)
+                st.markdown("### Conversão para adequação ao CID-10 de meningite / encefalite")
+                st.caption(CID10_ADEQUACY_OBSERVATION)
+                fig_conv = px.bar(
+                    conv_adequacy,
+                    x="n",
+                    y="categoria_grafico",
+                    orientation="h",
+                    text="texto",
+                    title=f"{source}: Conversão para adequação ao CID-10 de meningite / encefalite",
+                    labels={"categoria_grafico": "CID-10 original → categoria adequada", "n": "Registros", "pct": "% do total detectado"},
+                    hover_data={
+                        "texto": False,
+                        "pct": ":.2f",
+                        "denominador": True,
+                        "status_conversao": True,
+                        "cids_detectados": True,
+                        "observacoes": True,
+                        "campos_origem": True,
+                    },
+                )
+                fig_conv.update_layout(yaxis={"categoryorder": "total ascending"})
+                st.plotly_chart(fig_conv, use_container_width=True)
+                display_cols = [
+                    c for c in [
+                        "cid10_original", "cid10_adequado_grupo", "cid10_adequado_classificacao",
+                        "status_conversao", "n", "pct", "denominador", "cids_detectados",
+                        "classificacoes_originais", "observacoes", "campos_origem",
+                    ]
+                    if c in conv_adequacy.columns
+                ]
+                copyable_dataframe(conv_adequacy[display_cols], use_container_width=True, hide_index=True)
+                download_button(conv_adequacy, f"{source.lower()}_cid10_conversao_adequacao_meningite_encefalite.csv")
+                with st.expander("Regra usada para a conversão de adequação"):
+                    copyable_dataframe(pd.DataFrame(CID10_ADEQUACY_MAPPING_ROWS), use_container_width=True, hide_index=True)
+                    st.caption(CID10_ADEQUACY_OBSERVATION)
 
             g01_g02 = query_g01_g02_cid_distribution(table, exprs, graph_where)
             if not g01_g02.empty:
@@ -9966,7 +10456,7 @@ def render_comparison(loaded: Sequence[Dict[str, object]]) -> None:
     freq = {"Ano": "year", "Mês": "month", "Semana": "week"}[freq_label]
     normalize = st.checkbox("Normalizar em índice 100 no primeiro período não-zero", value=False, key="comp_norm")
     stratify_cid = st.checkbox("Estratificar por tipo CID-10 quando disponível", value=False, key="comp_cid")
-    st.caption("Na comparação, o SINAN entra sempre como casos confirmados (CLASSI_FIN = 1), independentemente da definição exploratória escolhida na aba SINAN. Quando há estratificação por CID-10, o SINAN usa a conversão de CON_DIAGES; SIM/CIHA usam o CID bruto detectado. Na agregação mensal, meses sem registros são mantidos com valor zero.")
+    st.caption("Na comparação, o SINAN entra sempre como casos confirmados (CLASSI_FIN = 1), independentemente da definição exploratória escolhida na aba SINAN. Quando há estratificação por CID-10, o SINAN usa a conversão de CON_DIAGES; SIM/CIHA usam a conversão para adequação ao CID-10 de meningite / encefalite, mantendo no denominador os CID-10 fora da conversão. Na agregação mensal, meses sem registros são mantidos com valor zero.")
 
     frames = []
     for item in available:
@@ -9978,6 +10468,8 @@ def render_comparison(loaded: Sequence[Dict[str, object]]) -> None:
         if stratify_cid:
             if source_name == "SINAN" and exprs.get("sinan_cid10_conversion_type"):
                 cat = exprs.get("sinan_cid10_conversion_type")
+            elif source_name in {"SIM", "CIHA"} and exprs.get("cid10_adequacy_type"):
+                cat = exprs.get("cid10_adequacy_type")
             else:
                 cat = exprs.get("cid_type")
         else:
@@ -10062,10 +10554,10 @@ def render_methodology() -> None:
                 ["SINAN — confirmado", "CLASSI_FIN = 1"],
                 ["SINAN — descartado", "CLASSI_FIN = 2"],
                 ["SINAN — óbito por meningite", "CLASSI_FIN = 1 e EVOLUCAO = 2"],
-                ["SIM — causa básica", "CID de meningite detectado em CAUSABAS"],
-                ["SIM — menção", "CID de meningite detectado em CAUSABAS, linhas da DO ou ATESTADO"],
+                ["SIM — causa básica", "CID de meningite/encefalite detectado em CAUSABAS"],
+                ["SIM — menção", "CID de meningite/encefalite detectado em CAUSABAS, linhas da DO ou ATESTADO"],
                 ["SIM — óbito na gravidez", "campo OBITOGRAV quando disponível"],
-                ["CIHA — atendimento", "registro administrativo com data/diagnóstico"],
+                ["CIHA — atendimento", "registro administrativo com data/diagnóstico, incluindo os novos CID-10 de meningite/encefalite quando detectados"],
                 ["CIHA — morte administrativa", "MORTE = 1"],
                 ["CIHA — permanência zero", "DIAS_PERM = 0"],
             ],
