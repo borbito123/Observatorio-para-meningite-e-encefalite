@@ -50,7 +50,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-05-21-v18-cid10-adequacy-prefixos"
+APP_VERSION = "2026-05-21-v19-cid10-adequacy-prefixos-com-convertidos"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos
@@ -6979,15 +6979,13 @@ def cid10_adequacy_reason_expr(cid_sql: str) -> str:
 def cid10_adequacy_plot_label_expr(cid_sql: str) -> str:
     """Categoria usada no gráfico resumido de adequação e na comparação.
 
-    Retorna somente o CID-10 adequado prefixado de destino (G01, G02, G02.0 ou G05)
-    para registros efetivamente convertidos. CIDs fora da tabela de conversão ficam
-    como NULL para não poluir o gráfico com categorias originais não convertidas.
+    Retorna o CID-10 adequado prefixado final: códigos presentes na tabela de
+    conversão são deslocados para o destino; códigos já prefixados e não
+    convertidos permanecem em seu próprio grupo CID-10. Registros sem CID
+    retornam NULL para não entrar no gráfico nem na comparação estratificada.
     """
-    clauses = [
-        f"WHEN {_cid10_adequacy_condition(cid_sql, rule)} THEN {qstr(rule['destino_grupo'])}"
-        for rule in CID10_ADEQUACY_CONVERSION_RULES
-    ]
-    return f"CASE WHEN {cid_sql} IS NULL THEN NULL {' '.join(clauses)} ELSE NULL END"
+    converted_or_original_group = cid10_adequacy_group_expr(cid_sql)
+    return f"CASE WHEN {cid_sql} IS NULL THEN NULL ELSE {converted_or_original_group} END"
 
 
 def text_concat_expr(cols: Sequence[str]) -> Optional[str]:
@@ -8091,14 +8089,84 @@ def _join_unique_text(values: pd.Series, sep: str = ", ") -> Optional[str]:
     return sep.join(seen) if seen else None
 
 
-def summarize_cid10_adequacy_plot(df: pd.DataFrame) -> pd.DataFrame:
-    """Agrega a conversão CID-10 no nível do CID adequado usado no gráfico.
+def _format_br_int(value: object) -> str:
+    if pd.isna(value):
+        return "—"
+    try:
+        return f"{int(round(float(value))):,}".replace(",", ".")
+    except Exception:
+        return str(value)
 
-    A tabela detalhada continua separando os códigos originais; o gráfico deve
-    somar todos os códigos convertidos para o mesmo destino. Ex.: B58.2 soma em G05.
+
+def _format_br_pct(value: object) -> str:
+    if pd.isna(value):
+        return "—"
+    try:
+        return f"{float(value):.1f}%".replace(".", ",")
+    except Exception:
+        return str(value)
+
+
+def build_cid10_adequacy_conversion_note(df: pd.DataFrame) -> str:
+    """Resume, em texto curto, somente o que foi efetivamente convertido."""
+    required = {"status_conversao", "cid10_original", "cid10_adequado_grupo", "n", "denominador"}
+    if df.empty or not required.issubset(df.columns):
+        return "Conversão efetiva no recorte: não foi possível calcular o resumo de conversões."
+
+    denom = pd.to_numeric(df["denominador"], errors="coerce").max()
+    if pd.isna(denom) or denom <= 0:
+        denom = pd.to_numeric(df["n"], errors="coerce").sum()
+
+    converted = df[df["status_conversao"].eq("Convertido")].copy()
+    if converted.empty:
+        return (
+            "Conversão efetiva no recorte: nenhum registro foi convertido; "
+            f"o gráfico mostra somente CID-10 prefixados já presentes no SIM/CIHA "
+            f"({_format_br_int(denom)} registros com CID-10 detectado)."
+        )
+
+    converted["n"] = pd.to_numeric(converted["n"], errors="coerce").fillna(0)
+    total_converted = converted["n"].sum()
+    pct_converted = (100.0 * total_converted / denom) if denom and denom > 0 else np.nan
+
+    agg_kwargs = {"n": ("n", "sum")}
+    if "cids_detectados" in converted.columns:
+        agg_kwargs["cids_detectados"] = ("cids_detectados", lambda s: _join_unique_text(s, ", "))
+
+    detail = (
+        converted
+        .groupby(["cid10_original", "cid10_adequado_grupo"], dropna=False, as_index=False)
+        .agg(**agg_kwargs)
+        .sort_values(["cid10_adequado_grupo", "n", "cid10_original"], ascending=[True, False, True])
+    )
+
+    parts: List[str] = []
+    for _, row in detail.iterrows():
+        origem = row.get("cid10_original")
+        destino = row.get("cid10_adequado_grupo")
+        origem = "CID original não identificado" if pd.isna(origem) or not str(origem).strip() else str(origem)
+        destino = "destino não identificado" if pd.isna(destino) or not str(destino).strip() else str(destino)
+        piece = f"{origem} → {destino}: {_format_br_int(row.get('n'))}"
+        cids = row.get("cids_detectados") if "cids_detectados" in detail.columns else None
+        if isinstance(cids, str) and cids.strip():
+            piece += f" (CID detectado: {cids})"
+        parts.append(piece)
+
+    return (
+        f"Conversão efetiva no recorte: {_format_br_int(total_converted)} registros "
+        f"({_format_br_pct(pct_converted)} do total com CID-10 detectado) foram convertidos. "
+        f"Detalhe: {'; '.join(parts)}."
+    )
+
+
+def summarize_cid10_adequacy_plot(df: pd.DataFrame) -> pd.DataFrame:
+    """Agrega o gráfico no nível do CID-10 adequado final.
+
+    O gráfico soma os códigos efetivamente convertidos no destino adequado e
+    também mantém os CID-10 prefixados já presentes no SIM/CIHA. A tabela
+    detalhada continua separando códigos originais e status de conversão.
     """
     required = {
-        "status_conversao",
         "categoria_grafico",
         "cid10_adequado_grupo",
         "cid10_adequado_classificacao",
@@ -8108,25 +8176,25 @@ def summarize_cid10_adequacy_plot(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty or not required.issubset(df.columns):
         return pd.DataFrame()
 
-    converted = df[
-        df["status_conversao"].eq("Convertido")
-        & df["categoria_grafico"].notna()
+    plot_df = df[
+        df["categoria_grafico"].notna()
         & df["cid10_adequado_grupo"].notna()
     ].copy()
-    if converted.empty:
+    if plot_df.empty:
         return pd.DataFrame()
 
     agg = (
-        converted
+        plot_df
         .groupby(["categoria_grafico", "cid10_adequado_grupo", "cid10_adequado_classificacao"], dropna=False, as_index=False)
         .agg(
             n=("n", "sum"),
             denominador=("denominador", "max"),
-            cid10_originais=("cid10_original", lambda s: _join_unique_text(s, ", ")),
-            cids_detectados=("cids_detectados", lambda s: _join_unique_text(s, ", ")),
-            classificacoes_originais=("classificacoes_originais", lambda s: _join_unique_text(s, "; ")),
-            observacoes=("observacoes", lambda s: _join_unique_text(s, "; ")),
-            campos_origem=("campos_origem", lambda s: _join_unique_text(s, ", ")),
+            status_conversao=("status_conversao", lambda s: _join_unique_text(s, ", ") if "status_conversao" in plot_df.columns else None),
+            cid10_originais=("cid10_original", lambda s: _join_unique_text(s, ", ") if "cid10_original" in plot_df.columns else None),
+            cids_detectados=("cids_detectados", lambda s: _join_unique_text(s, ", ") if "cids_detectados" in plot_df.columns else None),
+            classificacoes_originais=("classificacoes_originais", lambda s: _join_unique_text(s, "; ") if "classificacoes_originais" in plot_df.columns else None),
+            observacoes=("observacoes", lambda s: _join_unique_text(s, "; ") if "observacoes" in plot_df.columns else None),
+            campos_origem=("campos_origem", lambda s: _join_unique_text(s, ", ") if "campos_origem" in plot_df.columns else None),
         )
     )
     denom = agg["denominador"].replace({0: np.nan})
@@ -9838,7 +9906,7 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                 st.markdown("### Conversão para adequação ao CID-10 de meningite / encefalite")
                 st.caption(CID10_ADEQUACY_OBSERVATION)
                 if conv_adequacy_plot.empty:
-                    st.info("Não houve CID-10 convertido para os prefixos de adequação no recorte atual.")
+                    st.info("Não houve CID-10 detectado para exibir no gráfico de adequação no recorte atual.")
                 else:
                     conv_adequacy_plot = add_text(conv_adequacy_plot)
                     fig_conv = px.bar(
@@ -9854,6 +9922,7 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                             "pct": ":.2f",
                             "denominador": True,
                             "cid10_adequado_classificacao": True,
+                            "status_conversao": True,
                             "cid10_originais": True,
                             "cids_detectados": True,
                             "campos_origem": True,
@@ -9862,9 +9931,10 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                     fig_conv.update_layout(yaxis={"categoryorder": "total ascending"})
                     st.plotly_chart(fig_conv, use_container_width=True)
                     st.caption(
-                        "Gráfico agregado pelo CID-10 adequado de destino. "
-                        "Os CID-10 originais convertidos permanecem detalhados na tabela abaixo."
+                        "Gráfico agregado pelo CID-10 adequado final: CID-10 convertidos somam no destino "
+                        "e CID-10 prefixados já presentes permanecem em seu próprio grupo."
                     )
+                    st.caption(build_cid10_adequacy_conversion_note(conv_adequacy))
                 display_cols = [
                     c for c in [
                         "cid10_original", "cid10_adequado_grupo", "cid10_adequado_classificacao",
@@ -10523,9 +10593,10 @@ def render_comparison(loaded: Sequence[Dict[str, object]]) -> None:
     freq = {"Ano": "year", "Mês": "month", "Semana": "week"}[freq_label]
     normalize = st.checkbox("Normalizar em índice 100 no primeiro período não-zero", value=False, key="comp_norm")
     stratify_cid = st.checkbox("Estratificar por tipo CID-10 quando disponível", value=False, key="comp_cid")
-    st.caption("Na comparação, o SINAN entra sempre como casos confirmados (CLASSI_FIN = 1), independentemente da definição exploratória escolhida na aba SINAN. Quando há estratificação por CID-10, o SINAN usa a conversão de CON_DIAGES; SIM/CIHA usam os mesmos CID-10 adequados prefixados do gráfico de conversão (G01, G02, G02.0 e G05). CID-10 fora da tabela de conversão não aparecem nas séries estratificadas. Na agregação mensal, meses sem registros são mantidos com valor zero.")
+    st.caption("Na comparação, o SINAN entra sempre como casos confirmados (CLASSI_FIN = 1), independentemente da definição exploratória escolhida na aba SINAN. Quando há estratificação por CID-10, o SINAN usa a conversão de CON_DIAGES; SIM/CIHA usam os mesmos CID-10 adequados prefixados do gráfico de conversão: os códigos convertidos somam no destino e os CID-10 prefixados já presentes permanecem em seu próprio grupo. Na agregação mensal, meses sem registros são mantidos com valor zero.")
 
     frames = []
+    comparison_conversion_notes: List[str] = []
     for item in available:
         source_name = item["source"]
         if source_name not in chosen:
@@ -10555,6 +10626,13 @@ def render_comparison(loaded: Sequence[Dict[str, object]]) -> None:
         except Exception as exc:
             st.warning(f"Falha na série de {source_name}: {exc}")
             continue
+        if stratify_cid and source_name in {"SIM", "CIHA"} and exprs.get("cid10_adequacy_plot_label"):
+            try:
+                conv_note_df = query_cid10_adequacy_conversion(table, exprs, series_where)
+                if not conv_note_df.empty:
+                    comparison_conversion_notes.append(f"{source_name}: {build_cid10_adequacy_conversion_note(conv_note_df)}")
+            except Exception as exc:
+                comparison_conversion_notes.append(f"{source_name}: não foi possível calcular a observação de conversão ({exc}).")
         if ts.empty:
             continue
         if cat:
@@ -10591,6 +10669,8 @@ def render_comparison(loaded: Sequence[Dict[str, object]]) -> None:
 
     fig = px.line(comp, x="periodo", y="valor", color="serie", markers=True, title="Comparação de tendências", labels={"valor": "Índice" if normalize else "Registros", "periodo": "Período", "serie": "Série"})
     st.plotly_chart(fig, use_container_width=True)
+    if comparison_conversion_notes:
+        st.caption("Observação da conversão usada na comparação estratificada: " + " ".join(comparison_conversion_notes))
     copyable_dataframe(comp, use_container_width=True, hide_index=True)
     download_button(comp, "comparacao_series_bases.csv")
 
