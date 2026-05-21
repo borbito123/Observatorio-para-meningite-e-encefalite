@@ -33,8 +33,6 @@ Link: https://ee.kobotoolbox.org/x/ifAQUhNw.
 Este app em Python foi feito para análise epidemiológica a partir de arquivos `.parquet ou .duckdb` do DATASUS, com foco nos três bancos de dados supracitados.
 Link para a versão no streamlti: https://fgwybuegynhnli87zeyurr.streamlit.app/
 
-Observação: Caso seja necesssário a escolha de um código de município, o código para o Rio de Janeiro é "330455 ou 3304557". O código do estado do Rio de Janeiro é "33". Se preferível, esse tipo de informação sobre os códigos dos municípios e dos estados pode ser obtido no site do IBGE, ou em sites como: https://atendimento.tecnospeed.com.br/hc/pt-br/articles/360021494734-Tabela-de-C%C3%B3digo-de-UF-do-IBGE e https://www.gov.br/receitafederal/dados/municipios.csv.
-
 ## _O que o app faz_
 
 - Lê os parquets da release mais atual deste aplicativo (https://github.com/borbito123/Teste---Dados-Epidemiol-gicos-para-meningite-SINAN-CIHA-SIM---Rio-de-Janeiro/releases/tag/v1.0) e já os carrega automaticamente no programa. Cabe ao usuário escolher quais bancos de dados carregar. Atualmente são disponibilizados os dados referente ao estado do RJ e logo mais os bancos de todas as UFs juntas serão disponibilizados.
@@ -43,7 +41,7 @@ Observação: Caso seja necesssário a escolha de um código de município, o c�
 - Gera gráficos epidemiológicos interativos.
 - Permite download em CSV das tabelas agregadas de cada gráfico.
 
-Observação: Para contornar eventuais problemas de memória ou crashes do aplicativo, foram impostas algumas limitações que podem ser modificadas pelo usuário. No canto esquerdo da aba "Orientação" há a opção "desempenho e memória" que permite ajustar essas limitações. 
+_Observação: Para contornar eventuais problemas de memória ou crashes do aplicativo, foram impostas algumas limitações que podem ser modificadas pelo usuário. No canto esquerdo da aba "Orientação" há a opção "desempenho e memória" que permite ajustar essas limitações._
 
 ## _Gráficos incluídos_
 
