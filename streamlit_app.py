@@ -50,7 +50,106 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-05-15-v15-github-release1-selecao-manual"
+APP_VERSION = "2026-05-20-v16-otimizado-carregamento-lazy"
+
+# =============================================================================
+# Controles de desempenho e limites defensivos
+# =============================================================================
+
+DEFAULT_MAX_PARQUET_FILES_PER_LOAD = 4
+DEFAULT_DISPLAY_ROW_LIMIT = 1000
+DEFAULT_COPY_ROW_LIMIT = 300
+DEFAULT_DOWNLOAD_ROW_LIMIT = 50000
+DEFAULT_PREVIEW_ROW_LIMIT = 200
+DEFAULT_MAX_PREVIEW_ROWS = 5000
+DEFAULT_SQL_LAB_ROW_LIMIT = 5000
+DEFAULT_FULL_EXPORT_ROW_LIMIT = 100000
+UPLOAD_CHUNK_SIZE = 1024 * 1024
+
+
+def _session_int(key: str, default: int) -> int:
+    """Lê um inteiro de session_state com fallback seguro."""
+    try:
+        value = int(st.session_state.get(key, default))
+    except Exception:
+        return default
+    return max(0, value)
+
+
+def perf_int(key: str, default: int) -> int:
+    """Atalho para parâmetros de desempenho configuráveis na barra lateral."""
+    return _session_int(key, default)
+
+
+def render_performance_controls() -> None:
+    """Expõe limites para evitar carregamento, renderização e exportação excessivos."""
+    with st.expander("Desempenho e memória", expanded=False):
+        st.number_input(
+            "Máximo de Parquets por carregamento",
+            min_value=1,
+            max_value=60,
+            value=perf_int("perf_max_parquet_files", DEFAULT_MAX_PARQUET_FILES_PER_LOAD),
+            step=1,
+            key="perf_max_parquet_files",
+            help="Evita abrir muitos arquivos/anos de uma vez. Aumente gradualmente se o ambiente suportar.",
+        )
+        st.number_input(
+            "Máximo de linhas renderizadas em tabelas",
+            min_value=100,
+            max_value=20000,
+            value=perf_int("perf_display_row_limit", DEFAULT_DISPLAY_ROW_LIMIT),
+            step=100,
+            key="perf_display_row_limit",
+            help="A tabela na tela é truncada para proteger o navegador.",
+        )
+        st.number_input(
+            "Máximo de linhas no botão copiar",
+            min_value=50,
+            max_value=5000,
+            value=perf_int("perf_copy_row_limit", DEFAULT_COPY_ROW_LIMIT),
+            step=50,
+            key="perf_copy_row_limit",
+            help="O botão de cópia injeta HTML/TSV no navegador; mantenha baixo para tabelas grandes.",
+        )
+        st.number_input(
+            "Máximo de linhas em downloads genéricos",
+            min_value=1000,
+            max_value=500000,
+            value=perf_int("perf_download_row_limit", DEFAULT_DOWNLOAD_ROW_LIMIT),
+            step=1000,
+            key="perf_download_row_limit",
+            help="Downloads de tabelas agregadas normalmente ficam muito abaixo deste limite.",
+        )
+        st.number_input(
+            "Máximo de linhas por página na prévia",
+            min_value=100,
+            max_value=50000,
+            value=perf_int("perf_max_preview_rows", DEFAULT_MAX_PREVIEW_ROWS),
+            step=100,
+            key="perf_max_preview_rows",
+            help="A prévia é paginada. Evite enviar muitas linhas ao frontend.",
+        )
+        st.number_input(
+            "Máximo de linhas no SQL Lab",
+            min_value=100,
+            max_value=100000,
+            value=perf_int("perf_sql_lab_row_limit", DEFAULT_SQL_LAB_ROW_LIMIT),
+            step=100,
+            key="perf_sql_lab_row_limit",
+            help="O SQL Lab sempre encapsula SELECT/WITH em LIMIT para evitar resultados gigantes.",
+        )
+        st.number_input(
+            "Máximo de linhas na exportação completa",
+            min_value=1000,
+            max_value=1000000,
+            value=perf_int("perf_full_export_row_limit", DEFAULT_FULL_EXPORT_ROW_LIMIT),
+            step=1000,
+            key="perf_full_export_row_limit",
+            help="A exportação completa só é habilitada quando os filtros reduzem o total para este limite.",
+        )
+        if st.button("Limpar cache de consultas", key="clear_query_cache"):
+            st.cache_data.clear()
+            st.success("Cache limpo. As próximas consultas serão recalculadas.")
 
 
 # =============================================================================
@@ -6964,17 +7063,66 @@ def parquet_ref(paths: Sequence[str]) -> str:
 
 
 def materialize_upload(upload, namespace: str) -> str:
-    data = upload.getbuffer().tobytes()
-    digest = hashlib.sha1(data).hexdigest()[:16]
+    """Materializa upload em arquivo temporário sem duplicar todo o conteúdo em memória."""
     suffix = Path(upload.name).suffix or ".dat"
     clean_name = safe_filename(Path(upload.name).stem)
-    out = Path(tempfile.gettempdir()) / f"meningite_{namespace}_{clean_name}_{digest}{suffix}"
-    if not out.exists():
-        out.write_bytes(data)
-    return str(out)
+    temp_dir = Path(tempfile.gettempdir())
+    temp_dir.mkdir(parents=True, exist_ok=True)
+
+    digest_obj = hashlib.sha1()
+    tmp = tempfile.NamedTemporaryFile(
+        prefix=f"meningite_{namespace}_{clean_name}_",
+        suffix=f"{suffix}.tmp",
+        dir=temp_dir,
+        delete=False,
+    )
+    tmp_path = Path(tmp.name)
+
+    try:
+        upload.seek(0)
+        with tmp:
+            while True:
+                chunk = upload.read(UPLOAD_CHUNK_SIZE)
+                if not chunk:
+                    break
+                digest_obj.update(chunk)
+                tmp.write(chunk)
+        upload.seek(0)
+
+        digest = digest_obj.hexdigest()[:16]
+        out = temp_dir / f"meningite_{namespace}_{clean_name}_{digest}{suffix}"
+        if out.exists():
+            tmp_path.unlink(missing_ok=True)
+        else:
+            tmp_path.replace(out)
+        return str(out)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        try:
+            upload.seek(0)
+        except Exception:
+            pass
+        raise
 
 
-def run_query(table: LoadedTable, sql: str) -> pd.DataFrame:
+def _file_fingerprint(path: Optional[str]) -> Tuple[str, Optional[int], Optional[int]]:
+    if not path:
+        return "", None, None
+    try:
+        stat = Path(path).stat()
+        return str(path), int(stat.st_size), int(stat.st_mtime_ns)
+    except OSError:
+        return str(path), None, None
+
+
+def table_cache_key(table: LoadedTable) -> Tuple[object, ...]:
+    """Chave leve para invalidar cache quando arquivos mudam."""
+    parquet_meta = tuple(_file_fingerprint(path) for path in (table.parquet_paths or []))
+    duckdb_meta = _file_fingerprint(table.db_path)
+    return (table.kind, table.ref_sql, duckdb_meta, parquet_meta)
+
+
+def _execute_query_uncached(table: LoadedTable, sql: str) -> pd.DataFrame:
     if table.kind == "duckdb":
         con = duckdb.connect(table.db_path, read_only=True)
     else:
@@ -6983,6 +7131,25 @@ def run_query(table: LoadedTable, sql: str) -> pd.DataFrame:
         return con.execute(sql).df()
     finally:
         con.close()
+
+
+@st.cache_data(show_spinner=False, ttl=1800, max_entries=256)
+def _run_query_cached(table_key: Tuple[object, ...], kind: str, db_path: Optional[str], sql: str) -> pd.DataFrame:
+    if kind == "duckdb":
+        con = duckdb.connect(db_path, read_only=True)
+    else:
+        con = duckdb.connect(database=":memory:")
+    try:
+        return con.execute(sql).df()
+    finally:
+        con.close()
+
+
+def run_query(table: LoadedTable, sql: str, cache: bool = True) -> pd.DataFrame:
+    """Executa SQL; por padrão cacheia apenas resultados de consulta agregada/pequena."""
+    if cache:
+        return _run_query_cached(table_cache_key(table), table.kind, table.db_path, sql)
+    return _execute_query_uncached(table, sql)
 
 
 def schema_df(table: LoadedTable) -> pd.DataFrame:
@@ -7352,13 +7519,16 @@ def query_yearly_category(table: LoadedTable, dt_sql: str, category_sql: str, wh
             FROM base
             WHERE dt IS NOT NULL
             GROUP BY 1, 2
+        ), with_totals AS (
+            SELECT ano, categoria, n,
+                   SUM(n) OVER (PARTITION BY ano) AS total_ano
+            FROM counts
         )
-        SELECT ano, categoria, n,
-               SUM(n) OVER (PARTITION BY ano) AS total_ano,
-               CASE WHEN SUM(n) OVER (PARTITION BY ano) > 0
-                    THEN ROUND(100.0 * n / SUM(n) OVER (PARTITION BY ano), 2)
+        SELECT ano, categoria, n, total_ano,
+               CASE WHEN total_ano > 0
+                    THEN ROUND(100.0 * n / total_ano, 2)
                     ELSE NULL END AS pct
-        FROM counts
+        FROM with_totals
         ORDER BY ano, categoria
     """
     return run_query(table, sql)
@@ -7448,11 +7618,13 @@ def query_g01_g02_cid_distribution(table: LoadedTable, exprs: Dict[str, Optional
                    'G02 — meningite em outras doenças infecciosas/parasitárias' AS tipo,
                    COUNT(*) FILTER (WHERE tem_g02) AS n
             FROM base
+        ), with_totals AS (
+            SELECT *, SUM(n) OVER () AS denominador
+            FROM agg
         )
         SELECT *,
-               SUM(n) OVER () AS denominador,
-               CASE WHEN SUM(n) OVER () > 0 THEN ROUND(100.0 * n / SUM(n) OVER (), 2) ELSE NULL END AS pct
-        FROM agg
+               CASE WHEN denominador > 0 THEN ROUND(100.0 * n / denominador, 2) ELSE NULL END AS pct
+        FROM with_totals
         WHERE n > 0
         ORDER BY grupo
     """
@@ -7510,13 +7682,16 @@ def query_sinan_cid10_conversion(table: LoadedTable, exprs: Dict[str, Optional[s
                        FILTER (WHERE justificativa_cid10 IS NOT NULL) AS justificativas
             FROM base
             GROUP BY 1, 2, 3
+        ), with_totals AS (
+            SELECT *,
+                   SUM(n) OVER (PARTITION BY incluido_comparacao) AS denominador
+            FROM agg
         )
         SELECT *,
-               SUM(n) OVER (PARTITION BY incluido_comparacao) AS denominador,
-               CASE WHEN SUM(n) OVER (PARTITION BY incluido_comparacao) > 0
-                    THEN ROUND(100.0 * n / SUM(n) OVER (PARTITION BY incluido_comparacao), 2)
+               CASE WHEN denominador > 0
+                    THEN ROUND(100.0 * n / denominador, 2)
                     ELSE NULL END AS pct
-        FROM agg
+        FROM with_totals
         ORDER BY CASE WHEN incluido_comparacao = 'Sim' THEN 0 ELSE 1 END,
                  n DESC, cid10_grupo
     """
@@ -7556,11 +7731,13 @@ def query_sinan_g01_base_disease(table: LoadedTable, exprs: Dict[str, Optional[s
             FROM base
             WHERE cid10_grupo = 'G01' AND incluido_comparacao = 'Sim'
             GROUP BY 1
+        ), with_totals AS (
+            SELECT *, SUM(n) OVER () AS denominador
+            FROM agg
         )
         SELECT *,
-               SUM(n) OVER () AS denominador,
-               CASE WHEN SUM(n) OVER () > 0 THEN ROUND(100.0 * n / SUM(n) OVER (), 2) ELSE NULL END AS pct
-        FROM agg
+               CASE WHEN denominador > 0 THEN ROUND(100.0 * n / denominador, 2) ELSE NULL END AS pct
+        FROM with_totals
         ORDER BY n DESC, doenca_base_provavel
     """
     return run_query(table, sql)
@@ -7685,14 +7862,17 @@ def query_sinan_numeric_distribution(table: LoadedTable, value_expr: str, where_
             SELECT bin_idx, COUNT(*) AS n
             FROM binned
             GROUP BY 1
+        ), with_totals AS (
+            SELECT bin_idx, n, SUM(n) OVER () AS denominador
+            FROM agg
         )
         SELECT {minimo!r} + bin_idx * {width!r} AS faixa_inicio,
                CASE WHEN bin_idx = {bin_count - 1} THEN {maximo!r}
                     ELSE {minimo!r} + (bin_idx + 1) * {width!r} END AS faixa_fim,
                n,
-               SUM(n) OVER () AS denominador,
-               ROUND(100.0 * n / SUM(n) OVER (), 2) AS pct
-        FROM agg
+               denominador,
+               CASE WHEN denominador > 0 THEN ROUND(100.0 * n / denominador, 2) ELSE NULL END AS pct
+        FROM with_totals
         ORDER BY faixa_inicio
     """
     df = run_query(table, sql)
@@ -7956,10 +8136,13 @@ def query_ciha_dias_perm_distribution(table: LoadedTable, exprs: Dict[str, Optio
             SELECT faixa_dias_perm, ordem, COUNT(*) AS n
             FROM bucketed
             GROUP BY 1, 2
+        ), with_totals AS (
+            SELECT faixa_dias_perm, ordem, n, SUM(n) OVER () AS denominador
+            FROM counts
         )
-        SELECT faixa_dias_perm, ordem, n, SUM(n) OVER () AS denominador,
-               CASE WHEN SUM(n) OVER () > 0 THEN ROUND(100.0 * n / SUM(n) OVER (), 2) ELSE NULL END AS pct
-        FROM counts
+        SELECT faixa_dias_perm, ordem, n, denominador,
+               CASE WHEN denominador > 0 THEN ROUND(100.0 * n / denominador, 2) ELSE NULL END AS pct
+        FROM with_totals
         ORDER BY ordem, faixa_dias_perm
     """
     return run_query(table, sql)
@@ -8025,7 +8208,7 @@ def query_missingness_by_year(table: LoadedTable, fields: Dict[str, Optional[str
     return run_query(table, sql)
 
 
-def query_enriched_preview(table: LoadedTable, sel: ColumnSelection, exprs: Dict[str, Optional[str]], where_sql: str, limit: Optional[int] = 200) -> pd.DataFrame:
+def query_enriched_preview(table: LoadedTable, sel: ColumnSelection, exprs: Dict[str, Optional[str]], where_sql: str, limit: Optional[int] = 200, offset: int = 0) -> pd.DataFrame:
     items = []
     mapping = [
         ("data_analise", exprs.get("dt")),
@@ -8114,9 +8297,9 @@ def query_enriched_preview(table: LoadedTable, sel: ColumnSelection, exprs: Dict
         items.append(f"{qident(col)} AS {qident('raw_' + col[:45])}")
     if not items:
         items = ["*"]
-    limit_sql = "" if limit is None else f" LIMIT {int(limit)}"
+    limit_sql = "" if limit is None else f" LIMIT {int(limit)} OFFSET {int(max(offset, 0))}"
     sql = f"SELECT {', '.join(items)} FROM {table.ref_sql} {where_sql}{limit_sql}"
-    return run_query(table, sql)
+    return run_query(table, sql, cache=False)
 
 
 # =============================================================================
@@ -8124,12 +8307,20 @@ def query_enriched_preview(table: LoadedTable, sel: ColumnSelection, exprs: Dict
 # =============================================================================
 
 
-def download_button(df: pd.DataFrame, filename: str, label: str = "Baixar CSV") -> None:
+def download_button(df: pd.DataFrame, filename: str, label: str = "Baixar CSV", max_rows: Optional[int] = None) -> None:
     if df is None or df.empty:
         return
+    row_limit = perf_int("perf_download_row_limit", DEFAULT_DOWNLOAD_ROW_LIMIT) if max_rows is None else int(max_rows)
+    out = df
+    if row_limit > 0 and len(df) > row_limit:
+        out = df.head(row_limit).copy()
+        st.caption(
+            f"Download limitado às primeiras {row_limit:,} linhas de {len(df):,} para evitar excesso de memória."
+            .replace(",", ".")
+        )
     st.download_button(
         label=label,
-        data=df.to_csv(index=False).encode("utf-8-sig"),
+        data=out.to_csv(index=False).encode("utf-8-sig"),
         file_name=filename,
         mime="text/csv",
         use_container_width=False,
@@ -8213,8 +8404,31 @@ def copy_table_button(df: pd.DataFrame, label: str = "Copiar tabela para Google 
 
 
 def copyable_dataframe(df: pd.DataFrame, *args, **kwargs) -> None:
-    st.dataframe(df, *args, **kwargs)
-    copy_table_button(df)
+    if df is None:
+        return
+
+    display_limit = perf_int("perf_display_row_limit", DEFAULT_DISPLAY_ROW_LIMIT)
+    copy_limit = perf_int("perf_copy_row_limit", DEFAULT_COPY_ROW_LIMIT)
+
+    display_df = df
+    if display_limit > 0 and len(df) > display_limit:
+        display_df = df.head(display_limit).copy()
+        st.caption(
+            f"Tabela renderizada com {display_limit:,} de {len(df):,} linhas. "
+            "Use filtros, paginação ou download para volumes maiores."
+            .replace(",", ".")
+        )
+
+    st.dataframe(display_df, *args, **kwargs)
+
+    copy_df = df
+    if copy_limit > 0 and len(df) > copy_limit:
+        copy_df = df.head(copy_limit).copy()
+        st.caption(
+            f"Botão de cópia limitado às primeiras {copy_limit:,} linhas para não sobrecarregar o navegador."
+            .replace(",", ".")
+        )
+    copy_table_button(copy_df)
 
 
 def render_field_guide(source: str) -> None:
@@ -8276,7 +8490,21 @@ def render_loader(source: str) -> Optional[LoadedTable]:
             st.error(f"Não encontrei Parquets da base {source} na release {GITHUB_RELEASE_TAG}.")
             return None
 
-        label_to_asset = {github_asset_label(asset): asset for asset in source_assets}
+        max_files = perf_int("perf_max_parquet_files", DEFAULT_MAX_PARQUET_FILES_PER_LOAD)
+        available_years = sorted({int(asset["year"]) for asset in source_assets if asset.get("year")})
+        selected_years = st.multiselect(
+            "Filtrar anos disponíveis antes de escolher arquivos",
+            options=available_years,
+            default=[],
+            key=f"github_release_year_filter_{source}",
+            help="Use este filtro para trabalhar por janelas menores em vez de carregar toda a série histórica.",
+        )
+        visible_assets = [
+            asset for asset in source_assets
+            if not selected_years or int(asset.get("year") or -1) in selected_years
+        ]
+
+        label_to_asset = {github_asset_label(asset): asset for asset in visible_assets}
         name_to_asset = {str(asset.get("name") or ""): asset for asset in source_assets}
         labels = list(label_to_asset.keys())
         selected_labels = st.multiselect(
@@ -8284,7 +8512,7 @@ def render_loader(source: str) -> Optional[LoadedTable]:
             options=labels,
             default=[],
             key=f"github_release_assets_{source}",
-            help="Nada é pré-selecionado para evitar sobrecarga na abertura do app.",
+            help=f"Nada é pré-selecionado. Limite defensivo atual: {max_files} arquivo(s) por carregamento.",
         )
         selected_names = [str(label_to_asset[label].get("name") or "") for label in selected_labels]
         loaded_key = f"github_release_loaded_asset_names_{source}"
@@ -8307,13 +8535,25 @@ def render_loader(source: str) -> Optional[LoadedTable]:
             )
 
         if load_clicked:
-            st.session_state[loaded_key] = selected_names
+            if len(selected_names) > max_files:
+                st.error(
+                    f"Seleção bloqueada: {len(selected_names)} Parquets excedem o limite atual de {max_files}. "
+                    "Reduza os anos/arquivos ou aumente o limite em Desempenho e memória."
+                )
+            else:
+                st.session_state[loaded_key] = selected_names
         if clear_clicked:
             st.session_state.pop(loaded_key, None)
 
         loaded_names = list(st.session_state.get(loaded_key, []))
         if not loaded_names:
             st.info("Selecione um ou mais Parquets e clique em **Carregar/atualizar seleção** para iniciar a análise.")
+            return None
+        if len(loaded_names) > max_files:
+            st.error(
+                f"A seleção carregada contém {len(loaded_names)} Parquets, acima do limite atual de {max_files}. "
+                "Clique em **Descarregar base**, reduza a seleção ou aumente o limite em Desempenho e memória."
+            )
             return None
 
         selected_assets = [name_to_asset[name] for name in loaded_names if name in name_to_asset]
@@ -8397,11 +8637,25 @@ def render_loader(source: str) -> Optional[LoadedTable]:
         if not paths:
             st.info("Informe um glob local que encontre ao menos um arquivo .parquet.")
             return None
+        max_files = perf_int("perf_max_parquet_files", DEFAULT_MAX_PARQUET_FILES_PER_LOAD)
+        if len(paths) > max_files:
+            st.error(
+                f"O glob encontrou {len(paths)} Parquets, acima do limite atual de {max_files}. "
+                "Use um glob mais específico, filtre anos ou aumente o limite em Desempenho e memória."
+            )
+            return None
         return LoadedTable(source=source, kind="parquet", parquet_paths=paths, ref_sql=parquet_ref(paths), label=f"{len(paths)} parquet(s)")
 
     uploads = st.file_uploader("Envie um ou mais Parquets", type=["parquet"], accept_multiple_files=True, key=f"upload_parquet_{source}")
     if not uploads:
         st.info("Envie Parquet(s) para continuar.")
+        return None
+    max_files = perf_int("perf_max_parquet_files", DEFAULT_MAX_PARQUET_FILES_PER_LOAD)
+    if len(uploads) > max_files:
+        st.error(
+            f"Foram enviados {len(uploads)} Parquets, acima do limite atual de {max_files}. "
+            "Reduza a seleção ou aumente o limite em Desempenho e memória."
+        )
         return None
     paths = [materialize_upload(up, f"{source.lower()}_parquet") for up in uploads]
     return LoadedTable(source=source, kind="parquet", parquet_paths=paths, ref_sql=parquet_ref(paths), label=f"{len(paths)} parquet(s) enviados")
@@ -9579,12 +9833,19 @@ def render_sql_lab(table: LoadedTable, source: str) -> None:
         ORDER BY 1, n DESC;
         """
     sql_text = st.text_area("SQL", value=textwrap.dedent(example).strip(), height=220, key=f"sql_lab_{source}")
+    sql_limit = perf_int("perf_sql_lab_row_limit", DEFAULT_SQL_LAB_ROW_LIMIT)
+    st.caption(f"O resultado do SQL Lab será limitado a {sql_limit:,} linhas.".replace(",", "."))
     if st.button("Executar SQL", key=f"run_sql_{source}"):
         sql = sql_text.replace("{tabela}", table.ref_sql).replace("{{tabela}}", table.ref_sql)
+        sql_clean = sql.strip().rstrip(";")
+        if not re.match(r"^(SELECT|WITH)\b", sql_clean, flags=re.IGNORECASE):
+            st.error("Por segurança e desempenho, o SQL Lab aceita apenas consultas SELECT/WITH.")
+            return
         try:
-            df = run_query(table, sql)
+            limited_sql = f"SELECT * FROM ({sql_clean}) AS _sql_lab_result LIMIT {int(sql_limit)}"
+            df = run_query(table, limited_sql, cache=False)
             copyable_dataframe(df, use_container_width=True, hide_index=True)
-            download_button(df, f"{source.lower()}_sql_lab.csv", "Baixar resultado")
+            download_button(df, f"{source.lower()}_sql_lab.csv", "Baixar resultado", max_rows=sql_limit)
         except Exception as exc:
             st.error(f"Erro ao executar SQL: {exc}")
 
@@ -9607,40 +9868,90 @@ def render_source(source: str) -> Optional[Dict[str, object]]:
     base_where, graph_where, definition = render_filters(source, table, exprs)
     render_kpis(table, source, base_where, graph_where, exprs)
 
-    tabs = st.tabs(["Indicadores", "Temporal", "CID-10 / classificação", "Demografia e território", "Campos importantes não preenchidos", "Prévia", "SQL Lab"])
-    with tabs[0]:
+    analysis_sections = [
+        "Indicadores",
+        "Temporal",
+        "CID-10 / classificação",
+        "Demografia e território",
+        "Campos importantes não preenchidos",
+        "Prévia",
+        "SQL Lab",
+    ]
+    selected_section = st.radio(
+        "Área de análise",
+        analysis_sections,
+        horizontal=True,
+        key=f"analysis_section_{source}",
+        help="Somente a área selecionada é calculada nesta execução para reduzir memória e tempo de rerun.",
+    )
+
+    if selected_section == "Indicadores":
         render_indicators_tab(table, source, base_where, exprs)
-    with tabs[1]:
+    elif selected_section == "Temporal":
         render_temporal_tab(table, source, graph_where, exprs)
-    with tabs[2]:
+    elif selected_section == "CID-10 / classificação":
         render_cid_tab(table, source, graph_where, exprs)
-    with tabs[3]:
+    elif selected_section == "Demografia e território":
         render_demography_tab(table, source, graph_where, exprs)
-    with tabs[4]:
+    elif selected_section == "Campos importantes não preenchidos":
         render_quality_tab(table, source, base_where, exprs)
-    with tabs[5]:
+    elif selected_section == "Prévia":
         st.markdown("### Prévia enriquecida")
-        limit = st.slider("Número de linhas", 50, 20000, 200, step=50, key=f"preview_limit_{source}")
+        total_preview = count_rows(table, graph_where)
+        max_preview_rows = max(50, perf_int("perf_max_preview_rows", DEFAULT_MAX_PREVIEW_ROWS))
+        default_preview = min(DEFAULT_PREVIEW_ROW_LIMIT, max_preview_rows)
+        page_size = st.slider(
+            "Linhas por página",
+            50,
+            int(max_preview_rows),
+            int(default_preview),
+            step=50,
+            key=f"preview_limit_{source}",
+        )
+        max_page = max(1, int(np.ceil(total_preview / page_size))) if page_size else 1
+        page = st.number_input("Página", min_value=1, max_value=max_page, value=1, step=1, key=f"preview_page_{source}")
+        offset = (int(page) - 1) * int(page_size)
+        st.caption(
+            f"Exibindo página {int(page):,} de {max_page:,}; total filtrado: {total_preview:,} registros."
+            .replace(",", ".")
+        )
         try:
-            df_prev = query_enriched_preview(table, sel, exprs, graph_where, limit)
+            df_prev = query_enriched_preview(table, sel, exprs, graph_where, int(page_size), offset=offset)
             copyable_dataframe(df_prev, use_container_width=True)
-            download_button(df_prev, f"{source.lower()}_previa_enriquecida.csv")
+            download_button(df_prev, f"{source.lower()}_previa_enriquecida_pagina_{int(page)}.csv", max_rows=int(page_size))
         except Exception as exc:
             st.error(f"Erro ao montar prévia: {exc}")
 
         st.markdown("### Exportação completa dos casos filtrados")
-        st.caption("Gera CSV com todos os casos que passam pelos filtros atuais da aba. Use esta opção quando a prévia de 20 mil linhas não for suficiente.")
-        if st.button("Gerar CSV completo dos casos filtrados", key=f"full_export_{source}"):
-            try:
-                df_full = query_enriched_preview(table, sel, exprs, graph_where, limit=None)
-                st.success(f"Exportação preparada com {len(df_full):,} linhas.".replace(",", "."))
-                download_button(df_full, f"{source.lower()}_casos_filtrados_completos.csv", "Baixar CSV completo")
-            except Exception as exc:
-                st.error(f"Erro ao gerar exportação completa: {exc}")
-    with tabs[6]:
+        full_export_limit = perf_int("perf_full_export_row_limit", DEFAULT_FULL_EXPORT_ROW_LIMIT)
+        if total_preview > full_export_limit:
+            st.warning(
+                f"Exportação completa bloqueada: {total_preview:,} registros excedem o limite atual de {full_export_limit:,}. "
+                "Aplique filtros adicionais ou aumente o limite em Desempenho e memória se o ambiente suportar."
+                .replace(",", ".")
+            )
+        else:
+            st.caption(
+                "A exportação completa é habilitada somente quando o total filtrado está dentro do limite defensivo configurado."
+            )
+            if st.button("Gerar CSV completo dos casos filtrados", key=f"full_export_{source}"):
+                try:
+                    df_full = query_enriched_preview(table, sel, exprs, graph_where, limit=None)
+                    st.success(f"Exportação preparada com {len(df_full):,} linhas.".replace(",", "."))
+                    download_button(
+                        df_full,
+                        f"{source.lower()}_casos_filtrados_completos.csv",
+                        "Baixar CSV completo",
+                        max_rows=max(1, len(df_full)),
+                    )
+                except Exception as exc:
+                    st.error(f"Erro ao gerar exportação completa: {exc}")
+    elif selected_section == "SQL Lab":
         render_sql_lab(table, source)
 
-    return {"source": source, "table": table, "sel": sel, "exprs": exprs, "base_where": base_where, "graph_where": graph_where, "definition": definition}
+    context = {"source": source, "table": table, "sel": sel, "exprs": exprs, "base_where": base_where, "graph_where": graph_where, "definition": definition}
+    st.session_state[f"loaded_context_{source}"] = context
+    return context
 
 
 def render_comparison(loaded: Sequence[Dict[str, object]]) -> None:
@@ -9774,20 +10085,35 @@ def main() -> None:
 
     with st.sidebar:
         st.header("Orientação")
-        st.write("Carregue cada base em sua aba. Em **GitHub Release1 (Parquets)**, os arquivos não são pré-selecionados: escolha manualmente os Parquets e clique em carregar.")
-        st.write("O painel é exploratório. Para conclusões finais, exporte as tabelas e valide as regras em SQL/Python.")
+        st.write(
+            "Escolha uma única seção por vez. Isso evita que Streamlit execute todas as abas e carregue várias bases "
+            "simultaneamente a cada rerun."
+        )
+        st.write(
+            "Em **GitHub Release1 (Parquets)**, filtre anos, selecione poucos arquivos e clique em carregar. "
+            "Aumente os limites apenas se o ambiente tiver memória suficiente."
+        )
+        render_performance_controls()
+        section = st.radio(
+            "Seção",
+            ["Metodologia", "SINAN", "SIM", "CIHA", "Comparação"],
+            key="main_section",
+        )
 
-    tabs = st.tabs(["Metodologia", "SINAN", "SIM", "CIHA", "Comparação"])
-    loaded: List[Optional[Dict[str, object]]] = []
-    with tabs[0]:
+    if section == "Metodologia":
         render_methodology()
-    with tabs[1]:
-        loaded.append(render_source("SINAN"))
-    with tabs[2]:
-        loaded.append(render_source("SIM"))
-    with tabs[3]:
-        loaded.append(render_source("CIHA"))
-    with tabs[4]:
+    elif section in {"SINAN", "SIM", "CIHA"}:
+        render_source(section)
+    else:
+        loaded = [
+            st.session_state.get(f"loaded_context_{src}")
+            for src in ["SINAN", "SIM", "CIHA"]
+            if st.session_state.get(f"loaded_context_{src}")
+        ]
+        st.caption(
+            "A comparação usa as bases já carregadas nas seções SINAN/SIM/CIHA. "
+            "Carregue cada base separadamente antes de comparar para evitar sobrecarga."
+        )
         render_comparison([x for x in loaded if x])
 
 
