@@ -101,7 +101,7 @@ streamlit run app_streamlit_app.py
 
 Disclaimer: Atenção ao limite de parquets / duckdbs em vigor. Isso pode ser alterado, mas bastante cuidado em quantos arquivos são carregados simultaneamente.
 
-### Opção 1: leitura automático dos parquets disponibilizados na release mais atual do github
+### Opção 1: leitura automática dos parquets disponibilizados na release mais atual do github
 Basta selecionar quais anos deseja-se analisar. 
 
 ### Opção 2: upload
