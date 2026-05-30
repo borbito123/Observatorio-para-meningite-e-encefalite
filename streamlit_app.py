@@ -37,7 +37,6 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-import streamlit.components.v1 as components
 
 
 # =============================================================================
@@ -56,7 +55,7 @@ APP_VERSION = "2026-05-21-v20-cid10-adequacy-g02-sem-g020"
 # Controles de desempenho e limites defensivos
 # =============================================================================
 
-DEFAULT_MAX_PARQUET_FILES_PER_LOAD = 4
+DEFAULT_MAX_PARQUET_FILES_PER_LOAD = 15
 DEFAULT_DISPLAY_ROW_LIMIT = 1000
 DEFAULT_COPY_ROW_LIMIT = 300
 DEFAULT_DOWNLOAD_ROW_LIMIT = 50000
@@ -65,6 +64,10 @@ DEFAULT_MAX_PREVIEW_ROWS = 5000
 DEFAULT_SQL_LAB_ROW_LIMIT = 5000
 DEFAULT_FULL_EXPORT_ROW_LIMIT = 100000
 UPLOAD_CHUNK_SIZE = 1024 * 1024
+DEFAULT_DUCKDB_MEMORY_LIMIT = "2GB"
+DEFAULT_DUCKDB_THREADS = 2
+DEFAULT_QUERY_CACHE_MAX_ENTRIES = 96
+DUCKDB_TEMP_SUBDIR = "meningite_duckdb_tmp"
 
 
 def _session_int(key: str, default: int) -> int:
@@ -92,6 +95,21 @@ def render_performance_controls() -> None:
             step=1,
             key="perf_max_parquet_files",
             help="Evita abrir muitos arquivos/anos de uma vez. Aumente gradualmente se o ambiente suportar.",
+        )
+        st.text_input(
+            "Limite de memória do DuckDB",
+            value=str(st.session_state.get("perf_duckdb_memory_limit", DEFAULT_DUCKDB_MEMORY_LIMIT)),
+            key="perf_duckdb_memory_limit",
+            help="Exemplos válidos: 1GB, 2GB, 4096MB ou 75%. O DuckDB fará spill para disco quando possível.",
+        )
+        st.number_input(
+            "Threads do DuckDB",
+            min_value=1,
+            max_value=8,
+            value=perf_int("perf_duckdb_threads", DEFAULT_DUCKDB_THREADS),
+            step=1,
+            key="perf_duckdb_threads",
+            help="Menos threads reduzem picos de memória; mais threads podem acelerar consultas em máquinas com RAM suficiente.",
         )
         st.number_input(
             "Máximo de linhas renderizadas em tabelas",
@@ -7427,7 +7445,12 @@ class LoadedTable:
 
 @st.cache_data(show_spinner=False)
 def list_duckdb_tables(path: str) -> List[str]:
-    con = duckdb.connect(path, read_only=True)
+    runtime_settings = (
+        DEFAULT_DUCKDB_MEMORY_LIMIT,
+        DEFAULT_DUCKDB_THREADS,
+        str(Path(tempfile.gettempdir()) / DUCKDB_TEMP_SUBDIR),
+    )
+    con = open_duckdb_connection(path, read_only=True, runtime_settings=runtime_settings)
     try:
         return [r[0] for r in con.execute("SHOW TABLES").fetchall()]
     finally:
@@ -7482,6 +7505,64 @@ def materialize_upload(upload, namespace: str) -> str:
         raise
 
 
+def _safe_duckdb_memory_limit(value: object) -> str:
+    """Normaliza limite de memória aceito pelo DuckDB, com fallback seguro."""
+    text = str(value or DEFAULT_DUCKDB_MEMORY_LIMIT).strip().upper().replace(" ", "")
+    if re.fullmatch(r"(?:[1-9]\d*)(?:\.\d+)?(?:KB|MB|GB|TB)|(?:[1-9]\d?|100)%", text):
+        return text
+    return DEFAULT_DUCKDB_MEMORY_LIMIT
+
+
+def duckdb_runtime_settings() -> Tuple[str, int, str]:
+    """Configuração leve para reduzir picos de memória em consultas Parquet/DuckDB."""
+    memory_limit = _safe_duckdb_memory_limit(
+        st.session_state.get("perf_duckdb_memory_limit", DEFAULT_DUCKDB_MEMORY_LIMIT)
+    )
+    threads = max(1, perf_int("perf_duckdb_threads", DEFAULT_DUCKDB_THREADS))
+    temp_dir = str(Path(tempfile.gettempdir()) / DUCKDB_TEMP_SUBDIR)
+    return memory_limit, threads, temp_dir
+
+
+def configure_duckdb_connection(
+    con: duckdb.DuckDBPyConnection,
+    runtime_settings: Optional[Tuple[str, int, str]] = None,
+) -> None:
+    """Aplica limites defensivos ao DuckDB sem interromper o app se uma opção falhar."""
+    memory_limit, threads, temp_dir = runtime_settings or duckdb_runtime_settings()
+    temp_path = Path(temp_dir)
+    try:
+        temp_path.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        temp_path = Path(tempfile.gettempdir())
+
+    statements = [
+        f"SET memory_limit={qstr(memory_limit)}",
+        f"SET threads={int(max(1, threads))}",
+        f"SET temp_directory={qstr(str(temp_path))}",
+        "SET preserve_insertion_order=false",
+    ]
+    for statement in statements:
+        try:
+            con.execute(statement)
+        except Exception:
+            # Algumas versões/ambientes bloqueiam opções específicas; a consulta deve seguir funcionando.
+            pass
+
+
+def open_duckdb_connection(
+    db_path: Optional[str] = None,
+    read_only: bool = False,
+    runtime_settings: Optional[Tuple[str, int, str]] = None,
+) -> duckdb.DuckDBPyConnection:
+    """Abre conexão DuckDB com spill para disco e limite de memória configurável."""
+    if db_path:
+        con = duckdb.connect(db_path, read_only=read_only)
+    else:
+        con = duckdb.connect(database=":memory:")
+    configure_duckdb_connection(con, runtime_settings)
+    return con
+
+
 def _file_fingerprint(path: Optional[str]) -> Tuple[str, Optional[int], Optional[int]]:
     if not path:
         return "", None, None
@@ -7500,22 +7581,29 @@ def table_cache_key(table: LoadedTable) -> Tuple[object, ...]:
 
 
 def _execute_query_uncached(table: LoadedTable, sql: str) -> pd.DataFrame:
-    if table.kind == "duckdb":
-        con = duckdb.connect(table.db_path, read_only=True)
-    else:
-        con = duckdb.connect(database=":memory:")
+    con = open_duckdb_connection(
+        table.db_path if table.kind == "duckdb" else None,
+        read_only=(table.kind == "duckdb"),
+    )
     try:
         return con.execute(sql).df()
     finally:
         con.close()
 
 
-@st.cache_data(show_spinner=False, ttl=1800, max_entries=256)
-def _run_query_cached(table_key: Tuple[object, ...], kind: str, db_path: Optional[str], sql: str) -> pd.DataFrame:
-    if kind == "duckdb":
-        con = duckdb.connect(db_path, read_only=True)
-    else:
-        con = duckdb.connect(database=":memory:")
+@st.cache_data(show_spinner=False, ttl=1800, max_entries=DEFAULT_QUERY_CACHE_MAX_ENTRIES)
+def _run_query_cached(
+    table_key: Tuple[object, ...],
+    kind: str,
+    db_path: Optional[str],
+    sql: str,
+    runtime_settings: Tuple[str, int, str],
+) -> pd.DataFrame:
+    con = open_duckdb_connection(
+        db_path if kind == "duckdb" else None,
+        read_only=(kind == "duckdb"),
+        runtime_settings=runtime_settings,
+    )
     try:
         return con.execute(sql).df()
     finally:
@@ -7525,7 +7613,13 @@ def _run_query_cached(table_key: Tuple[object, ...], kind: str, db_path: Optiona
 def run_query(table: LoadedTable, sql: str, cache: bool = True) -> pd.DataFrame:
     """Executa SQL; por padrão cacheia apenas resultados de consulta agregada/pequena."""
     if cache:
-        return _run_query_cached(table_cache_key(table), table.kind, table.db_path, sql)
+        return _run_query_cached(
+            table_cache_key(table),
+            table.kind,
+            table.db_path,
+            sql,
+            duckdb_runtime_settings(),
+        )
     return _execute_query_uncached(table, sql)
 
 
@@ -8898,7 +8992,7 @@ def download_button(df: pd.DataFrame, filename: str, label: str = "Baixar CSV", 
         data=out.to_csv(index=False).encode("utf-8-sig"),
         file_name=filename,
         mime="text/csv",
-        use_container_width=False,
+        width="content",
     )
 
 
@@ -8975,7 +9069,7 @@ def copy_table_button(df: pd.DataFrame, label: str = "Copiar tabela para Google 
     button_{uid}.addEventListener('click', copyRichTable_{uid});
     </script>
     """
-    components.html(html_component, height=42, scrolling=False)
+    st.iframe(html_component, height=42, width="stretch")
 
 
 def copyable_dataframe(df: pd.DataFrame, *args, **kwargs) -> None:
@@ -9009,7 +9103,7 @@ def copyable_dataframe(df: pd.DataFrame, *args, **kwargs) -> None:
 def render_field_guide(source: str) -> None:
     copyable_dataframe(
         pd.DataFrame(FIELD_GUIDE[source], columns=["Campo", "Uso", "Leitura epidemiológica"]),
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
     for note in SOURCE_CONFIG[source].field_notes:
@@ -9017,7 +9111,7 @@ def render_field_guide(source: str) -> None:
 
 
 def render_cid_reference() -> None:
-    copyable_dataframe(pd.DataFrame(CID_RULES)[["grupo", "padrao", "rotulo"]], use_container_width=True, hide_index=True)
+    copyable_dataframe(pd.DataFrame(CID_RULES)[["grupo", "padrao", "rotulo"]], width="stretch", hide_index=True)
     st.caption(
         "O app procura os padrões CID-10 listados acima nos campos de diagnóstico/causa. "
         "G04* e G05* são tratados como prefixos. A22.8, A32.1, A83*, A84*, A85*, A86*, B00.3, B00.4, B01.0, B01.1, B02.0, B02.1, B05.0, B05.1, B06*, B26.1, B26.2, B37.5, B38.4, B45.1, B57.4, B58.2 e B60.2 foram adicionados ao recorte de meningite/encefalite/meningoencefalite. "
@@ -9031,9 +9125,9 @@ def render_quimio_interpretation() -> None:
         "Padrões de LCR ajudam a levantar hipóteses, mas não substituem cultura, PCR, Gram, tinta nanquim, sorologia, "
         "epidemiologia e avaliação clínica. Os limites variam com idade, coleta traumática, antibiótico prévio e laboratório."
     )
-    copyable_dataframe(pd.DataFrame(SINAN_QUIMIO_INTERPRETATION_ROWS), use_container_width=True, hide_index=True)
+    copyable_dataframe(pd.DataFrame(SINAN_QUIMIO_INTERPRETATION_ROWS), width="stretch", hide_index=True)
     st.markdown("#### Referências bibliográficas usadas para esta síntese")
-    copyable_dataframe(pd.DataFrame(SINAN_QUIMIO_REFERENCES), use_container_width=True, hide_index=True)
+    copyable_dataframe(pd.DataFrame(SINAN_QUIMIO_REFERENCES), width="stretch", hide_index=True)
 
 
 def render_loader(source: str) -> Optional[LoadedTable]:
@@ -9099,14 +9193,14 @@ def render_loader(source: str) -> Optional[LoadedTable]:
                 key=f"github_release_load_selected_{source}",
                 type="primary",
                 disabled=not selected_names,
-                use_container_width=True,
+                width="stretch",
             )
         with c_clear:
             clear_clicked = st.button(
                 "Descarregar base",
                 key=f"github_release_clear_selected_{source}",
                 disabled=not st.session_state.get(loaded_key),
-                use_container_width=True,
+                width="stretch",
             )
 
         if load_clicked:
@@ -9462,11 +9556,11 @@ def render_temporal_tab(table: LoadedTable, source: str, graph_where: str, exprs
         st.info("Sem dados para a série temporal com os filtros atuais.")
     elif cat_options[cat_label]:
         fig = px.line(ts, x="periodo", y="n", color="categoria", markers=True, title="Série temporal estratificada", labels={"periodo": "Período", "n": "Registros", "categoria": cat_label})
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
         download_button(ts, f"{source.lower()}_serie_temporal_estratificada.csv")
     else:
         fig = px.line(ts, x="periodo", y="n", markers=True, title="Série temporal", labels={"periodo": "Período", "n": "Registros"})
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
         download_button(ts, f"{source.lower()}_serie_temporal.csv")
 
     heat = query_heatmap(table, dt, graph_where)
@@ -9484,7 +9578,7 @@ def render_temporal_tab(table: LoadedTable, source: str, graph_where: str, exprs
             )
         )
         fig.update_layout(title="Sazonalidade: ano × mês", xaxis_title="Mês", yaxis_title="Ano")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
         download_button(heat, f"{source.lower()}_heatmap_ano_mes.csv", "Baixar dados do heatmap")
 
 
@@ -9518,7 +9612,7 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
         if ind.empty:
             st.warning("Não foi possível calcular indicadores do SINAN. Verifique CLASSI_FIN, EVOLUCAO e data.")
             return
-        copyable_dataframe(ind, use_container_width=True, hide_index=True)
+        copyable_dataframe(ind, width="stretch", hide_index=True)
         download_button(ind, "sinan_indicadores_anuais.csv")
 
         count_specs = [
@@ -9552,7 +9646,7 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
             hover_data={"texto": False, "pct": ":.2f", "denominador_pct": True},
         )
         fig.update_traces(textposition="top center")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
         prop_specs = [
             ("pct_confirmacao", "Confirmados", "confirmados", "notificacoes", "% das notificações"),
@@ -9589,7 +9683,7 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
             hover_data={"texto": False, "n": True, "denominador": True, "denominador_label": True},
         )
         fig2.update_traces(textposition="top center")
-        st.plotly_chart(fig2, use_container_width=True)
+        st.plotly_chart(fig2, width="stretch")
 
         if exprs.get("hospital_label") and exprs.get("dt"):
             hosp = query_yearly_category(table, exprs["dt"], exprs["hospital_label"], base_where)
@@ -9606,8 +9700,8 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
                     labels={"ano": "Ano", "n": "Registros", "categoria": "ATE_HOSPIT", "pct": "% no ano"},
                     hover_data={"texto": False, "pct": ":.2f", "total_ano": True},
                 )
-                st.plotly_chart(fig_hosp, use_container_width=True)
-                copyable_dataframe(hosp, use_container_width=True, hide_index=True)
+                st.plotly_chart(fig_hosp, width="stretch")
+                copyable_dataframe(hosp, width="stretch", hide_index=True)
                 download_button(hosp, "sinan_internacao_ate_hospit.csv")
         else:
             st.info("Para gerar o gráfico de internação, o campo ATE_HOSPIT precisa existir no SINAN e ser detectado automaticamente.")
@@ -9615,12 +9709,12 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
         etio = query_sinan_etiology_lethality(table, exprs, base_where)
         if not etio.empty:
             st.markdown("**Letalidade por grupo etiológico entre confirmados**")
-            copyable_dataframe(etio, use_container_width=True, hide_index=True)
+            copyable_dataframe(etio, width="stretch", hide_index=True)
             etio = etio.copy()
             etio["texto"] = [f"{br_pct(p)} (n={br_int(n)})" for p, n in zip(etio["letalidade_pct"], etio["obitos_meningite"])]
             fig3 = px.bar(etio, x="letalidade_pct", y="grupo_etiologico", orientation="h", text="texto", title="Letalidade por grupo etiológico (%)", labels={"letalidade_pct": "%", "grupo_etiologico": "Grupo etiológico"})
             fig3.update_layout(yaxis={"categoryorder": "total ascending"})
-            st.plotly_chart(fig3, use_container_width=True)
+            st.plotly_chart(fig3, width="stretch")
             download_button(etio, "sinan_letalidade_por_etiologia.csv")
         by_year = query_sinan_diagnostics_by_year(table, exprs, base_where)
         if not by_year.empty:
@@ -9649,8 +9743,8 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
             )
             fig4.update_layout(barmode="stack")
             fig4.update_xaxes(type="category")
-            st.plotly_chart(fig4, use_container_width=True)
-            copyable_dataframe(by_year, use_container_width=True, hide_index=True)
+            st.plotly_chart(fig4, width="stretch")
+            copyable_dataframe(by_year, width="stretch", hide_index=True)
             download_button(by_year, "sinan_confirmados_por_cid10_convertido_ano.csv")
         return
 
@@ -9659,7 +9753,7 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
         if ind.empty:
             st.warning("Não foi possível calcular indicadores principais do SIM. Verifique data, CAUSABAS e campos CID.")
         else:
-            copyable_dataframe(ind, use_container_width=True, hide_index=True)
+            copyable_dataframe(ind, width="stretch", hide_index=True)
             download_button(ind, "sim_indicadores_anuais.csv")
 
             sim_cid_specs = [
@@ -9697,9 +9791,9 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
                 hover_data={"texto": False, "pct": ":.2f", "denominador": True},
             )
             fig.update_traces(textposition="top center")
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
             fig2 = px.line(ind, x="ano", y=["pct_causa_basica_meningite", "pct_mencao_meningite"], markers=True, title="SIM: percentual com causa básica/menção de meningite")
-            st.plotly_chart(fig2, use_container_width=True)
+            st.plotly_chart(fig2, width="stretch")
 
         def render_sim_cycle_chart(
             category_sql: Optional[str],
@@ -9729,8 +9823,8 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
                 labels={"ano": "Ano", "n": "Óbitos", "categoria": field_label, "pct": "% no ano"},
                 hover_data={"texto": False, "pct": ":.2f", "total_ano": True},
             )
-            st.plotly_chart(fig_cycle, use_container_width=True)
-            copyable_dataframe(df, use_container_width=True, hide_index=True)
+            st.plotly_chart(fig_cycle, width="stretch")
+            copyable_dataframe(df, width="stretch", hide_index=True)
             download_button(df, filename)
 
         cid_any = exprs.get("cid")
@@ -9805,7 +9899,7 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
     if ind.empty:
         st.warning("Não foi possível calcular indicadores da CIHA. Verifique data, diagnóstico e campos MORTE/DIAS_PERM.")
     else:
-        copyable_dataframe(ind, use_container_width=True, hide_index=True)
+        copyable_dataframe(ind, width="stretch", hide_index=True)
         download_button(ind, "ciha_indicadores_anuais.csv")
         ciha_count_specs = [
             ("atendimentos", "Atendimentos", None),
@@ -9837,7 +9931,7 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
             hover_data={"texto": False, "pct": ":.2f", "denominador": True},
         )
         fig.update_traces(textposition="top center")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
     dias_dist = query_ciha_dias_perm_distribution(table, exprs, base_where)
     if not dias_dist.empty:
@@ -9852,8 +9946,8 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
             labels={"faixa_dias_perm": "Dias de permanência", "n": "Atendimentos", "pct": "%"},
             hover_data={"texto": False, "pct": ":.2f", "denominador": True},
         )
-        st.plotly_chart(fig_dias, use_container_width=True)
-        copyable_dataframe(dias_dist, use_container_width=True, hide_index=True)
+        st.plotly_chart(fig_dias, width="stretch")
+        copyable_dataframe(dias_dist, width="stretch", hide_index=True)
         download_button(dias_dist, "ciha_dias_permanencia_distribuicao.csv")
     else:
         st.info("Para gerar o gráfico de dias de permanência, o campo DIAS_PERM precisa existir na CIHA e ser detectado automaticamente.")
@@ -9894,8 +9988,8 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                 hover_data={"texto": False, "pct": ":.2f", "cids_encontrados": True, "campos_origem": True},
             )
             fig.update_layout(yaxis={"categoryorder": "total ascending"})
-            st.plotly_chart(fig, use_container_width=True)
-            copyable_dataframe(cid_dist, use_container_width=True, hide_index=True)
+            st.plotly_chart(fig, width="stretch")
+            copyable_dataframe(cid_dist, width="stretch", hide_index=True)
             download_button(cid_dist, f"{source.lower()}_cid10_distribuicao.csv")
 
             conv_adequacy = query_cid10_adequacy_conversion(table, exprs, graph_where)
@@ -9928,7 +10022,7 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                         },
                     )
                     fig_conv.update_layout(yaxis={"categoryorder": "total ascending"})
-                    st.plotly_chart(fig_conv, use_container_width=True)
+                    st.plotly_chart(fig_conv, width="stretch")
                     st.caption(
                         "Gráfico agregado pelo CID-10 adequado final: CID-10 convertidos somam no destino "
                         "e CID-10 prefixados já presentes permanecem em seu próprio grupo."
@@ -9942,10 +10036,10 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                     ]
                     if c in conv_adequacy.columns
                 ]
-                copyable_dataframe(conv_adequacy[display_cols], use_container_width=True, hide_index=True)
+                copyable_dataframe(conv_adequacy[display_cols], width="stretch", hide_index=True)
                 download_button(conv_adequacy, f"{source.lower()}_cid10_conversao_adequacao_meningite_encefalite.csv")
                 with st.expander("Regra usada para a conversão de adequação"):
-                    copyable_dataframe(pd.DataFrame(CID10_ADEQUACY_MAPPING_ROWS), use_container_width=True, hide_index=True)
+                    copyable_dataframe(pd.DataFrame(CID10_ADEQUACY_MAPPING_ROWS), width="stretch", hide_index=True)
                     st.caption(CID10_ADEQUACY_OBSERVATION)
 
             g01_g02 = query_g01_g02_cid_distribution(table, exprs, graph_where)
@@ -9967,8 +10061,8 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                     hover_data={"texto": False, "pct": ":.2f", "denominador": True},
                 )
                 fig_g01_g02.update_layout(yaxis={"categoryorder": "total ascending"})
-                st.plotly_chart(fig_g01_g02, use_container_width=True)
-                copyable_dataframe(g01_g02, use_container_width=True, hide_index=True)
+                st.plotly_chart(fig_g01_g02, width="stretch")
+                copyable_dataframe(g01_g02, width="stretch", hide_index=True)
                 download_button(g01_g02, f"{source.lower()}_verificacao_g01_g02.csv")
 
         if source == "CIHA":
@@ -10001,8 +10095,8 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                             hover_data={"texto": False, "pct": ":.2f", "cids_encontrados": True, "campos_origem": True},
                         )
                         fig_death.update_layout(yaxis={"categoryorder": "total ascending"})
-                        st.plotly_chart(fig_death, use_container_width=True)
-                        copyable_dataframe(death_cid, use_container_width=True, hide_index=True)
+                        st.plotly_chart(fig_death, width="stretch")
+                        copyable_dataframe(death_cid, width="stretch", hide_index=True)
                         download_button(death_cid, "ciha_obitos_cid10_distribuicao.csv")
         return
 
@@ -10028,8 +10122,8 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                 st.markdown(f"**{label}**")
                 fig = px.bar(df, x="n", y="categoria", orientation="h", text="pct", labels={"categoria": label, "n": "Registros"})
                 fig.update_layout(yaxis={"categoryorder": "total ascending"})
-                st.plotly_chart(fig, use_container_width=True)
-                copyable_dataframe(df, use_container_width=True, hide_index=True)
+                st.plotly_chart(fig, width="stretch")
+                copyable_dataframe(df, width="stretch", hide_index=True)
 
         if label == "Grupo etiológico SINAN":
             conv = query_sinan_cid10_conversion(table, exprs, graph_where)
@@ -10053,7 +10147,7 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                         hover_data={"texto": False, "pct": ":.2f", "denominador": True, "grupos_sinan": True, "conclusoes_sinan": True},
                     )
                     fig_conv.update_layout(yaxis={"categoryorder": "total ascending"})
-                    st.plotly_chart(fig_conv, use_container_width=True)
+                    st.plotly_chart(fig_conv, width="stretch")
                     display_cols = [
                         c for c in [
                             "cid10_grupo", "cid10_classificacao", "n", "pct",
@@ -10063,16 +10157,16 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                         ]
                         if c in conv_yes.columns
                     ]
-                    copyable_dataframe(conv_yes[display_cols], use_container_width=True, hide_index=True)
+                    copyable_dataframe(conv_yes[display_cols], width="stretch", hide_index=True)
                     download_button(conv_yes, "sinan_cid10_conversao_grupo_etiologico.csv")
 
                 with st.expander("Regra usada para converter CON_DIAGES em CID-10"):
                     st.markdown("**Conversão principal CON_DIAGES -> família CID-10**")
-                    copyable_dataframe(pd.DataFrame(SINAN_CID10_MAPPING_ROWS), use_container_width=True, hide_index=True)
+                    copyable_dataframe(pd.DataFrame(SINAN_CID10_MAPPING_ROWS), width="stretch", hide_index=True)
                     st.markdown("**Refinamento específico para CON_DIAGES=05 — meningite por outras bactérias**")
-                    copyable_dataframe(pd.DataFrame(SINAN_OTHER_BACTERIA_CID10_RULE_ROWS), use_container_width=True, hide_index=True)
+                    copyable_dataframe(pd.DataFrame(SINAN_OTHER_BACTERIA_CID10_RULE_ROWS), width="stretch", hide_index=True)
                     st.markdown("**G01 — doença bacteriana de base provável**")
-                    copyable_dataframe(pd.DataFrame(SINAN_G01_BASE_DISEASE_REFERENCE_ROWS), use_container_width=True, hide_index=True)
+                    copyable_dataframe(pd.DataFrame(SINAN_G01_BASE_DISEASE_REFERENCE_ROWS), width="stretch", hide_index=True)
                     st.caption(
                         "Observação: CON_DIAGES 01 (meningococcemia isolada) fica fora da conversão; "
                         "CON_DIAGES 02 e 03 entram como A39.0; CON_DIAGES 05 entra como G00 por padrão e como G01 quando CLA_ME_BAC/texto sugerem doença bacteriana classificada em outra parte."
@@ -10081,7 +10175,7 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                 if not conv_no.empty:
                     st.caption("Registros não convertidos para a comparação CID-10, mantendo transparência da exclusão/ausência de mapeamento:")
                     conv_no_cols = [c for c in ["cid10_grupo", "cid10_classificacao", "n", "pct", "conclusoes_sinan", "justificativas"] if c in conv_no.columns]
-                    copyable_dataframe(conv_no[conv_no_cols], use_container_width=True, hide_index=True)
+                    copyable_dataframe(conv_no[conv_no_cols], width="stretch", hide_index=True)
 
 
                 g01_base = query_sinan_g01_base_disease(table, exprs, graph_where)
@@ -10103,8 +10197,8 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                         hover_data={"texto": False, "pct": ":.2f", "denominador": True, "conclusoes_sinan": True, "bacterias_sinan": True},
                     )
                     fig_g01.update_layout(yaxis={"categoryorder": "total ascending"})
-                    st.plotly_chart(fig_g01, use_container_width=True)
-                    copyable_dataframe(g01_base, use_container_width=True, hide_index=True)
+                    st.plotly_chart(fig_g01, width="stretch")
+                    copyable_dataframe(g01_base, width="stretch", hide_index=True)
                     download_button(g01_base, "sinan_g01_doenca_base_provavel.csv")
 
 
@@ -10129,8 +10223,8 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                     hover_data={"texto": False, "pct": ":.2f"},
                 )
                 fig.update_layout(yaxis={"categoryorder": "total ascending"})
-                st.plotly_chart(fig, use_container_width=True)
-                copyable_dataframe(df, use_container_width=True, hide_index=True)
+                st.plotly_chart(fig, width="stretch")
+                copyable_dataframe(df, width="stretch", hide_index=True)
 
     with st.expander("Como os parâmetros do LCR costumam se comportar por etiologia"):
         render_quimio_interpretation()
@@ -10162,8 +10256,8 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                 labels={"faixa": titulo, "n": "Registros", "pct": "%"},
                 hover_data={"texto": False, "pct": ":.2f", "denominador": True, "faixa_inicio": ":.2f", "faixa_fim": ":.2f"},
             )
-            st.plotly_chart(fig_dist, use_container_width=True)
-            copyable_dataframe(dist, use_container_width=True, hide_index=True)
+            st.plotly_chart(fig_dist, width="stretch")
+            copyable_dataframe(dist, width="stretch", hide_index=True)
             download_button(dist, f"sinan_quimiocitologico_distribuicao_{safe_filename(titulo)}.csv")
 
         st.markdown("**Exame Quimiocitológico do líquor (LCR) — valores médios dos parâmetros**")
@@ -10198,8 +10292,8 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                     "maximo": ":.2f",
                 },
             )
-            st.plotly_chart(fig_quimio, use_container_width=True)
-        copyable_dataframe(quimio_summary, use_container_width=True, hide_index=True)
+            st.plotly_chart(fig_quimio, width="stretch")
+        copyable_dataframe(quimio_summary, width="stretch", hide_index=True)
         download_button(quimio_summary, "sinan_quimiocitologico_liquor_resumo_parametros.csv")
 
 
@@ -10239,7 +10333,7 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
                 hover_data={"texto": False, "pct": ":.2f", "denominador": True},
             )
             fig.update_traces(textposition="outside", cliponaxis=False)
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
             download_button(age_df, f"{source.lower()}_idade.csv")
         sex = exprs.get("sex")
         if sex:
@@ -10249,7 +10343,7 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
                 pyr["valor"] = np.where(pyr["sexo"].eq("Masculino"), -pyr["n"], pyr["n"])
                 fig = px.bar(pyr, x="valor", y="faixa", color="sexo", orientation="h", title="Pirâmide etária por sexo", labels={"valor": "Registros", "faixa": "Faixa etária"})
                 fig.update_layout(barmode="relative")
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
                 download_button(pyr, f"{source.lower()}_piramide.csv")
 
     sex = exprs.get("sex")
@@ -10295,8 +10389,8 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
                     fig.update_layout(yaxis={"categoryorder": "array", "categoryarray": df["categoria"].tolist()[::-1]})
                 else:
                     fig.update_layout(yaxis={"categoryorder": "total ascending"})
-                st.plotly_chart(fig, use_container_width=True)
-                copyable_dataframe(df, use_container_width=True, hide_index=True)
+                st.plotly_chart(fig, width="stretch")
+                copyable_dataframe(df, width="stretch", hide_index=True)
                 download_button(df, filename)
 
 
@@ -10382,8 +10476,8 @@ def render_quality_tab(table: LoadedTable, source: str, base_where: str, exprs: 
         )
         fig.update_layout(yaxis={"categoryorder": "total ascending"})
         fig.update_traces(textposition="outside", cliponaxis=False)
-        st.plotly_chart(fig, use_container_width=True)
-        copyable_dataframe(miss[["campo", "faltantes", "total", "pct_faltante", "texto"]], use_container_width=True, hide_index=True)
+        st.plotly_chart(fig, width="stretch")
+        copyable_dataframe(miss[["campo", "faltantes", "total", "pct_faltante", "texto"]], width="stretch", hide_index=True)
         download_button(miss.drop(columns=["texto"], errors="ignore"), f"{source.lower()}_campos_importantes_nao_preenchidos.csv")
 
     by_year = query_missingness_by_year(table, fields, exprs.get("dt"), base_where)
@@ -10414,8 +10508,8 @@ def render_quality_tab(table: LoadedTable, source: str, base_where: str, exprs: 
             hover_data={"texto": False, "faltantes": True, "total": True, "pct_faltante": ":.2f"},
         )
         fig.update_traces(textposition="top center")
-        st.plotly_chart(fig, use_container_width=True)
-        copyable_dataframe(filtered[["ano", "campo", "faltantes", "total", "pct_faltante", "texto"]], use_container_width=True, hide_index=True)
+        st.plotly_chart(fig, width="stretch")
+        copyable_dataframe(filtered[["ano", "campo", "faltantes", "total", "pct_faltante", "texto"]], width="stretch", hide_index=True)
         download_button(by_year.drop(columns=["texto"], errors="ignore"), f"{source.lower()}_campos_importantes_nao_preenchidos_por_ano.csv")
 
 def render_sql_lab(table: LoadedTable, source: str) -> None:
@@ -10470,7 +10564,7 @@ def render_sql_lab(table: LoadedTable, source: str) -> None:
         try:
             limited_sql = f"SELECT * FROM ({sql_clean}) AS _sql_lab_result LIMIT {int(sql_limit)}"
             df = run_query(table, limited_sql, cache=False)
-            copyable_dataframe(df, use_container_width=True, hide_index=True)
+            copyable_dataframe(df, width="stretch", hide_index=True)
             download_button(df, f"{source.lower()}_sql_lab.csv", "Baixar resultado", max_rows=sql_limit)
         except Exception as exc:
             st.error(f"Erro ao executar SQL: {exc}")
@@ -10543,7 +10637,7 @@ def render_source(source: str) -> Optional[Dict[str, object]]:
         )
         try:
             df_prev = query_enriched_preview(table, sel, exprs, graph_where, int(page_size), offset=offset)
-            copyable_dataframe(df_prev, use_container_width=True)
+            copyable_dataframe(df_prev, width="stretch")
             download_button(df_prev, f"{source.lower()}_previa_enriquecida_pagina_{int(page)}.csv", max_rows=int(page_size))
         except Exception as exc:
             st.error(f"Erro ao montar prévia: {exc}")
@@ -10667,10 +10761,10 @@ def render_comparison(loaded: Sequence[Dict[str, object]]) -> None:
                 comp.loc[idx, "valor"] = comp.loc[idx, "valor"] / nonzero.iloc[0] * 100
 
     fig = px.line(comp, x="periodo", y="valor", color="serie", markers=True, title="Comparação de tendências", labels={"valor": "Índice" if normalize else "Registros", "periodo": "Período", "serie": "Série"})
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
     if comparison_conversion_notes:
         st.caption("Observação da conversão usada na comparação estratificada: " + " ".join(comparison_conversion_notes))
-    copyable_dataframe(comp, use_container_width=True, hide_index=True)
+    copyable_dataframe(comp, width="stretch", hide_index=True)
     download_button(comp, "comparacao_series_bases.csv")
 
     st.markdown("**Cuidados de leitura**")
@@ -10709,7 +10803,7 @@ def render_methodology() -> None:
             ],
             columns=["Conceito", "Regra operacional"],
         ),
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
     st.markdown("### Referência CID-10")
