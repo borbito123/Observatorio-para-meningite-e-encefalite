@@ -6808,6 +6808,7 @@ FIELD_GUIDE = {
         ("MORTE", "desfecho administrativo", "morte no atendimento"),
         ("DIAS_PERM", "uso de serviço", "dias de permanência"),
         ("MODALIDADE", "uso de serviço", "hospitalar/ambulatorial"),
+        ("PROC_REA / PROCEDIMENTO", "procedimento", "procedimento informado e sua quantidade"),
         ("IDADE + COD_IDADE", "idade", "idade e unidade da idade"),
     ],
 }
@@ -7842,6 +7843,7 @@ class ColumnSelection:
     morte_col: Optional[str] = None
     dias_perm_col: Optional[str] = None
     modalidade_col: Optional[str] = None
+    procedimento_col: Optional[str] = None
 
 
 def default_selections(source: str, columns: Sequence[str]) -> ColumnSelection:
@@ -7910,6 +7912,7 @@ def default_selections(source: str, columns: Sequence[str]) -> ColumnSelection:
         sel.morte_col = choose_candidate(columns, ["MORTE"])
         sel.dias_perm_col = choose_candidate(columns, ["DIAS_PERM"])
         sel.modalidade_col = choose_candidate(columns, ["MODALIDADE"])
+        sel.procedimento_col = choose_candidate(columns, ["PROC_REA", "PROC_REALIZADO", "PROCEDIMENTO", "PROCED", "COD_PROC", "COD_PROCEDIMENTO", "PROC_SOLIC", "PROC_ID", "PROC_PRINC", "PROCEDIMENTO_PRINCIPAL"])
     return sel
 
 
@@ -8022,6 +8025,7 @@ def build_expressions(source: str, sel: ColumnSelection) -> Dict[str, Optional[s
         exprs["morte_code"] = clean_code_expr(sel.morte_col) if sel.morte_col else None
         exprs["dias_perm"] = direct_age_expr(sel.dias_perm_col) if sel.dias_perm_col else None
         exprs["modalidade_label"] = case_from_mapping(clean_code_expr(sel.modalidade_col, pad2=True), CIHA_MODALIDADE, "Sem modalidade/ignorado") if sel.modalidade_col else None
+        exprs["procedimento_label"] = clean_str_expr(sel.procedimento_col) if sel.procedimento_col else None
     return exprs
 
 
@@ -9415,6 +9419,8 @@ def query_enriched_preview(table: LoadedTable, sel: ColumnSelection, exprs: Dict
         sel.diag_secun_col,
         sel.morte_col,
         sel.dias_perm_col,
+        sel.modalidade_col,
+        sel.procedimento_col,
     ]:
         if col and col not in raw_cols:
             raw_cols.append(col)
@@ -9555,6 +9561,83 @@ def copyable_dataframe(df: pd.DataFrame, *args, **kwargs) -> None:
         )
     copy_table_button(copy_df)
 
+
+
+
+def format_int_br(value: object) -> str:
+    """Formata inteiros em padrão brasileiro para captions de gráficos."""
+    if pd.isna(value):
+        return "—"
+    try:
+        return f"{int(round(float(value))):,}".replace(",", ".")
+    except Exception:
+        return str(value)
+
+
+def format_pct_br(value: object) -> str:
+    """Formata percentuais em padrão brasileiro para captions de gráficos."""
+    if pd.isna(value):
+        return "—"
+    try:
+        return f"{float(value):.1f}%".replace(".", ",")
+    except Exception:
+        return str(value)
+
+
+def render_interval_total(
+    df: pd.DataFrame,
+    value_col: str = "n",
+    by_col: Optional[str] = None,
+    denominator_col: Optional[str] = None,
+    value_label: str = "registros",
+    denominator_label: str = "denominador",
+    prefix: str = "Somatória no intervalo filtrado",
+    max_items: int = 8,
+) -> None:
+    """Exibe a somatória representada pelo gráfico no recorte de tempo/filtros atual.
+
+    O recorte é o que chegou ao dataframe do gráfico: filtros-base, definição exploratória
+    quando aplicável e os anos/parquets efetivamente carregados pelo usuário.
+    """
+    if df is None or df.empty or value_col not in df.columns:
+        return
+    tmp = df.copy()
+    tmp[value_col] = pd.to_numeric(tmp[value_col], errors="coerce").fillna(0)
+
+    def build_piece(label: object, part: pd.DataFrame) -> str:
+        total = part[value_col].sum()
+        piece = f"{label}: {format_int_br(total)} {value_label}"
+        if denominator_col and denominator_col in part.columns:
+            denom = pd.to_numeric(part[denominator_col], errors="coerce").fillna(0).sum()
+            if denom > 0:
+                pct = 100.0 * total / denom
+                piece += f" de {format_int_br(denom)} {denominator_label} ({format_pct_br(pct)})"
+        return piece
+
+    if by_col and by_col in tmp.columns:
+        grouped = (
+            tmp.groupby(by_col, dropna=False, as_index=False)[value_col]
+            .sum()
+            .sort_values(value_col, ascending=False)
+        )
+        labels = grouped[by_col].tolist()
+        pieces = []
+        for label in labels[:max_items]:
+            part = tmp[tmp[by_col].isna()] if pd.isna(label) else tmp[tmp[by_col].eq(label)]
+            pieces.append(build_piece(label if pd.notna(label) else "Sem informação", part))
+        if len(labels) > max_items:
+            pieces.append(f"+{len(labels) - max_items} categorias")
+        st.caption(f"{prefix}: " + "; ".join(pieces) + ".")
+        return
+
+    total = tmp[value_col].sum()
+    text = f"{prefix}: {format_int_br(total)} {value_label}"
+    if denominator_col and denominator_col in tmp.columns:
+        denom = pd.to_numeric(tmp[denominator_col], errors="coerce").fillna(0).sum()
+        if denom > 0:
+            pct = 100.0 * total / denom
+            text += f" de {format_int_br(denom)} {denominator_label} ({format_pct_br(pct)})"
+    st.caption(text + ".")
 
 def render_field_guide(source: str) -> None:
     copyable_dataframe(
@@ -10013,10 +10096,12 @@ def render_temporal_tab(table: LoadedTable, source: str, graph_where: str, exprs
     elif cat_options[cat_label]:
         fig = px.line(ts, x="periodo", y="n", color="categoria", markers=True, title="Série temporal estratificada", labels={"periodo": "Período", "n": "Registros", "categoria": cat_label})
         st.plotly_chart(fig, width="stretch")
+        render_interval_total(ts, value_col="n", by_col="categoria")
         download_button(ts, f"{source.lower()}_serie_temporal_estratificada.csv")
     else:
         fig = px.line(ts, x="periodo", y="n", markers=True, title="Série temporal", labels={"periodo": "Período", "n": "Registros"})
         st.plotly_chart(fig, width="stretch")
+        render_interval_total(ts, value_col="n")
         download_button(ts, f"{source.lower()}_serie_temporal.csv")
 
     heat = query_heatmap(table, dt, graph_where)
@@ -10035,6 +10120,7 @@ def render_temporal_tab(table: LoadedTable, source: str, graph_where: str, exprs
         )
         fig.update_layout(title="Sazonalidade: ano × mês", xaxis_title="Mês", yaxis_title="Ano")
         st.plotly_chart(fig, width="stretch")
+        render_interval_total(heat, value_col="n")
         download_button(heat, f"{source.lower()}_heatmap_ano_mes.csv", "Baixar dados do heatmap")
 
 
@@ -10102,6 +10188,7 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
                 )
                 fig_evol_confirmados.update_layout(barmode="stack")
                 st.plotly_chart(fig_evol_confirmados, width="stretch")
+                render_interval_total(evol_confirmados, value_col="n", by_col="categoria")
                 copyable_dataframe(evol_confirmados, width="stretch", hide_index=True)
                 download_button(evol_confirmados, "sinan_evolucao_confirmados.csv")
         else:
@@ -10139,13 +10226,14 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
         )
         fig.update_traces(textposition="top center")
         st.plotly_chart(fig, width="stretch")
+        render_interval_total(count_long, value_col="n", by_col="indicador")
 
         prop_specs = [
             ("pct_confirmacao", "Confirmados", "confirmados", "notificacoes", "% das notificações"),
             ("pct_descarte", "Descartados", "descartados", "notificacoes", "% das notificações"),
             ("pct_inconclusivos", "Inconclusivos", "inconclusivos", "notificacoes", "% das notificações"),
             ("pct_sem_classificacao", "Sem confirmação/ignorados", "sem_classificacao", "notificacoes", "% das notificações"),
-            ("letalidade_confirmados", "Letalidade entre confirmados", "obitos_meningite_confirmados", "confirmados", "% dos casos confirmados"),
+            ("letalidade_confirmados", "Letalidade — óbitos por meningite / confirmados", "obitos_meningite_confirmados", "confirmados", "% dos casos confirmados"),
         ]
         prop_rows = []
         for _, row in ind.iterrows():
@@ -10176,6 +10264,7 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
         )
         fig2.update_traces(textposition="top center")
         st.plotly_chart(fig2, width="stretch")
+        render_interval_total(prop_long, value_col="n", by_col="indicador", denominator_col="denominador", denominator_label="registros do denominador")
 
         assistencia = query_sinan_hospitalization_internment(table, exprs, base_where, hospital_col)
         if not assistencia.empty:
@@ -10196,6 +10285,7 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
                 category_orders={"grupo_caso": grupo_hosp_order},
             )
             st.plotly_chart(fig_assistencia, width="stretch")
+            render_interval_total(assistencia, value_col="n", by_col="grupo_caso", denominator_col="denominador", denominator_label="registros do grupo")
             copyable_dataframe(assistencia.drop(columns=["ordem_grupo"], errors="ignore"), width="stretch", hide_index=True)
             download_button(assistencia.drop(columns=["ordem_grupo"], errors="ignore"), "sinan_hospitalizacao_suspeitos_confirmados_descartados.csv")
         else:
@@ -10204,21 +10294,27 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
         etio = query_sinan_etiology_lethality(table, exprs, base_where)
         if not etio.empty:
             st.markdown("**Letalidade por grupo etiológico entre confirmados**")
+            st.caption("Denominador do gráfico: casos confirmados do respectivo grupo etiológico (CLASSI_FIN = 1). Fórmula: óbitos por meningite entre confirmados / casos confirmados do grupo.")
             copyable_dataframe(etio, width="stretch", hide_index=True)
             etio = etio.copy()
-            etio["texto"] = [f"{br_pct(p)} (n={br_int(n)})" for p, n in zip(etio["letalidade_pct"], etio["obitos_meningite"])]
+            etio["denominador_letalidade"] = etio["confirmados"]
+            etio["texto"] = [
+                f"{br_pct(p)} ({br_int(o)}/{br_int(c)})"
+                for p, o, c in zip(etio["letalidade_pct"], etio["obitos_meningite"], etio["denominador_letalidade"])
+            ]
             fig3 = px.bar(
                 etio,
                 x="letalidade_pct",
                 y="grupo_etiologico",
                 orientation="h",
                 text="texto",
-                title="Letalidade por grupo etiológico (%)",
-                labels={"letalidade_pct": "% dos confirmados", "grupo_etiologico": "Grupo etiológico", "confirmados": "Confirmados"},
-                hover_data={"confirmados": True, "obitos_meningite": True, "letalidade_evolucao_conhecida_pct": ":.2f"},
+                title="Letalidade por grupo etiológico — denominador: casos confirmados",
+                labels={"letalidade_pct": "Óbitos por meningite / casos confirmados (%)", "grupo_etiologico": "Grupo etiológico", "denominador_letalidade": "Casos confirmados do grupo"},
+                hover_data={"obitos_meningite": True, "denominador_letalidade": True},
             )
             fig3.update_layout(yaxis={"categoryorder": "total ascending"})
             st.plotly_chart(fig3, width="stretch")
+            render_interval_total(etio, value_col="obitos_meningite", denominator_col="confirmados", value_label="óbitos por meningite", denominator_label="casos confirmados")
             download_button(etio, "sinan_letalidade_por_etiologia.csv")
 
         by_year = query_sinan_diagnostics_by_year(table, exprs, base_where)
@@ -10249,6 +10345,7 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
             fig4.update_layout(barmode="stack")
             fig4.update_xaxes(type="category")
             st.plotly_chart(fig4, width="stretch")
+            render_interval_total(by_year, value_col="confirmados", by_col="grupo_etiologico")
             copyable_dataframe(by_year, width="stretch", hide_index=True)
             download_button(by_year, "sinan_confirmados_por_cid10_convertido_ano.csv")
 
@@ -10276,6 +10373,7 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
                 )
                 fig_sintoma.update_traces(textposition="top center")
                 st.plotly_chart(fig_sintoma, width="stretch")
+                render_interval_total(sintomas_sel, value_col="sintoma_sim", denominator_col="confirmados", value_label="confirmados com sintoma", denominator_label="casos confirmados")
 
                 sintomas_resumo = (
                     sintomas
@@ -10301,6 +10399,7 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
                     hover_data={"texto": False, "sintoma_sim": True, "confirmados": True, "sintoma_nao": True, "sintoma_ignorado": True},
                 )
                 st.plotly_chart(fig_sintomas_resumo, width="stretch")
+                render_interval_total(sintomas_resumo, value_col="sintoma_sim", by_col="sintoma")
                 copyable_dataframe(sintomas, width="stretch", hide_index=True)
                 download_button(sintomas, "sinan_prevalencia_sintomas_confirmados.csv")
         else:
@@ -10323,6 +10422,7 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
             )
             fig_comunicantes.update_layout(barmode="stack")
             st.plotly_chart(fig_comunicantes, width="stretch")
+            render_interval_total(comunicantes, value_col="comunicantes_total", by_col="quimioprofilaxia", value_label="comunicantes")
             copyable_dataframe(comunicantes, width="stretch", hide_index=True)
             download_button(comunicantes, "sinan_comunicantes_quimioprofilaxia.csv")
         else:
@@ -10346,6 +10446,7 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
             )
             fig_vacinacao.update_xaxes(tickangle=-30)
             st.plotly_chart(fig_vacinacao, width="stretch")
+            render_interval_total(vacinacao, value_col="vacinados_sim", by_col="vacina", value_label="vacinados com informação = Sim")
             copyable_dataframe(vacinacao, width="stretch", hide_index=True)
             download_button(vacinacao, "sinan_vacinacao_confirmados_descartados_inconclusivos.csv")
         else:
@@ -10397,8 +10498,7 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
             )
             fig.update_traces(textposition="top center")
             st.plotly_chart(fig, width="stretch")
-            fig2 = px.line(ind, x="ano", y=["pct_causa_basica_meningite", "pct_mencao_meningite"], markers=True, title="SIM: percentual com causa básica/menção de meningite")
-            st.plotly_chart(fig2, width="stretch")
+            render_interval_total(sim_cid_long, value_col="n", by_col="definicao")
 
         def render_sim_cycle_chart(
             category_sql: Optional[str],
@@ -10429,6 +10529,7 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
                 hover_data={"texto": False, "pct": ":.2f", "total_ano": True},
             )
             st.plotly_chart(fig_cycle, width="stretch")
+            render_interval_total(df, value_col="n", by_col="categoria")
             copyable_dataframe(df, width="stretch", hide_index=True)
             download_button(df, filename)
 
@@ -10537,6 +10638,58 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
         )
         fig.update_traces(textposition="top center")
         st.plotly_chart(fig, width="stretch")
+        render_interval_total(ciha_count_long, value_col="n", by_col="indicador")
+
+    if exprs.get("dt") and exprs.get("modalidade_label"):
+        modalidade = query_yearly_category(table, exprs["dt"], exprs["modalidade_label"], base_where)
+        if not modalidade.empty:
+            st.markdown("**Modalidade do atendimento — hospitalar vs ambulatorial**")
+            modalidade = add_text_column(modalidade)
+            fig_modalidade = px.bar(
+                modalidade,
+                x="ano",
+                y="n",
+                color="categoria",
+                text="texto",
+                title="CIHA: atendimentos por modalidade hospitalar e ambulatorial",
+                labels={"ano": "Ano", "n": "Atendimentos", "categoria": "Modalidade", "pct": "% no ano"},
+                hover_data={"texto": False, "pct": ":.2f", "total_ano": True},
+            )
+            fig_modalidade.update_layout(barmode="stack")
+            st.plotly_chart(fig_modalidade, width="stretch")
+            render_interval_total(modalidade, value_col="n", by_col="categoria")
+            copyable_dataframe(modalidade, width="stretch", hide_index=True)
+            download_button(modalidade, "ciha_modalidade_hospitalar_ambulatorial.csv")
+        else:
+            st.info("Sem dados de modalidade no recorte atual da CIHA.")
+    else:
+        st.info("Para gerar o gráfico de hospitalar vs ambulatorial, os campos de data e MODALIDADE precisam existir na CIHA e ser detectados automaticamente.")
+
+    procedimento = exprs.get("procedimento_label")
+    if procedimento:
+        procedimentos = query_category_top_with_outros(table, procedimento, base_where, top_n=20, outros_label="Outros procedimentos")
+        if not procedimentos.empty:
+            st.markdown("**Procedimentos e quantidade**")
+            procedimentos = add_text_column(procedimentos)
+            fig_proc = px.bar(
+                procedimentos,
+                x="n",
+                y="categoria",
+                orientation="h",
+                text="texto",
+                title="CIHA: procedimentos e quantidade",
+                labels={"categoria": "Procedimento", "n": "Quantidade", "pct": "% do total"},
+                hover_data={"texto": False, "pct": ":.2f", "denominador": True},
+            )
+            fig_proc.update_layout(yaxis={"categoryorder": "array", "categoryarray": procedimentos["categoria"].tolist()[::-1]})
+            st.plotly_chart(fig_proc, width="stretch")
+            render_interval_total(procedimentos, value_col="n")
+            copyable_dataframe(procedimentos, width="stretch", hide_index=True)
+            download_button(procedimentos, "ciha_procedimentos_quantidade.csv")
+        else:
+            st.info("Sem procedimentos preenchidos no recorte atual da CIHA.")
+    else:
+        st.info("Para gerar o gráfico de procedimentos, um campo como PROC_REA/PROCEDIMENTO precisa existir na CIHA e ser detectado automaticamente.")
 
     dias_dist = query_ciha_dias_perm_distribution(table, exprs, base_where)
     if not dias_dist.empty:
@@ -10552,6 +10705,7 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
             hover_data={"texto": False, "pct": ":.2f", "denominador": True},
         )
         st.plotly_chart(fig_dias, width="stretch")
+        render_interval_total(dias_dist, value_col="n")
         copyable_dataframe(dias_dist, width="stretch", hide_index=True)
         download_button(dias_dist, "ciha_dias_permanencia_distribuicao.csv")
     else:
@@ -10594,6 +10748,7 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
             )
             fig.update_layout(yaxis={"categoryorder": "total ascending"})
             st.plotly_chart(fig, width="stretch")
+            render_interval_total(cid_dist, value_col="n")
             copyable_dataframe(cid_dist, width="stretch", hide_index=True)
             download_button(cid_dist, f"{source.lower()}_cid10_distribuicao.csv")
 
@@ -10628,6 +10783,7 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                     )
                     fig_conv.update_layout(yaxis={"categoryorder": "total ascending"})
                     st.plotly_chart(fig_conv, width="stretch")
+                    render_interval_total(conv_adequacy_plot, value_col="n")
                     st.caption(
                         "Gráfico agregado pelo CID-10 adequado final: CID-10 convertidos somam no destino "
                         "e CID-10 prefixados já presentes permanecem em seu próprio grupo."
@@ -10667,6 +10823,7 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                 )
                 fig_g01_g02.update_layout(yaxis={"categoryorder": "total ascending"})
                 st.plotly_chart(fig_g01_g02, width="stretch")
+                render_interval_total(g01_g02, value_col="n")
                 copyable_dataframe(g01_g02, width="stretch", hide_index=True)
                 download_button(g01_g02, f"{source.lower()}_verificacao_g01_g02.csv")
 
@@ -10701,6 +10858,7 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                         )
                         fig_death.update_layout(yaxis={"categoryorder": "total ascending"})
                         st.plotly_chart(fig_death, width="stretch")
+                        render_interval_total(death_cid, value_col="n", value_label="óbitos CIHA")
                         copyable_dataframe(death_cid, width="stretch", hide_index=True)
                         download_button(death_cid, "ciha_obitos_cid10_distribuicao.csv")
         return
@@ -10728,6 +10886,7 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                 fig = px.bar(df, x="n", y="categoria", orientation="h", text="pct", labels={"categoria": label, "n": "Registros"})
                 fig.update_layout(yaxis={"categoryorder": "total ascending"})
                 st.plotly_chart(fig, width="stretch")
+                render_interval_total(df, value_col="n")
                 copyable_dataframe(df, width="stretch", hide_index=True)
 
         if label == "Grupo etiológico SINAN":
@@ -10753,6 +10912,7 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                     )
                     fig_conv.update_layout(yaxis={"categoryorder": "total ascending"})
                     st.plotly_chart(fig_conv, width="stretch")
+                    render_interval_total(conv_yes, value_col="n")
                     display_cols = [
                         c for c in [
                             "cid10_grupo", "cid10_classificacao", "n", "pct",
@@ -10803,6 +10963,7 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                     )
                     fig_g01.update_layout(yaxis={"categoryorder": "total ascending"})
                     st.plotly_chart(fig_g01, width="stretch")
+                    render_interval_total(g01_base, value_col="n")
                     copyable_dataframe(g01_base, width="stretch", hide_index=True)
                     download_button(g01_base, "sinan_g01_doenca_base_provavel.csv")
 
@@ -10829,6 +10990,7 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                 )
                 fig.update_layout(yaxis={"categoryorder": "total ascending"})
                 st.plotly_chart(fig, width="stretch")
+                render_interval_total(df, value_col="n")
                 copyable_dataframe(df, width="stretch", hide_index=True)
 
     with st.expander("Como os parâmetros do LCR costumam se comportar por etiologia"):
@@ -10862,6 +11024,7 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                 hover_data={"texto": False, "pct": ":.2f", "denominador": True, "faixa_inicio": ":.2f", "faixa_fim": ":.2f"},
             )
             st.plotly_chart(fig_dist, width="stretch")
+            render_interval_total(dist, value_col="n")
             copyable_dataframe(dist, width="stretch", hide_index=True)
             download_button(dist, f"sinan_quimiocitologico_distribuicao_{safe_filename(titulo)}.csv")
 
@@ -10898,6 +11061,7 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                 },
             )
             st.plotly_chart(fig_quimio, width="stretch")
+            render_interval_total(resumo_plot, value_col="n_valido", by_col="parametro", value_label="registros válidos")
         copyable_dataframe(quimio_summary, width="stretch", hide_index=True)
         download_button(quimio_summary, "sinan_quimiocitologico_liquor_resumo_parametros.csv")
 
@@ -10939,6 +11103,7 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
             )
             fig.update_traces(textposition="outside", cliponaxis=False)
             st.plotly_chart(fig, width="stretch")
+            render_interval_total(age_df, value_col="n")
             download_button(age_df, f"{source.lower()}_idade.csv")
         sex = exprs.get("sex")
         if sex:
@@ -10949,6 +11114,7 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
                 fig = px.bar(pyr, x="valor", y="faixa", color="sexo", orientation="h", title="Pirâmide etária por sexo", labels={"valor": "Registros", "faixa": "Faixa etária"})
                 fig.update_layout(barmode="relative")
                 st.plotly_chart(fig, width="stretch")
+                render_interval_total(pyr, value_col="n", by_col="sexo")
                 download_button(pyr, f"{source.lower()}_piramide.csv")
 
     education = exprs.get("education")
@@ -10996,6 +11162,7 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
                 fig_edu.update_layout(yaxis={"categoryorder": "array", "categoryarray": categoria_order[::-1]})
                 st.caption("O gráfico exibe todas as categorias operacionais de escolaridade do SINAN; os percentuais usam o total de casos confirmados como denominador comum.")
                 st.plotly_chart(fig_edu, width="stretch")
+                render_interval_total(edu_df, value_col="n", by_col="grupo")
                 edu_out = edu_df.drop(columns=["ordem_escolaridade", "ordem_grupo"], errors="ignore")
                 copyable_dataframe(edu_out, width="stretch", hide_index=True)
                 download_button(edu_out, "sinan_escolaridade_confirmados_obitos.csv")
@@ -11025,6 +11192,7 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
                 fig_edu.update_layout(yaxis={"categoryorder": "array", "categoryarray": categoria_order[::-1]})
                 st.caption("O gráfico exibe todas as categorias operacionais de escolaridade detectadas para o campo do SIM; os percentuais usam o total de registros filtrados como denominador.")
                 st.plotly_chart(fig_edu, width="stretch")
+                render_interval_total(edu_df, value_col="n")
                 edu_out = edu_df.drop(columns=["ordem_categoria"], errors="ignore")
                 copyable_dataframe(edu_out, width="stretch", hide_index=True)
                 download_button(edu_out, "sim_escolaridade.csv")
@@ -11073,6 +11241,7 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
                 else:
                     fig.update_layout(yaxis={"categoryorder": "total ascending"})
                 st.plotly_chart(fig, width="stretch")
+                render_interval_total(df, value_col="n")
                 copyable_dataframe(df, width="stretch", hide_index=True)
                 download_button(df, filename)
 
@@ -11115,7 +11284,7 @@ def render_quality_tab(table: LoadedTable, source: str, base_where: str, exprs: 
             "Cloreto": exprs.get("lab_clor"),
         })
     elif source == "CIHA":
-        fields.update({"MORTE": exprs.get("morte_code"), "DIAS_PERM": exprs.get("dias_perm"), "MODALIDADE": exprs.get("modalidade_label")})
+        fields.update({"MORTE": exprs.get("morte_code"), "DIAS_PERM": exprs.get("dias_perm"), "MODALIDADE": exprs.get("modalidade_label"), "PROCEDIMENTO": exprs.get("procedimento_label")})
     elif source == "SIM":
         fields.update({"CAUSABAS CID": exprs.get("causabas_cid"), "CAUSABAS_O CID": exprs.get("causabas_o_cid")})
 
@@ -11160,6 +11329,7 @@ def render_quality_tab(table: LoadedTable, source: str, base_where: str, exprs: 
         fig.update_layout(yaxis={"categoryorder": "total ascending"})
         fig.update_traces(textposition="outside", cliponaxis=False)
         st.plotly_chart(fig, width="stretch")
+        st.caption("Total no intervalo filtrado: " + format_int_br(pd.to_numeric(miss["total"], errors="coerce").max()) + " registros analisados; faltantes são contados por campo.")
         copyable_dataframe(miss[["campo", "faltantes", "total", "pct_faltante", "texto"]], width="stretch", hide_index=True)
         download_button(miss.drop(columns=["texto"], errors="ignore"), f"{source.lower()}_campos_importantes_nao_preenchidos.csv")
 
@@ -11192,6 +11362,7 @@ def render_quality_tab(table: LoadedTable, source: str, base_where: str, exprs: 
         )
         fig.update_traces(textposition="top center")
         st.plotly_chart(fig, width="stretch")
+        render_interval_total(filtered, value_col="faltantes", by_col="campo", value_label="registros não preenchidos")
         copyable_dataframe(filtered[["ano", "campo", "faltantes", "total", "pct_faltante", "texto"]], width="stretch", hide_index=True)
         download_button(by_year.drop(columns=["texto"], errors="ignore"), f"{source.lower()}_campos_importantes_nao_preenchidos_por_ano.csv")
 
@@ -11445,6 +11616,8 @@ def render_comparison(loaded: Sequence[Dict[str, object]]) -> None:
 
     fig = px.line(comp, x="periodo", y="valor", color="serie", markers=True, title="Comparação de tendências", labels={"valor": "Índice" if normalize else "Registros", "periodo": "Período", "serie": "Série"})
     st.plotly_chart(fig, width="stretch")
+    if not normalize:
+        render_interval_total(comp, value_col="valor", by_col="serie")
     if comparison_conversion_notes:
         st.caption("Observação da conversão usada na comparação estratificada: " + " ".join(comparison_conversion_notes))
     copyable_dataframe(comp, width="stretch", hide_index=True)
