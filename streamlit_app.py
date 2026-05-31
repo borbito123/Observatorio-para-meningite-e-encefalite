@@ -987,6 +987,31 @@ YES_NO_IGN = {
     "9": "Ignorado",
 }
 
+
+SINAN_SYMPTOM_FIELDS = [
+    ("CLI_CEFALE", "Cefaleia"),
+    ("CLI_FEBRE", "Febre"),
+    ("CLI_VOMITO", "Vômitos"),
+    ("CLI_CONVUL", "Convulsões"),
+    ("CLI_RIGIDE", "Rigidez de nuca"),
+    ("CLI_KERNIG", "Kernig/Brudzinski"),
+    ("CLI_ABAULA", "Abaulamento de fontanela"),
+    ("CLI_PETEQU", "Petequias/sufusões hemorrágicas"),
+    ("CLI_COMA", "Coma"),
+    ("CLI_OUTRAS", "Outras manifestações"),
+]
+
+SINAN_VACCINE_FIELDS = [
+    ("ANT_AC", "Polissacarídica A/C"),
+    ("ANT_BC", "Polissacarídica B/C"),
+    ("ANT_CONJ_C", "Conjugada meningo C"),
+    ("ANT_BCG", "BCG"),
+    ("ANT_TRIPLI", "Tríplice viral"),
+    ("ANT_HEMO_T", "Hemófilo/Tetravalente ou Hib"),
+    ("ANT_PNEUMO", "Pneumococo"),
+    ("ANT_OUTRA", "Outra vacina"),
+]
+
 # Campos do exame quimiocitológico do líquor no SINAN.
 # Os nomes abaixo seguem o dicionário SINAN NET para meningite; os seletores do app
 # também aceitam variações próximas caso o banco venha renomeado.
@@ -8604,6 +8629,239 @@ def query_sinan_indicators(table: LoadedTable, exprs: Dict[str, Optional[str]], 
     return run_query(table, sql)
 
 
+
+def _available_column_specs(columns: Sequence[str], specs: Sequence[Tuple[str, str]]) -> List[Tuple[str, str]]:
+    available: List[Tuple[str, str]] = []
+    for default_col, label in specs:
+        col = choose_candidate(columns, [default_col])
+        if col:
+            available.append((col, label))
+    return available
+
+
+def query_sinan_symptom_prevalence(table: LoadedTable, exprs: Dict[str, Optional[str]], where_sql: str, symptom_specs: Sequence[Tuple[str, str]]) -> pd.DataFrame:
+    dt = exprs.get("dt")
+    classi = exprs.get("classi_code")
+    if not (dt and classi and symptom_specs):
+        return pd.DataFrame()
+
+    unions = []
+    for col, label in symptom_specs:
+        unions.append(
+            f"""
+            SELECT {dt} AS dt,
+                   {classi} AS classi,
+                   {qstr(label)} AS sintoma,
+                   {clean_code_expr(col)} AS sintoma_codigo
+            FROM {table.ref_sql}
+            {where_sql}
+            """
+        )
+
+    sql = f"""
+        WITH long AS (
+            {' UNION ALL '.join(unions)}
+        ), base AS (
+            SELECT EXTRACT(YEAR FROM dt) AS ano,
+                   sintoma,
+                   sintoma_codigo
+            FROM long
+            WHERE dt IS NOT NULL
+              AND classi = '1'
+        ), agg AS (
+            SELECT ano,
+                   sintoma,
+                   COUNT(*) AS confirmados,
+                   COUNT(*) FILTER (WHERE sintoma_codigo = '1') AS sintoma_sim,
+                   COUNT(*) FILTER (WHERE sintoma_codigo = '2') AS sintoma_nao,
+                   COUNT(*) FILTER (WHERE sintoma_codigo IS NULL OR sintoma_codigo NOT IN ('1','2')) AS sintoma_ignorado
+            FROM base
+            GROUP BY 1, 2
+        )
+        SELECT *,
+               {pct_expr('sintoma_sim', 'confirmados')} AS pct_sintoma_confirmados
+        FROM agg
+        ORDER BY ano, sintoma
+    """
+    return run_query(table, sql)
+
+
+def query_sinan_hospitalization_internment(
+    table: LoadedTable,
+    exprs: Dict[str, Optional[str]],
+    where_sql: str,
+    hospital_col: Optional[str],
+    internment_col: Optional[str],
+) -> pd.DataFrame:
+    dt = exprs.get("dt")
+    classi = exprs.get("classi_code")
+    if not (dt and classi and (hospital_col or internment_col)):
+        return pd.DataFrame()
+
+    hospital_code = clean_code_expr(hospital_col) if hospital_col else "CAST(NULL AS VARCHAR)"
+    internment_date = date_expr(internment_col) if internment_col else "CAST(NULL AS DATE)"
+    indicator_selects = []
+    if hospital_col:
+        indicator_selects.append(
+            """
+            SELECT ano,
+                   grupo_caso,
+                   'Hospitalização informada (ATE_HOSPIT = Sim)' AS indicador,
+                   hospitalizacao_sim AS n,
+                   denominador
+            FROM scoped
+            """
+        )
+    if internment_col:
+        indicator_selects.append(
+            """
+            SELECT ano,
+                   grupo_caso,
+                   'Internação com data informada (ATE_INTERN)' AS indicador,
+                   internacao_informada AS n,
+                   denominador
+            FROM scoped
+            """
+        )
+
+    sql = f"""
+        WITH base AS (
+            SELECT EXTRACT(YEAR FROM {dt}) AS ano,
+                   {classi} AS classi,
+                   {hospital_code} AS hospitalizacao,
+                   {internment_date} AS dt_internacao
+            FROM {table.ref_sql}
+            {where_sql}
+        ), scoped AS (
+            SELECT ano,
+                   'Suspeitos/notificados' AS grupo_caso,
+                   COUNT(*) AS denominador,
+                   COUNT(*) FILTER (WHERE hospitalizacao = '1') AS hospitalizacao_sim,
+                   COUNT(*) FILTER (WHERE dt_internacao IS NOT NULL) AS internacao_informada
+            FROM base
+            WHERE ano IS NOT NULL
+            GROUP BY 1
+            UNION ALL
+            SELECT ano,
+                   'Confirmados' AS grupo_caso,
+                   COUNT(*) AS denominador,
+                   COUNT(*) FILTER (WHERE hospitalizacao = '1') AS hospitalizacao_sim,
+                   COUNT(*) FILTER (WHERE dt_internacao IS NOT NULL) AS internacao_informada
+            FROM base
+            WHERE ano IS NOT NULL
+              AND classi = '1'
+            GROUP BY 1
+        ), long AS (
+            {' UNION ALL '.join(indicator_selects)}
+        )
+        SELECT ano,
+               grupo_caso,
+               indicador,
+               n,
+               denominador,
+               {pct_expr('n', 'denominador')} AS pct
+        FROM long
+        ORDER BY ano, indicador, grupo_caso
+    """
+    return run_query(table, sql)
+
+
+def query_sinan_communicants_prophylaxis(
+    table: LoadedTable,
+    exprs: Dict[str, Optional[str]],
+    where_sql: str,
+    communicants_col: Optional[str],
+    prophylaxis_col: Optional[str],
+) -> pd.DataFrame:
+    dt = exprs.get("dt")
+    if not (dt and (communicants_col or prophylaxis_col)):
+        return pd.DataFrame()
+
+    communicants = numeric_expr(communicants_col) if communicants_col else "CAST(NULL AS DOUBLE)"
+    prophylaxis = case_from_mapping(clean_code_expr(prophylaxis_col), YES_NO_IGN, "Sem informação") if prophylaxis_col else qstr("Sem informação")
+    sql = f"""
+        WITH base AS (
+            SELECT EXTRACT(YEAR FROM {dt}) AS ano,
+                   {communicants} AS comunicantes,
+                   {prophylaxis} AS quimioprofilaxia
+            FROM {table.ref_sql}
+            {where_sql}
+        ), agg AS (
+            SELECT ano,
+                   quimioprofilaxia,
+                   COUNT(*) AS registros,
+                   COUNT(*) FILTER (WHERE comunicantes IS NOT NULL AND comunicantes >= 0) AS registros_com_comunicantes,
+                   SUM(CASE WHEN comunicantes IS NOT NULL AND comunicantes >= 0 THEN comunicantes ELSE 0 END) AS comunicantes_total,
+                   ROUND(AVG(comunicantes) FILTER (WHERE comunicantes IS NOT NULL AND comunicantes >= 0), 2) AS media_comunicantes
+            FROM base
+            WHERE ano IS NOT NULL
+              AND (comunicantes IS NOT NULL OR quimioprofilaxia <> 'Sem informação')
+            GROUP BY 1, 2
+        ), with_totals AS (
+            SELECT *,
+                   SUM(registros) OVER (PARTITION BY ano) AS total_registros_ano,
+                   SUM(comunicantes_total) OVER (PARTITION BY ano) AS total_comunicantes_ano
+            FROM agg
+        )
+        SELECT *,
+               {pct_expr('registros', 'total_registros_ano')} AS pct_registros_ano,
+               {pct_expr('comunicantes_total', 'total_comunicantes_ano')} AS pct_comunicantes_ano
+        FROM with_totals
+        ORDER BY ano, quimioprofilaxia
+    """
+    return run_query(table, sql)
+
+
+def query_sinan_vaccination_by_classification(table: LoadedTable, exprs: Dict[str, Optional[str]], where_sql: str, vaccine_specs: Sequence[Tuple[str, str]]) -> pd.DataFrame:
+    classi = exprs.get("classi_code")
+    if not (classi and vaccine_specs):
+        return pd.DataFrame()
+
+    unions = []
+    for col, label in vaccine_specs:
+        unions.append(
+            f"""
+            SELECT {qstr(label)} AS vacina,
+                   {classi} AS classi,
+                   {clean_code_expr(col)} AS vacina_codigo
+            FROM {table.ref_sql}
+            {where_sql}
+            """
+        )
+
+    sql = f"""
+        WITH long AS (
+            {' UNION ALL '.join(unions)}
+        ), base AS (
+            SELECT vacina,
+                   CASE
+                       WHEN classi = '1' THEN 'Confirmados'
+                       WHEN classi IN ('2','8') THEN 'Descartados / inconclusivos'
+                       ELSE NULL
+                   END AS grupo_classificacao,
+                   vacina_codigo
+            FROM long
+            WHERE classi IN ('1','2','8')
+        ), agg AS (
+            SELECT vacina,
+                   grupo_classificacao,
+                   COUNT(*) AS denominador,
+                   COUNT(*) FILTER (WHERE vacina_codigo = '1') AS vacinados_sim,
+                   COUNT(*) FILTER (WHERE vacina_codigo = '2') AS vacinados_nao,
+                   COUNT(*) FILTER (WHERE vacina_codigo IS NULL OR vacina_codigo NOT IN ('1','2')) AS vacinacao_ignorada
+            FROM base
+            WHERE grupo_classificacao IS NOT NULL
+            GROUP BY 1, 2
+        )
+        SELECT *,
+               {pct_expr('vacinados_sim', 'denominador')} AS pct_vacinados_sim
+        FROM agg
+        ORDER BY vacina,
+                 CASE WHEN grupo_classificacao = 'Confirmados' THEN 0 ELSE 1 END
+    """
+    return run_query(table, sql)
+
+
 def query_sinan_etiology_lethality(table: LoadedTable, exprs: Dict[str, Optional[str]], where_sql: str) -> pd.DataFrame:
     classi, evol, con_group, con_label = exprs.get("classi_code"), exprs.get("evol_code"), exprs.get("con_group"), exprs.get("con_label")
     if not (classi and evol and con_group):
@@ -9615,6 +9873,15 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
         copyable_dataframe(ind, width="stretch", hide_index=True)
         download_button(ind, "sinan_indicadores_anuais.csv")
 
+        sinan_schema = schema_df(table)
+        sinan_columns = sinan_schema["coluna"].astype(str).tolist() if "coluna" in sinan_schema.columns else []
+        symptom_specs = _available_column_specs(sinan_columns, SINAN_SYMPTOM_FIELDS)
+        vaccine_specs = _available_column_specs(sinan_columns, SINAN_VACCINE_FIELDS)
+        hospital_col = choose_candidate(sinan_columns, ["ATE_HOSPIT"])
+        internment_col = choose_candidate(sinan_columns, ["ATE_INTERN", "DT_INTERNA", "DT_INTERN", "DATA_INTERNACAO"])
+        communicants_col = choose_candidate(sinan_columns, ["MED_NUCOMU", "NU_COMUNICANTES", "NUM_COMUNICANTES", "COMUNICANTES"])
+        prophylaxis_col = choose_candidate(sinan_columns, ["MED_QUIMIO", "QUIMIOPROFILAXIA", "PROFILAXIA", "QUIMIO"])
+
         count_specs = [
             ("notificacoes", "Notificações", None),
             ("confirmados", "Confirmados", "pct_confirmacao"),
@@ -9685,6 +9952,60 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
         fig2.update_traces(textposition="top center")
         st.plotly_chart(fig2, width="stretch")
 
+        if symptom_specs and exprs.get("classi_code") and exprs.get("dt"):
+            sintomas = query_sinan_symptom_prevalence(table, exprs, base_where, symptom_specs)
+            if not sintomas.empty:
+                st.markdown("**Prevalência de sinais e sintomas entre casos confirmados**")
+                opcoes_sintomas = sorted(sintomas["sintoma"].dropna().unique().tolist())
+                sintoma_sel = st.selectbox(
+                    "Sintoma para curva anual entre confirmados",
+                    options=opcoes_sintomas,
+                    key="sinan_indicadores_sintoma_prevalencia",
+                )
+                sintomas_sel = sintomas[sintomas["sintoma"].eq(sintoma_sel)].copy()
+                sintomas_sel["texto"] = [f"{br_pct(p)} (n={br_int(n)})" for p, n in zip(sintomas_sel["pct_sintoma_confirmados"], sintomas_sel["sintoma_sim"])]
+                fig_sintoma = px.line(
+                    sintomas_sel,
+                    x="ano",
+                    y="pct_sintoma_confirmados",
+                    markers=True,
+                    text="texto",
+                    title=f"SINAN: prevalência anual de {sintoma_sel} entre casos confirmados",
+                    labels={"ano": "Ano", "pct_sintoma_confirmados": "% dos confirmados", "sintoma_sim": "Confirmados com sintoma"},
+                    hover_data={"texto": False, "sintoma_sim": True, "confirmados": True, "sintoma_nao": True, "sintoma_ignorado": True},
+                )
+                fig_sintoma.update_traces(textposition="top center")
+                st.plotly_chart(fig_sintoma, width="stretch")
+
+                sintomas_resumo = (
+                    sintomas
+                    .groupby("sintoma", dropna=False, as_index=False)
+                    .agg(
+                        confirmados=("confirmados", "sum"),
+                        sintoma_sim=("sintoma_sim", "sum"),
+                        sintoma_nao=("sintoma_nao", "sum"),
+                        sintoma_ignorado=("sintoma_ignorado", "sum"),
+                    )
+                )
+                sintomas_resumo["pct_sintoma_confirmados"] = (100.0 * sintomas_resumo["sintoma_sim"] / sintomas_resumo["confirmados"].replace({0: np.nan})).round(2)
+                sintomas_resumo = sintomas_resumo.sort_values("pct_sintoma_confirmados", ascending=True)
+                sintomas_resumo["texto"] = [f"{br_pct(p)} (n={br_int(n)})" for p, n in zip(sintomas_resumo["pct_sintoma_confirmados"], sintomas_resumo["sintoma_sim"])]
+                fig_sintomas_resumo = px.bar(
+                    sintomas_resumo,
+                    x="pct_sintoma_confirmados",
+                    y="sintoma",
+                    orientation="h",
+                    text="texto",
+                    title="SINAN: prevalência acumulada dos sinais e sintomas entre confirmados",
+                    labels={"pct_sintoma_confirmados": "% dos confirmados", "sintoma": "Sinal/sintoma"},
+                    hover_data={"texto": False, "sintoma_sim": True, "confirmados": True, "sintoma_nao": True, "sintoma_ignorado": True},
+                )
+                st.plotly_chart(fig_sintomas_resumo, width="stretch")
+                copyable_dataframe(sintomas, width="stretch", hide_index=True)
+                download_button(sintomas, "sinan_prevalencia_sintomas_confirmados.csv")
+        else:
+            st.info("Para gerar a prevalência de sintomas, CLASSI_FIN, data e os campos clínicos CLI_* precisam existir no SINAN.")
+
         if exprs.get("hospital_label") and exprs.get("dt"):
             hosp = query_yearly_category(table, exprs["dt"], exprs["hospital_label"], base_where)
             if not hosp.empty:
@@ -9705,6 +10026,102 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
                 download_button(hosp, "sinan_internacao_ate_hospit.csv")
         else:
             st.info("Para gerar o gráfico de internação, o campo ATE_HOSPIT precisa existir no SINAN e ser detectado automaticamente.")
+
+        assistencia = query_sinan_hospitalization_internment(table, exprs, base_where, hospital_col, internment_col)
+        if not assistencia.empty:
+            st.markdown("**Hospitalização e internação em suspeitos/notificados e confirmados**")
+            assistencia = assistencia.copy()
+            assistencia["texto"] = [f"{br_pct(p)} (n={br_int(n)})" for p, n in zip(assistencia["pct"], assistencia["n"])]
+            fig_assistencia = px.bar(
+                assistencia,
+                x="ano",
+                y="pct",
+                color="grupo_caso",
+                facet_col="indicador",
+                barmode="group",
+                text="texto",
+                title="SINAN: ocorrência de hospitalização e internação por definição de caso",
+                labels={"ano": "Ano", "pct": "% no grupo", "grupo_caso": "Grupo", "indicador": "Indicador", "n": "Registros"},
+                hover_data={"texto": False, "n": True, "denominador": True},
+            )
+            fig_assistencia.update_yaxes(matches=None)
+            st.plotly_chart(fig_assistencia, width="stretch")
+            copyable_dataframe(assistencia, width="stretch", hide_index=True)
+            download_button(assistencia, "sinan_hospitalizacao_internacao_suspeitos_confirmados.csv")
+        else:
+            st.info("Para gerar o gráfico comparativo de hospitalização/internação, CLASSI_FIN, data, ATE_HOSPIT e/ou ATE_INTERN precisam existir no SINAN.")
+
+        comunicantes = query_sinan_communicants_prophylaxis(table, exprs, base_where, communicants_col, prophylaxis_col)
+        if not comunicantes.empty:
+            st.markdown("**Comunicantes e quimioprofilaxia**")
+            comunicantes = comunicantes.copy()
+            comunicantes["texto_comunicantes"] = [br_int(v) for v in comunicantes["comunicantes_total"]]
+            fig_comunicantes = px.bar(
+                comunicantes,
+                x="ano",
+                y="comunicantes_total",
+                color="quimioprofilaxia",
+                text="texto_comunicantes",
+                title="SINAN: número de comunicantes por realização de quimioprofilaxia",
+                labels={"ano": "Ano", "comunicantes_total": "Comunicantes", "quimioprofilaxia": "Quimioprofilaxia"},
+                hover_data={"texto_comunicantes": False, "registros": True, "registros_com_comunicantes": True, "media_comunicantes": True, "pct_comunicantes_ano": ":.2f"},
+            )
+            fig_comunicantes.update_layout(barmode="stack")
+            st.plotly_chart(fig_comunicantes, width="stretch")
+            copyable_dataframe(comunicantes, width="stretch", hide_index=True)
+            download_button(comunicantes, "sinan_comunicantes_quimioprofilaxia.csv")
+        else:
+            st.info("Para gerar o gráfico de comunicantes/profilaxia, MED_NUCOMU e/ou MED_QUIMIO precisam existir no SINAN.")
+
+        if exprs.get("evol_label") and exprs.get("dt") and exprs.get("classi_code"):
+            evol_confirmados = query_yearly_category(
+                table,
+                exprs["dt"],
+                exprs["evol_label"],
+                append_clause(base_where, f"{exprs['classi_code']} = '1'"),
+            )
+            if not evol_confirmados.empty:
+                st.markdown("**Evolução dos casos confirmados**")
+                evol_confirmados = add_text_column(evol_confirmados)
+                fig_evol_confirmados = px.bar(
+                    evol_confirmados,
+                    x="ano",
+                    y="n",
+                    color="categoria",
+                    text="texto",
+                    title="SINAN: evolução dos casos confirmados",
+                    labels={"ano": "Ano", "n": "Confirmados", "categoria": "Evolução", "pct": "% no ano"},
+                    hover_data={"texto": False, "pct": ":.2f", "total_ano": True},
+                )
+                fig_evol_confirmados.update_layout(barmode="stack")
+                st.plotly_chart(fig_evol_confirmados, width="stretch")
+                copyable_dataframe(evol_confirmados, width="stretch", hide_index=True)
+                download_button(evol_confirmados, "sinan_evolucao_confirmados.csv")
+        else:
+            st.info("Para gerar o gráfico de evolução dos confirmados, CLASSI_FIN, EVOLUCAO e data precisam existir no SINAN.")
+
+        vacinacao = query_sinan_vaccination_by_classification(table, exprs, base_where, vaccine_specs)
+        if not vacinacao.empty:
+            st.markdown("**Vacinação por classificação final do caso**")
+            vacinacao = vacinacao.copy()
+            vacinacao["texto"] = [f"{br_pct(p)} (n={br_int(n)})" for p, n in zip(vacinacao["pct_vacinados_sim"], vacinacao["vacinados_sim"])]
+            fig_vacinacao = px.bar(
+                vacinacao,
+                x="vacina",
+                y="pct_vacinados_sim",
+                color="grupo_classificacao",
+                barmode="group",
+                text="texto",
+                title="SINAN: vacinação informada como 'Sim' em confirmados vs descartados/inconclusivos",
+                labels={"vacina": "Vacina", "pct_vacinados_sim": "% com vacinação = Sim", "grupo_classificacao": "Classificação", "denominador": "Denominador"},
+                hover_data={"texto": False, "vacinados_sim": True, "vacinados_nao": True, "vacinacao_ignorada": True, "denominador": True},
+            )
+            fig_vacinacao.update_xaxes(tickangle=-30)
+            st.plotly_chart(fig_vacinacao, width="stretch")
+            copyable_dataframe(vacinacao, width="stretch", hide_index=True)
+            download_button(vacinacao, "sinan_vacinacao_confirmados_descartados_inconclusivos.csv")
+        else:
+            st.info("Para gerar o gráfico de vacinação, CLASSI_FIN e campos ANT_* de vacinação precisam existir no SINAN.")
 
         etio = query_sinan_etiology_lethality(table, exprs, base_where)
         if not etio.empty:
