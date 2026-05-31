@@ -46,10 +46,10 @@ _Observação: Para contornar eventuais problemas de memória ou crashes do apli
 ## _Gráficos incluídos_
 
 ### Para SINAN
-- Indicadores -> Fornece: gráficos com porcentagem e valor absoluto da classificação dos casos, letalidade dos casos (podendo separar por grupo etiológico), se houve internação / hospitalização, 
+- Indicadores -> Fornece: gráficos com porcentagem e valor absoluto da classificação dos casos, letalidade dos casos (podendo separar por grupo etiológico), se houve internação / hospitalização, evolução do caso, Prevalência de sinais/sintomas, Número de comunicantes por quimioprofilaxia, Vacinação
 - Análise temporal -> Fornece: análise da sazonalidade por meio de heatmap ano × mês, série temporal que pode ser estratificada conforme sexo e CID-10 para todos os bancos de dados, classificação da meningite + classificação final do caso (apenas para o SINAN). 
 - Análise do CID-10 -> Fornece: distribuição dos casos por classificação final (confirmado, descartado...), distribuição dos casos por conclusão diagnóstica (especifica o grupo etiológico), conversão dos grupos etiológicos preenchidos no banco de dados para os devidos CID-10 (o streamlt mostra a regra usada para converter CON_DIAGES em CID-10), distribuição dos casos conforme evolução, distribuição dos casos por critério diagnóstico utilizado, distribuição conforme realiização de punção laboratorial, gráficos de distribuição dos principais parâmetros liquóricos analisados (glicose, leucócitos, proteínas, neutrófiilos).
-- Demografia -> Fornece: Distribuição por faixa etária de 5 anos, pirâmide etária por sexo, distribuição por raça/cor, top municípios com maior prevalência de casos
+- Demografia -> Fornece: Distribuição por faixa etária de 5 anos, pirâmide etária por sexo, distribuição por raça/cor, top municípios com maior prevalência de casos, escolaridade
 - Campos importantes não preenchidos -> Fornece: quantos registros não foram preenchidos conforme certas variáveis de maior relevância
 - Prévia -> Fornece: prévia do dados presentes no banco de dados, sendo possível exportar para o formato .CSV
 
@@ -63,7 +63,7 @@ A referência utilizada para alocação foi: https://portalsinan.saude.gov.br/im
 - Indicadores -> Fornece: total e percentual de óbitos nos quais a meningite está envolvida, distinguindo os casos onde houve menção de meningite ou onde a meningite foi a causa basica, gravidez e puerpério correlacionadas com os óbitos por meningite.
 - Análise temporal -> Fornece: análise da sazonalidade por meio de heatmap ano × mês, série temporal que pode ser estratificada conforme sexo e CID-10 para todos os bancos de dados.
 - Análise do CID-10 -> Fornece: distribuição dos óbitos conforme o CID-10, gráfico que converte os CID-10 para o padrão utilizado no gráfico de conversão do SINAN. 
-- Demografia -> Fornece: Distribuição por faixa etária de 5 anos, pirâmide etária por sexo, distribuição por raça/cor, top municípios com maior prevalência de casos
+- Demografia -> Fornece: Distribuição por faixa etária de 5 anos, pirâmide etária por sexo, distribuição por raça/cor, top municípios com maior prevalência de casos, escolaridade
 - Campos importantes não preenchidos -> Fornece: quantos registros não foram preenchidos conforme certas variáveis de maior relevância
 - Prévia -> Fornece: prévia do dados presentes no banco de dados, sendo possível exportar para o formato .CSV
 
@@ -75,7 +75,7 @@ A se ponderar: A17 e A39 se enquadrariam no CID G01, mas atualmnte se encontram 
 - Indicadores -> Fornece: o total de atendimentos e as mortes administrativas, dias de permanênca no ambiente hospitalar, 
 - Análise temporal -> Fornece: análise da sazonalidade por meio de heatmap ano × mês, série temporal que pode ser estratificada conforme sexo e CID-10 para todos os bancos de dados, classificação da meningite + classificação final do caso (apenas para o SINAN). 
 - Análise do CID-10 -> Fornece: distribuição dos casos por CID-10, gráfico que converte os CID-10 para o padrão utilizado no gráfico de conversão do SINAN. 
-- Demografia -> Fornece: Distribuição por faixa etária de 5 anos, pirâmide etária por sexo, distribuição por raça/cor, top municípios com maior prevalência de casos
+- Demografia -> Fornece: Distribuição por faixa etária de 5 anos, pirâmide etária por sexo, distribuição por raça/cor, top municípios com maior prevalência de casos, escolaridade
 - Campos importantes não preenchidos -> Fornece: quantos registros não foram preenchidos conforme certas variáveis de maior relevância
 - Prévia -> Fornece: prévia do dados presentes no banco de dados, sendo possível exportar para o formato .CSV
 
