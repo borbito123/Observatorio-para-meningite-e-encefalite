@@ -6874,6 +6874,44 @@ def education_label_expr(source: str, col: str) -> str:
     return clean_str_expr(col)
 
 
+def unique_mapping_labels(mapping: Dict[str, str]) -> List[str]:
+    """Retorna rótulos categóricos preservando a ordem e removendo duplicatas."""
+    labels: List[str] = []
+    seen: set[str] = set()
+    for label in mapping.values():
+        if label not in seen:
+            labels.append(label)
+            seen.add(label)
+    return labels
+
+
+def education_category_labels(source: str, col_or_expr: Optional[str] = None, include_missing: bool = True) -> List[str]:
+    """Lista todas as categorias operacionais de escolaridade esperadas para o campo detectado."""
+    if source == "SINAN":
+        labels = unique_mapping_labels(SINAN_ESCOLARIDADE)
+    elif source == "SIM":
+        col_norm = normalize_name(col_or_expr or "")
+        if "2010" in col_norm:
+            labels = unique_mapping_labels(SIM_ESCOLARIDADE_2010)
+        elif "AGR" in col_norm:
+            labels = unique_mapping_labels(SIM_ESCOLARIDADE_AGREGADA)
+        else:
+            labels = unique_mapping_labels(SIM_ESCOLARIDADE_ANTIGA)
+    else:
+        labels = []
+    if include_missing and "Sem informação/ignorado" not in labels:
+        labels.append("Sem informação/ignorado")
+    return labels
+
+
+def values_cte_from_labels(labels: Sequence[str], label_col: str, order_col: str) -> str:
+    """Constrói uma lista VALUES segura para CTEs de categorias categóricas."""
+    if not labels:
+        return f"SELECT {qstr('Sem informação/ignorado')} AS {label_col}, 1 AS {order_col}"
+    values = ", ".join(f"({qstr(label)}, {idx})" for idx, label in enumerate(labels, start=1))
+    return f"SELECT * FROM (VALUES {values}) AS t({label_col}, {order_col})"
+
+
 def municipality_display_expr(col: str) -> str:
     raw = clean_str_expr(col)
     digits = f"regexp_replace(COALESCE({raw}, ''), '[^0-9]', '', 'g')"
@@ -8089,6 +8127,12 @@ def query_sinan_education_outcomes(
     evol_sql: str,
     where_sql: str,
 ) -> pd.DataFrame:
+    escolaridade_labels = education_category_labels("SINAN", include_missing=True)
+    cats_cte = values_cte_from_labels(escolaridade_labels, "escolaridade", "ordem_escolaridade")
+    group_values = ", ".join(
+        f"({qstr(label)}, {idx})"
+        for idx, label in enumerate(["Casos confirmados", "Óbitos por meningite", "Óbitos por outra causa"], start=1)
+    )
     sql = f"""
         WITH base AS (
             SELECT
@@ -8097,6 +8141,14 @@ def query_sinan_education_outcomes(
                 {evol_sql} AS evol
             FROM {table.ref_sql}
             {where_sql}
+        ), categorias AS (
+            {cats_cte}
+        ), grupos_ref AS (
+            SELECT * FROM (VALUES {group_values}) AS t(grupo, ordem_grupo)
+        ), grid AS (
+            SELECT g.grupo, g.ordem_grupo, c.escolaridade, c.ordem_escolaridade
+            FROM grupos_ref g
+            CROSS JOIN categorias c
         ), grupos AS (
             SELECT 'Casos confirmados' AS grupo, escolaridade
             FROM base
@@ -8113,27 +8165,67 @@ def query_sinan_education_outcomes(
             SELECT grupo, escolaridade, COUNT(*) AS n
             FROM grupos
             GROUP BY 1, 2
-        ), totals AS (
-            SELECT grupo, SUM(n) AS denominador
-            FROM counts
-            GROUP BY 1
+        ), total_confirmados AS (
+            SELECT COUNT(*) FILTER (WHERE classi = '1') AS denominador
+            FROM base
         )
-        SELECT c.grupo, c.escolaridade, c.n, t.denominador,
-               CASE WHEN t.denominador > 0 THEN ROUND(100.0 * c.n / t.denominador, 2) ELSE NULL END AS pct
-        FROM counts c
-        JOIN totals t USING (grupo)
-        ORDER BY
-            CASE c.grupo
-                WHEN 'Casos confirmados' THEN 1
-                WHEN 'Óbitos por meningite' THEN 2
-                WHEN 'Óbitos por outra causa' THEN 3
-                ELSE 9
-            END,
-            c.n DESC,
-            c.escolaridade
+        SELECT
+            grid.grupo,
+            grid.escolaridade,
+            COALESCE(counts.n, 0) AS n,
+            total_confirmados.denominador,
+            CASE WHEN total_confirmados.denominador > 0
+                 THEN ROUND(100.0 * COALESCE(counts.n, 0) / total_confirmados.denominador, 2)
+                 ELSE NULL END AS pct,
+            grid.ordem_escolaridade,
+            grid.ordem_grupo
+        FROM grid
+        CROSS JOIN total_confirmados
+        LEFT JOIN counts
+          ON counts.grupo = grid.grupo
+         AND counts.escolaridade = grid.escolaridade
+        ORDER BY grid.ordem_escolaridade, grid.ordem_grupo
     """
     return run_query(table, sql)
 
+
+def query_education_distribution_all_categories(
+    table: LoadedTable,
+    source: str,
+    education_sql: str,
+    where_sql: str,
+) -> pd.DataFrame:
+    labels = education_category_labels(source, education_sql, include_missing=True)
+    cats_cte = values_cte_from_labels(labels, "categoria", "ordem_categoria")
+    sql = f"""
+        WITH categorias AS (
+            {cats_cte}
+        ), base AS (
+            SELECT COALESCE({education_sql}, 'Sem informação/ignorado') AS categoria
+            FROM {table.ref_sql}
+            {where_sql}
+        ), counts AS (
+            SELECT categoria, COUNT(*) AS n
+            FROM base
+            GROUP BY 1
+        ), total AS (
+            SELECT COUNT(*) AS denominador
+            FROM base
+        )
+        SELECT
+            categorias.categoria,
+            COALESCE(counts.n, 0) AS n,
+            total.denominador,
+            CASE WHEN total.denominador > 0
+                 THEN ROUND(100.0 * COALESCE(counts.n, 0) / total.denominador, 2)
+                 ELSE NULL END AS pct,
+            categorias.ordem_categoria
+        FROM categorias
+        CROSS JOIN total
+        LEFT JOIN counts USING (categoria)
+        ORDER BY categorias.ordem_categoria
+    """
+    return run_query(table, sql)
 
 def query_yearly_category(table: LoadedTable, dt_sql: str, category_sql: str, where_sql: str) -> pd.DataFrame:
     sql = f"""
@@ -8743,6 +8835,7 @@ def query_sinan_indicators(table: LoadedTable, exprs: Dict[str, Optional[str]], 
                {pct_expr('inconclusivos', 'notificacoes')} AS pct_inconclusivos,
                {pct_expr('sem_classificacao', 'notificacoes')} AS pct_sem_classificacao,
                {pct_expr('obitos_meningite_confirmados', 'notificacoes')} AS pct_obitos_meningite_confirmados_notificacoes,
+               {pct_expr('obitos_meningite_confirmados', 'confirmados')} AS letalidade_confirmados,
                {pct_expr('obitos_meningite_confirmados', 'confirmados_evolucao_conhecida')} AS letalidade_confirmados_evolucao_conhecida
         FROM agg
         ORDER BY ano
@@ -8812,80 +8905,62 @@ def query_sinan_hospitalization_internment(
     exprs: Dict[str, Optional[str]],
     where_sql: str,
     hospital_col: Optional[str],
-    internment_col: Optional[str],
+    internment_col: Optional[str] = None,
 ) -> pd.DataFrame:
     dt = exprs.get("dt")
     classi = exprs.get("classi_code")
-    if not (dt and classi and (hospital_col or internment_col)):
+    if not (dt and classi and hospital_col):
         return pd.DataFrame()
 
-    hospital_code = clean_code_expr(hospital_col) if hospital_col else "CAST(NULL AS VARCHAR)"
-    internment_date = date_expr(internment_col) if internment_col else "CAST(NULL AS DATE)"
-    indicator_selects = []
-    if hospital_col:
-        indicator_selects.append(
-            """
-            SELECT ano,
-                   grupo_caso,
-                   'Hospitalização informada (ATE_HOSPIT = Sim)' AS indicador,
-                   hospitalizacao_sim AS n,
-                   denominador
-            FROM scoped
-            """
-        )
-    if internment_col:
-        indicator_selects.append(
-            """
-            SELECT ano,
-                   grupo_caso,
-                   'Internação com data informada (ATE_INTERN)' AS indicador,
-                   internacao_informada AS n,
-                   denominador
-            FROM scoped
-            """
-        )
-
+    hospital_code = clean_code_expr(hospital_col)
     sql = f"""
         WITH base AS (
             SELECT EXTRACT(YEAR FROM {dt}) AS ano,
                    {classi} AS classi,
-                   {hospital_code} AS hospitalizacao,
-                   {internment_date} AS dt_internacao
+                   {hospital_code} AS hospitalizacao
             FROM {table.ref_sql}
             {where_sql}
         ), scoped AS (
             SELECT ano,
                    'Suspeitos/notificados' AS grupo_caso,
+                   1 AS ordem_grupo,
                    COUNT(*) AS denominador,
-                   COUNT(*) FILTER (WHERE hospitalizacao = '1') AS hospitalizacao_sim,
-                   COUNT(*) FILTER (WHERE dt_internacao IS NOT NULL) AS internacao_informada
+                   COUNT(*) FILTER (WHERE hospitalizacao = '1') AS n
             FROM base
             WHERE ano IS NOT NULL
             GROUP BY 1
             UNION ALL
             SELECT ano,
                    'Confirmados' AS grupo_caso,
+                   2 AS ordem_grupo,
                    COUNT(*) AS denominador,
-                   COUNT(*) FILTER (WHERE hospitalizacao = '1') AS hospitalizacao_sim,
-                   COUNT(*) FILTER (WHERE dt_internacao IS NOT NULL) AS internacao_informada
+                   COUNT(*) FILTER (WHERE hospitalizacao = '1') AS n
             FROM base
             WHERE ano IS NOT NULL
               AND classi = '1'
             GROUP BY 1
-        ), long AS (
-            {' UNION ALL '.join(indicator_selects)}
+            UNION ALL
+            SELECT ano,
+                   'Descartados' AS grupo_caso,
+                   3 AS ordem_grupo,
+                   COUNT(*) AS denominador,
+                   COUNT(*) FILTER (WHERE hospitalizacao = '1') AS n
+            FROM base
+            WHERE ano IS NOT NULL
+              AND classi = '2'
+            GROUP BY 1
         )
         SELECT ano,
                grupo_caso,
-               indicador,
+               'Hospitalização informada (ATE_HOSPIT = Sim)' AS indicador,
                n,
                denominador,
-               {pct_expr('n', 'denominador')} AS pct
-        FROM long
-        ORDER BY ano, indicador, grupo_caso
+               {pct_expr('n', 'denominador')} AS pct,
+               ordem_grupo
+        FROM scoped
+        ORDER BY ano, ordem_grupo
     """
     return run_query(table, sql)
-
 
 def query_sinan_communicants_prophylaxis(
     table: LoadedTable,
@@ -9006,8 +9081,10 @@ def query_sinan_etiology_lethality(table: LoadedTable, exprs: Dict[str, Optional
             GROUP BY 1
         )
         SELECT *,
-               {pct_expr('obitos_meningite', 'confirmados_evolucao_conhecida')} AS letalidade_pct
+               {pct_expr('obitos_meningite', 'confirmados')} AS letalidade_pct,
+               {pct_expr('obitos_meningite', 'confirmados_evolucao_conhecida')} AS letalidade_evolucao_conhecida_pct
         FROM agg
+        WHERE confirmados > 0
         ORDER BY confirmados DESC, grupo_etiologico
     """
     return run_query(table, sql)
@@ -9991,17 +10068,44 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
         if ind.empty:
             st.warning("Não foi possível calcular indicadores do SINAN. Verifique CLASSI_FIN, EVOLUCAO e data.")
             return
-        copyable_dataframe(ind, width="stretch", hide_index=True)
-        download_button(ind, "sinan_indicadores_anuais.csv")
 
         sinan_schema = schema_df(table)
         sinan_columns = sinan_schema["coluna"].astype(str).tolist() if "coluna" in sinan_schema.columns else []
         symptom_specs = _available_column_specs(sinan_columns, SINAN_SYMPTOM_FIELDS)
         vaccine_specs = _available_column_specs(sinan_columns, SINAN_VACCINE_FIELDS)
         hospital_col = choose_candidate(sinan_columns, ["ATE_HOSPIT"])
-        internment_col = choose_candidate(sinan_columns, ["ATE_INTERN", "DT_INTERNA", "DT_INTERN", "DATA_INTERNACAO"])
         communicants_col = choose_candidate(sinan_columns, ["MED_NUCOMU", "NU_COMUNICANTES", "NUM_COMUNICANTES", "COMUNICANTES"])
         prophylaxis_col = choose_candidate(sinan_columns, ["MED_QUIMIO", "QUIMIOPROFILAXIA", "PROFILAXIA", "QUIMIO"])
+
+        copyable_dataframe(ind, width="stretch", hide_index=True)
+        download_button(ind, "sinan_indicadores_anuais.csv")
+
+        if exprs.get("evol_label") and exprs.get("dt") and exprs.get("classi_code"):
+            evol_confirmados = query_yearly_category(
+                table,
+                exprs["dt"],
+                exprs["evol_label"],
+                append_clause(base_where, f"{exprs['classi_code']} = '1'"),
+            )
+            if not evol_confirmados.empty:
+                st.markdown("**Evolução dos casos confirmados**")
+                evol_confirmados = add_text_column(evol_confirmados)
+                fig_evol_confirmados = px.bar(
+                    evol_confirmados,
+                    x="ano",
+                    y="n",
+                    color="categoria",
+                    text="texto",
+                    title="SINAN: evolução dos casos confirmados",
+                    labels={"ano": "Ano", "n": "Confirmados", "categoria": "Evolução", "pct": "% no ano"},
+                    hover_data={"texto": False, "pct": ":.2f", "total_ano": True},
+                )
+                fig_evol_confirmados.update_layout(barmode="stack")
+                st.plotly_chart(fig_evol_confirmados, width="stretch")
+                copyable_dataframe(evol_confirmados, width="stretch", hide_index=True)
+                download_button(evol_confirmados, "sinan_evolucao_confirmados.csv")
+        else:
+            st.info("Para gerar o gráfico de evolução dos confirmados, CLASSI_FIN, EVOLUCAO e data precisam existir no SINAN.")
 
         count_specs = [
             ("notificacoes", "Notificações", None),
@@ -10041,7 +10145,7 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
             ("pct_descarte", "Descartados", "descartados", "notificacoes", "% das notificações"),
             ("pct_inconclusivos", "Inconclusivos", "inconclusivos", "notificacoes", "% das notificações"),
             ("pct_sem_classificacao", "Sem confirmação/ignorados", "sem_classificacao", "notificacoes", "% das notificações"),
-            ("letalidade_confirmados_evolucao_conhecida", "Letalidade entre confirmados com evolução conhecida", "obitos_meningite_confirmados", "confirmados_evolucao_conhecida", "% dos confirmados com evolução conhecida"),
+            ("letalidade_confirmados", "Letalidade entre confirmados", "obitos_meningite_confirmados", "confirmados", "% dos casos confirmados"),
         ]
         prop_rows = []
         for _, row in ind.iterrows():
@@ -10072,6 +10176,81 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
         )
         fig2.update_traces(textposition="top center")
         st.plotly_chart(fig2, width="stretch")
+
+        assistencia = query_sinan_hospitalization_internment(table, exprs, base_where, hospital_col)
+        if not assistencia.empty:
+            st.markdown("**Hospitalização em suspeitos/notificados, confirmados e descartados**")
+            assistencia = assistencia.copy()
+            assistencia["texto"] = [f"{br_pct(p)} (n={br_int(n)})" for p, n in zip(assistencia["pct"], assistencia["n"])]
+            grupo_hosp_order = ["Suspeitos/notificados", "Confirmados", "Descartados"]
+            fig_assistencia = px.bar(
+                assistencia,
+                x="ano",
+                y="pct",
+                color="grupo_caso",
+                barmode="group",
+                text="texto",
+                title="SINAN: ocorrência de hospitalização por definição de caso",
+                labels={"ano": "Ano", "pct": "% no grupo", "grupo_caso": "Grupo", "n": "Registros", "denominador": "Denominador"},
+                hover_data={"texto": False, "n": True, "denominador": True},
+                category_orders={"grupo_caso": grupo_hosp_order},
+            )
+            st.plotly_chart(fig_assistencia, width="stretch")
+            copyable_dataframe(assistencia.drop(columns=["ordem_grupo"], errors="ignore"), width="stretch", hide_index=True)
+            download_button(assistencia.drop(columns=["ordem_grupo"], errors="ignore"), "sinan_hospitalizacao_suspeitos_confirmados_descartados.csv")
+        else:
+            st.info("Para gerar o gráfico comparativo de hospitalização, CLASSI_FIN, data e ATE_HOSPIT precisam existir no SINAN.")
+
+        etio = query_sinan_etiology_lethality(table, exprs, base_where)
+        if not etio.empty:
+            st.markdown("**Letalidade por grupo etiológico entre confirmados**")
+            copyable_dataframe(etio, width="stretch", hide_index=True)
+            etio = etio.copy()
+            etio["texto"] = [f"{br_pct(p)} (n={br_int(n)})" for p, n in zip(etio["letalidade_pct"], etio["obitos_meningite"])]
+            fig3 = px.bar(
+                etio,
+                x="letalidade_pct",
+                y="grupo_etiologico",
+                orientation="h",
+                text="texto",
+                title="Letalidade por grupo etiológico (%)",
+                labels={"letalidade_pct": "% dos confirmados", "grupo_etiologico": "Grupo etiológico", "confirmados": "Confirmados"},
+                hover_data={"confirmados": True, "obitos_meningite": True, "letalidade_evolucao_conhecida_pct": ":.2f"},
+            )
+            fig3.update_layout(yaxis={"categoryorder": "total ascending"})
+            st.plotly_chart(fig3, width="stretch")
+            download_button(etio, "sinan_letalidade_por_etiologia.csv")
+
+        by_year = query_sinan_diagnostics_by_year(table, exprs, base_where)
+        if not by_year.empty:
+            st.markdown("**Confirmados por grupo etiológico convertido em CID-10**")
+            st.caption(
+                "Usa a classificação CID-10 derivada de CON_DIAGES, CLA_ME_BAC e campos complementares do SINAN, "
+                "restrita a casos confirmados. O ID_AGRAVO/CID bruto do SINAN não é usado para estratificar este gráfico."
+            )
+            plot_by_year = by_year.copy()
+            plot_by_year["ano"] = plot_by_year["ano"].astype(int).astype(str)
+            fig4 = px.bar(
+                plot_by_year,
+                x="ano",
+                y="confirmados",
+                color="grupo_etiologico",
+                title="Confirmados por grupo etiológico convertido em CID-10 — SINAN",
+                labels={
+                    "grupo_etiologico": "CID-10 convertido / grupo etiológico",
+                    "confirmados": "Confirmados",
+                    "ano": "Ano",
+                    "cid10_grupo": "Família CID-10",
+                    "total_ano": "Total no ano",
+                    "pct_ano": "% no ano",
+                },
+                hover_data={"cid10_grupo": True, "total_ano": True, "pct_ano": ":.2f"},
+            )
+            fig4.update_layout(barmode="stack")
+            fig4.update_xaxes(type="category")
+            st.plotly_chart(fig4, width="stretch")
+            copyable_dataframe(by_year, width="stretch", hide_index=True)
+            download_button(by_year, "sinan_confirmados_por_cid10_convertido_ano.csv")
 
         if symptom_specs and exprs.get("classi_code") and exprs.get("dt"):
             sintomas = query_sinan_symptom_prevalence(table, exprs, base_where, symptom_specs)
@@ -10127,51 +10306,6 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
         else:
             st.info("Para gerar a prevalência de sintomas, CLASSI_FIN, data e os campos clínicos CLI_* precisam existir no SINAN.")
 
-        if exprs.get("hospital_label") and exprs.get("dt"):
-            hosp = query_yearly_category(table, exprs["dt"], exprs["hospital_label"], base_where)
-            if not hosp.empty:
-                st.markdown("**Internação/hospitalização informada no SINAN**")
-                hosp = add_text_column(hosp)
-                fig_hosp = px.bar(
-                    hosp,
-                    x="ano",
-                    y="n",
-                    color="categoria",
-                    text="texto",
-                    title="SINAN: internação/hospitalização informada (ATE_HOSPIT)",
-                    labels={"ano": "Ano", "n": "Registros", "categoria": "ATE_HOSPIT", "pct": "% no ano"},
-                    hover_data={"texto": False, "pct": ":.2f", "total_ano": True},
-                )
-                st.plotly_chart(fig_hosp, width="stretch")
-                copyable_dataframe(hosp, width="stretch", hide_index=True)
-                download_button(hosp, "sinan_internacao_ate_hospit.csv")
-        else:
-            st.info("Para gerar o gráfico de internação, o campo ATE_HOSPIT precisa existir no SINAN e ser detectado automaticamente.")
-
-        assistencia = query_sinan_hospitalization_internment(table, exprs, base_where, hospital_col, internment_col)
-        if not assistencia.empty:
-            st.markdown("**Hospitalização e internação em suspeitos/notificados e confirmados**")
-            assistencia = assistencia.copy()
-            assistencia["texto"] = [f"{br_pct(p)} (n={br_int(n)})" for p, n in zip(assistencia["pct"], assistencia["n"])]
-            fig_assistencia = px.bar(
-                assistencia,
-                x="ano",
-                y="pct",
-                color="grupo_caso",
-                facet_col="indicador",
-                barmode="group",
-                text="texto",
-                title="SINAN: ocorrência de hospitalização e internação por definição de caso",
-                labels={"ano": "Ano", "pct": "% no grupo", "grupo_caso": "Grupo", "indicador": "Indicador", "n": "Registros"},
-                hover_data={"texto": False, "n": True, "denominador": True},
-            )
-            fig_assistencia.update_yaxes(matches=None)
-            st.plotly_chart(fig_assistencia, width="stretch")
-            copyable_dataframe(assistencia, width="stretch", hide_index=True)
-            download_button(assistencia, "sinan_hospitalizacao_internacao_suspeitos_confirmados.csv")
-        else:
-            st.info("Para gerar o gráfico comparativo de hospitalização/internação, CLASSI_FIN, data, ATE_HOSPIT e/ou ATE_INTERN precisam existir no SINAN.")
-
         comunicantes = query_sinan_communicants_prophylaxis(table, exprs, base_where, communicants_col, prophylaxis_col)
         if not comunicantes.empty:
             st.markdown("**Comunicantes e quimioprofilaxia**")
@@ -10193,33 +10327,6 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
             download_button(comunicantes, "sinan_comunicantes_quimioprofilaxia.csv")
         else:
             st.info("Para gerar o gráfico de comunicantes/profilaxia, MED_NUCOMU e/ou MED_QUIMIO precisam existir no SINAN.")
-
-        if exprs.get("evol_label") and exprs.get("dt") and exprs.get("classi_code"):
-            evol_confirmados = query_yearly_category(
-                table,
-                exprs["dt"],
-                exprs["evol_label"],
-                append_clause(base_where, f"{exprs['classi_code']} = '1'"),
-            )
-            if not evol_confirmados.empty:
-                st.markdown("**Evolução dos casos confirmados**")
-                evol_confirmados = add_text_column(evol_confirmados)
-                fig_evol_confirmados = px.bar(
-                    evol_confirmados,
-                    x="ano",
-                    y="n",
-                    color="categoria",
-                    text="texto",
-                    title="SINAN: evolução dos casos confirmados",
-                    labels={"ano": "Ano", "n": "Confirmados", "categoria": "Evolução", "pct": "% no ano"},
-                    hover_data={"texto": False, "pct": ":.2f", "total_ano": True},
-                )
-                fig_evol_confirmados.update_layout(barmode="stack")
-                st.plotly_chart(fig_evol_confirmados, width="stretch")
-                copyable_dataframe(evol_confirmados, width="stretch", hide_index=True)
-                download_button(evol_confirmados, "sinan_evolucao_confirmados.csv")
-        else:
-            st.info("Para gerar o gráfico de evolução dos confirmados, CLASSI_FIN, EVOLUCAO e data precisam existir no SINAN.")
 
         vacinacao = query_sinan_vaccination_by_classification(table, exprs, base_where, vaccine_specs)
         if not vacinacao.empty:
@@ -10244,46 +10351,6 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, expr
         else:
             st.info("Para gerar o gráfico de vacinação, CLASSI_FIN e campos ANT_* de vacinação precisam existir no SINAN.")
 
-        etio = query_sinan_etiology_lethality(table, exprs, base_where)
-        if not etio.empty:
-            st.markdown("**Letalidade por grupo etiológico entre confirmados**")
-            copyable_dataframe(etio, width="stretch", hide_index=True)
-            etio = etio.copy()
-            etio["texto"] = [f"{br_pct(p)} (n={br_int(n)})" for p, n in zip(etio["letalidade_pct"], etio["obitos_meningite"])]
-            fig3 = px.bar(etio, x="letalidade_pct", y="grupo_etiologico", orientation="h", text="texto", title="Letalidade por grupo etiológico (%)", labels={"letalidade_pct": "%", "grupo_etiologico": "Grupo etiológico"})
-            fig3.update_layout(yaxis={"categoryorder": "total ascending"})
-            st.plotly_chart(fig3, width="stretch")
-            download_button(etio, "sinan_letalidade_por_etiologia.csv")
-        by_year = query_sinan_diagnostics_by_year(table, exprs, base_where)
-        if not by_year.empty:
-            st.markdown("**Confirmados por grupo etiológico convertido em CID-10**")
-            st.caption(
-                "Usa a classificação CID-10 derivada de CON_DIAGES, CLA_ME_BAC e campos complementares do SINAN, "
-                "restrita a casos confirmados. O ID_AGRAVO/CID bruto do SINAN não é usado para estratificar este gráfico."
-            )
-            plot_by_year = by_year.copy()
-            plot_by_year["ano"] = plot_by_year["ano"].astype(int).astype(str)
-            fig4 = px.bar(
-                plot_by_year,
-                x="ano",
-                y="confirmados",
-                color="grupo_etiologico",
-                title="Confirmados por grupo etiológico convertido em CID-10 — SINAN",
-                labels={
-                    "grupo_etiologico": "CID-10 convertido / grupo etiológico",
-                    "confirmados": "Confirmados",
-                    "ano": "Ano",
-                    "cid10_grupo": "Família CID-10",
-                    "total_ano": "Total no ano",
-                    "pct_ano": "% no ano",
-                },
-                hover_data={"cid10_grupo": True, "total_ano": True, "pct_ano": ":.2f"},
-            )
-            fig4.update_layout(barmode="stack")
-            fig4.update_xaxes(type="category")
-            st.plotly_chart(fig4, width="stretch")
-            copyable_dataframe(by_year, width="stretch", hide_index=True)
-            download_button(by_year, "sinan_confirmados_por_cid10_convertido_ano.csv")
         return
 
     if source == "SIM":
@@ -10900,18 +10967,13 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
                 exprs["evol_code"],
                 schooling_where,
             )
-            if edu_df.empty:
-                st.info("Sem dados de escolaridade para confirmados, óbitos por meningite ou óbitos por outra causa com os filtros atuais.")
+            if edu_df.empty or pd.to_numeric(edu_df.get("denominador"), errors="coerce").fillna(0).max() <= 0:
+                st.info("Sem casos confirmados para calcular a escolaridade com os filtros atuais.")
             else:
                 edu_df = add_text(edu_df)
-                escolaridade_order = {label: idx for idx, label in enumerate(SINAN_ESCOLARIDADE.values())}
                 grupo_order = ["Casos confirmados", "Óbitos por meningite", "Óbitos por outra causa"]
-                edu_df["ordem_escolaridade"] = edu_df["escolaridade"].map(escolaridade_order).fillna(999).astype(int)
-                edu_df["ordem_grupo"] = edu_df["grupo"].map({label: idx for idx, label in enumerate(grupo_order)}).fillna(999).astype(int)
+                categoria_order = education_category_labels("SINAN", education, include_missing=True)
                 edu_df = edu_df.sort_values(["ordem_escolaridade", "ordem_grupo", "grupo"]).reset_index(drop=True)
-                categoria_order = [x for x in SINAN_ESCOLARIDADE.values() if x in set(edu_df["escolaridade"])]
-                extras = [x for x in edu_df["escolaridade"].drop_duplicates().tolist() if x not in categoria_order]
-                categoria_order = categoria_order + extras
                 fig_edu = px.bar(
                     edu_df,
                     x="n",
@@ -10925,28 +10987,30 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
                         "escolaridade": "Escolaridade",
                         "n": "Registros",
                         "grupo": "Grupo",
-                        "pct": "% dentro do grupo",
-                        "denominador": "Denominador do grupo",
+                        "pct": "% dos casos confirmados",
+                        "denominador": "Total de casos confirmados",
                     },
                     hover_data={"texto": False, "pct": ":.2f", "denominador": True},
                     category_orders={"escolaridade": categoria_order, "grupo": grupo_order},
                 )
                 fig_edu.update_layout(yaxis={"categoryorder": "array", "categoryarray": categoria_order[::-1]})
-                st.caption("O gráfico usa os filtros-base da seção e calcula cada percentual dentro do respectivo grupo: confirmados, óbitos por meningite e óbitos por outra causa.")
+                st.caption("O gráfico exibe todas as categorias operacionais de escolaridade do SINAN; os percentuais usam o total de casos confirmados como denominador comum.")
                 st.plotly_chart(fig_edu, width="stretch")
-                copyable_dataframe(edu_df.drop(columns=["ordem_escolaridade", "ordem_grupo"], errors="ignore"), width="stretch", hide_index=True)
-                download_button(edu_df.drop(columns=["ordem_escolaridade", "ordem_grupo"], errors="ignore"), "sinan_escolaridade_confirmados_obitos.csv")
+                edu_out = edu_df.drop(columns=["ordem_escolaridade", "ordem_grupo"], errors="ignore")
+                copyable_dataframe(edu_out, width="stretch", hide_index=True)
+                download_button(edu_out, "sinan_escolaridade_confirmados_obitos.csv")
     elif source == "SIM":
         st.markdown("### Escolaridade")
         if not education:
             st.info("Para gerar o gráfico de escolaridade no SIM, o campo ESC2010/ESC precisa existir e ser detectado automaticamente.")
         else:
-            edu_df = query_category(table, education, graph_where, top_n=20)
-            if edu_df.empty:
+            edu_df = query_education_distribution_all_categories(table, "SIM", education, graph_where)
+            if edu_df.empty or pd.to_numeric(edu_df.get("denominador"), errors="coerce").fillna(0).max() <= 0:
                 st.info("Sem dados de escolaridade no SIM com os filtros atuais.")
             else:
-                edu_df["denominador"] = edu_df["n"].sum()
                 edu_df = add_text(edu_df)
+                categoria_order = education_category_labels("SIM", education, include_missing=True)
+                edu_df = edu_df.sort_values("ordem_categoria").reset_index(drop=True)
                 fig_edu = px.bar(
                     edu_df,
                     x="n",
@@ -10954,13 +11018,16 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
                     orientation="h",
                     text="texto",
                     title="SIM: distribuição por escolaridade",
-                    labels={"categoria": "Escolaridade", "n": "Óbitos", "pct": "%", "denominador": "Denominador"},
+                    labels={"categoria": "Escolaridade", "n": "Óbitos", "pct": "% do total filtrado", "denominador": "Total filtrado"},
                     hover_data={"texto": False, "pct": ":.2f", "denominador": True},
+                    category_orders={"categoria": categoria_order},
                 )
-                fig_edu.update_layout(yaxis={"categoryorder": "total ascending"})
+                fig_edu.update_layout(yaxis={"categoryorder": "array", "categoryarray": categoria_order[::-1]})
+                st.caption("O gráfico exibe todas as categorias operacionais de escolaridade detectadas para o campo do SIM; os percentuais usam o total de registros filtrados como denominador.")
                 st.plotly_chart(fig_edu, width="stretch")
-                copyable_dataframe(edu_df, width="stretch", hide_index=True)
-                download_button(edu_df, "sim_escolaridade.csv")
+                edu_out = edu_df.drop(columns=["ordem_categoria"], errors="ignore")
+                copyable_dataframe(edu_out, width="stretch", hide_index=True)
+                download_button(edu_out, "sim_escolaridade.csv")
 
     sex = exprs.get("sex")
     cols = []
