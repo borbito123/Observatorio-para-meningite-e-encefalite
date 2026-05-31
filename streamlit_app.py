@@ -1037,6 +1037,51 @@ RACA_COR = {
     "9": "Ignorada",
 }
 
+SINAN_ESCOLARIDADE = {
+    "0": "0 — analfabeto",
+    "1": "1 — 1ª a 4ª série incompleta do EF",
+    "2": "2 — 4ª série completa do EF",
+    "3": "3 — 5ª à 8ª série incompleta do EF",
+    "4": "4 — ensino fundamental completo",
+    "5": "5 — ensino médio incompleto",
+    "6": "6 — ensino médio completo",
+    "7": "7 — educação superior incompleta",
+    "8": "8 — educação superior completa",
+    "9": "9 — ignorado",
+    "10": "10 — não se aplica",
+    "NA": "10 — não se aplica",
+}
+
+SIM_ESCOLARIDADE_2010 = {
+    "0": "0 — sem escolaridade",
+    "1": "1 — ensino fundamental I",
+    "2": "2 — ensino fundamental II",
+    "3": "3 — ensino médio",
+    "4": "4 — superior incompleto",
+    "5": "5 — superior completo",
+    "9": "9 — ignorado",
+}
+
+SIM_ESCOLARIDADE_ANTIGA = {
+    "0": "0 — sem escolaridade",
+    "1": "1 — nenhuma",
+    "2": "2 — 1 a 3 anos de estudo",
+    "3": "3 — 4 a 7 anos de estudo",
+    "4": "4 — 8 a 11 anos de estudo",
+    "5": "5 — 12 anos ou mais de estudo",
+    "9": "9 — ignorado",
+}
+
+SIM_ESCOLARIDADE_AGREGADA = {
+    "0": "0 — sem escolaridade",
+    "1": "1 — ensino fundamental I",
+    "2": "2 — ensino fundamental II",
+    "3": "3 — ensino médio",
+    "4": "4 — superior",
+    "5": "5 — superior",
+    "9": "9 — ignorado",
+}
+
 CIHA_MODALIDADE = {
     "01": "01 — hospitalar",
     "02": "02 — ambulatorial",
@@ -6813,6 +6858,22 @@ def case_from_mapping(code_sql: str, mapping: Dict[str, str], default: str) -> s
     return f"CASE {code_sql} {' '.join(parts)} ELSE {qstr(default)} END"
 
 
+def education_label_expr(source: str, col: str) -> str:
+    code = clean_code_expr(col)
+    if source == "SINAN":
+        return case_from_mapping(code, SINAN_ESCOLARIDADE, "Sem informação/ignorado")
+    if source == "SIM":
+        col_norm = normalize_name(col)
+        if "2010" in col_norm:
+            mapping = SIM_ESCOLARIDADE_2010
+        elif "AGR" in col_norm:
+            mapping = SIM_ESCOLARIDADE_AGREGADA
+        else:
+            mapping = SIM_ESCOLARIDADE_ANTIGA
+        return case_from_mapping(code, mapping, "Sem informação/ignorado")
+    return clean_str_expr(col)
+
+
 def municipality_display_expr(col: str) -> str:
     raw = clean_str_expr(col)
     digits = f"regexp_replace(COALESCE({raw}, ''), '[^0-9]', '', 'g')"
@@ -7708,6 +7769,7 @@ class ColumnSelection:
     municipality_event_col: Optional[str]
     cid_cols: List[str]
     age_mode: str
+    education_col: Optional[str] = None
     # SINAN
     classi_fin_col: Optional[str] = None
     con_diages_col: Optional[str] = None
@@ -7771,6 +7833,11 @@ def default_selections(source: str, columns: Sequence[str]) -> ColumnSelection:
         cid_cols=cid_cols,
         age_mode=age_mode,
     )
+    education_candidates = {
+        "SINAN": ["CS_ESCOL_N", "ESCOLARIDADE", "ESCOLARI", "CS_ESCOL", "ESCOL_N"],
+        "SIM": ["ESC2010", "ESC", "ESCOLARIDADE", "ESCOLARI", "ESCFALAGR1"],
+    }.get(source, [])
+    sel.education_col = choose_candidate(columns, education_candidates)
     if source == "SINAN":
         sel.classi_fin_col = choose_candidate(columns, ["CLASSI_FIN"])
         sel.con_diages_col = choose_candidate(columns, ["CON_DIAGES"])
@@ -7828,6 +7895,7 @@ def build_expressions(source: str, sel: ColumnSelection) -> Dict[str, Optional[s
         "sex": sex_expr(sel.sex_col) if sel.sex_col else None,
         "age": build_age_sql(sel),
         "race": case_from_mapping(clean_code_expr(sel.race_col), RACA_COR, "Sem informação/ignorado") if sel.race_col else None,
+        "education": education_label_expr(source, sel.education_col) if sel.education_col else None,
         "mun_res": clean_str_expr(sel.municipality_res_col) if sel.municipality_res_col else None,
         "mun_event": clean_str_expr(sel.municipality_event_col) if sel.municipality_event_col else None,
         "mun_res_label": municipality_display_expr(sel.municipality_res_col) if sel.municipality_res_col else None,
@@ -8010,6 +8078,59 @@ def query_category_top_with_outros(table: LoadedTable, category_sql: str, where_
                CASE WHEN denominador > 0 THEN ROUND(100.0 * n / denominador, 2) ELSE NULL END AS pct
         FROM grouped
         ORDER BY ordem, n DESC, categoria
+    """
+    return run_query(table, sql)
+
+
+def query_sinan_education_outcomes(
+    table: LoadedTable,
+    education_sql: str,
+    classi_sql: str,
+    evol_sql: str,
+    where_sql: str,
+) -> pd.DataFrame:
+    sql = f"""
+        WITH base AS (
+            SELECT
+                COALESCE({education_sql}, 'Sem informação/ignorado') AS escolaridade,
+                {classi_sql} AS classi,
+                {evol_sql} AS evol
+            FROM {table.ref_sql}
+            {where_sql}
+        ), grupos AS (
+            SELECT 'Casos confirmados' AS grupo, escolaridade
+            FROM base
+            WHERE classi = '1'
+            UNION ALL
+            SELECT 'Óbitos por meningite' AS grupo, escolaridade
+            FROM base
+            WHERE classi = '1' AND evol = '2'
+            UNION ALL
+            SELECT 'Óbitos por outra causa' AS grupo, escolaridade
+            FROM base
+            WHERE classi = '1' AND evol = '3'
+        ), counts AS (
+            SELECT grupo, escolaridade, COUNT(*) AS n
+            FROM grupos
+            GROUP BY 1, 2
+        ), totals AS (
+            SELECT grupo, SUM(n) AS denominador
+            FROM counts
+            GROUP BY 1
+        )
+        SELECT c.grupo, c.escolaridade, c.n, t.denominador,
+               CASE WHEN t.denominador > 0 THEN ROUND(100.0 * c.n / t.denominador, 2) ELSE NULL END AS pct
+        FROM counts c
+        JOIN totals t USING (grupo)
+        ORDER BY
+            CASE c.grupo
+                WHEN 'Casos confirmados' THEN 1
+                WHEN 'Óbitos por meningite' THEN 2
+                WHEN 'Óbitos por outra causa' THEN 3
+                ELSE 9
+            END,
+            c.n DESC,
+            c.escolaridade
     """
     return run_query(table, sql)
 
@@ -10714,7 +10835,7 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
         download_button(quimio_summary, "sinan_quimiocitologico_liquor_resumo_parametros.csv")
 
 
-def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dict[str, Optional[str]]) -> None:
+def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dict[str, Optional[str]], base_where: Optional[str] = None) -> None:
     def br_int(value: object) -> str:
         if pd.isna(value):
             return "—"
@@ -10762,6 +10883,84 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
                 fig.update_layout(barmode="relative")
                 st.plotly_chart(fig, width="stretch")
                 download_button(pyr, f"{source.lower()}_piramide.csv")
+
+    education = exprs.get("education")
+    if source == "SINAN":
+        st.markdown("### Escolaridade")
+        if not education:
+            st.info("Para gerar o gráfico de escolaridade no SINAN, o campo CS_ESCOL_N/ESCOLARIDADE precisa existir e ser detectado automaticamente.")
+        elif not (exprs.get("classi_code") and exprs.get("evol_code")):
+            st.info("Para gerar a escolaridade por confirmados e óbitos no SINAN, os campos CLASSI_FIN e EVOLUCAO precisam existir e ser detectados automaticamente.")
+        else:
+            schooling_where = base_where if base_where is not None else graph_where
+            edu_df = query_sinan_education_outcomes(
+                table,
+                education,
+                exprs["classi_code"],
+                exprs["evol_code"],
+                schooling_where,
+            )
+            if edu_df.empty:
+                st.info("Sem dados de escolaridade para confirmados, óbitos por meningite ou óbitos por outra causa com os filtros atuais.")
+            else:
+                edu_df = add_text(edu_df)
+                escolaridade_order = {label: idx for idx, label in enumerate(SINAN_ESCOLARIDADE.values())}
+                grupo_order = ["Casos confirmados", "Óbitos por meningite", "Óbitos por outra causa"]
+                edu_df["ordem_escolaridade"] = edu_df["escolaridade"].map(escolaridade_order).fillna(999).astype(int)
+                edu_df["ordem_grupo"] = edu_df["grupo"].map({label: idx for idx, label in enumerate(grupo_order)}).fillna(999).astype(int)
+                edu_df = edu_df.sort_values(["ordem_escolaridade", "ordem_grupo", "grupo"]).reset_index(drop=True)
+                categoria_order = [x for x in SINAN_ESCOLARIDADE.values() if x in set(edu_df["escolaridade"])]
+                extras = [x for x in edu_df["escolaridade"].drop_duplicates().tolist() if x not in categoria_order]
+                categoria_order = categoria_order + extras
+                fig_edu = px.bar(
+                    edu_df,
+                    x="n",
+                    y="escolaridade",
+                    color="grupo",
+                    orientation="h",
+                    barmode="group",
+                    text="texto",
+                    title="SINAN: escolaridade — confirmados e óbitos",
+                    labels={
+                        "escolaridade": "Escolaridade",
+                        "n": "Registros",
+                        "grupo": "Grupo",
+                        "pct": "% dentro do grupo",
+                        "denominador": "Denominador do grupo",
+                    },
+                    hover_data={"texto": False, "pct": ":.2f", "denominador": True},
+                    category_orders={"escolaridade": categoria_order, "grupo": grupo_order},
+                )
+                fig_edu.update_layout(yaxis={"categoryorder": "array", "categoryarray": categoria_order[::-1]})
+                st.caption("O gráfico usa os filtros-base da seção e calcula cada percentual dentro do respectivo grupo: confirmados, óbitos por meningite e óbitos por outra causa.")
+                st.plotly_chart(fig_edu, width="stretch")
+                copyable_dataframe(edu_df.drop(columns=["ordem_escolaridade", "ordem_grupo"], errors="ignore"), width="stretch", hide_index=True)
+                download_button(edu_df.drop(columns=["ordem_escolaridade", "ordem_grupo"], errors="ignore"), "sinan_escolaridade_confirmados_obitos.csv")
+    elif source == "SIM":
+        st.markdown("### Escolaridade")
+        if not education:
+            st.info("Para gerar o gráfico de escolaridade no SIM, o campo ESC2010/ESC precisa existir e ser detectado automaticamente.")
+        else:
+            edu_df = query_category(table, education, graph_where, top_n=20)
+            if edu_df.empty:
+                st.info("Sem dados de escolaridade no SIM com os filtros atuais.")
+            else:
+                edu_df["denominador"] = edu_df["n"].sum()
+                edu_df = add_text(edu_df)
+                fig_edu = px.bar(
+                    edu_df,
+                    x="n",
+                    y="categoria",
+                    orientation="h",
+                    text="texto",
+                    title="SIM: distribuição por escolaridade",
+                    labels={"categoria": "Escolaridade", "n": "Óbitos", "pct": "%", "denominador": "Denominador"},
+                    hover_data={"texto": False, "pct": ":.2f", "denominador": True},
+                )
+                fig_edu.update_layout(yaxis={"categoryorder": "total ascending"})
+                st.plotly_chart(fig_edu, width="stretch")
+                copyable_dataframe(edu_df, width="stretch", hide_index=True)
+                download_button(edu_df, "sim_escolaridade.csv")
 
     sex = exprs.get("sex")
     cols = []
@@ -11029,7 +11228,7 @@ def render_source(source: str) -> Optional[Dict[str, object]]:
     elif selected_section == "CID-10 / classificação":
         render_cid_tab(table, source, graph_where, exprs)
     elif selected_section == "Demografia e território":
-        render_demography_tab(table, source, graph_where, exprs)
+        render_demography_tab(table, source, graph_where, exprs, base_where=base_where)
     elif selected_section == "Campos importantes não preenchidos":
         render_quality_tab(table, source, base_where, exprs)
     elif selected_section == "Prévia":
