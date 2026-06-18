@@ -54,7 +54,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-06-18-v26-fastparquet-sinan-cid10-municipios-csv"
+APP_VERSION = "2026-06-18-v28-municipios-codigos-ibge"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos
@@ -194,8 +194,45 @@ def _figure_axis_mentions_death(fig: go.Figure) -> bool:
     return any(_text_mentions_death(value) for value in _axis_text_values(fig))
 
 
+def _figure_title_or_legend_mentions_death(fig: go.Figure) -> bool:
+    values: List[str] = []
+    try:
+        values.append(str(fig.layout.title.text or ""))
+    except Exception:
+        pass
+    try:
+        values.append(str(fig.layout.legend.title.text or ""))
+    except Exception:
+        pass
+    return any(_text_mentions_death(value) for value in values)
+
+
 def _figure_context_mentions_death(fig: go.Figure) -> bool:
     return any(_text_mentions_death(value) for value in _layout_text_values(fig))
+
+
+def _figure_skip_death_red(fig: go.Figure) -> bool:
+    try:
+        meta = fig.layout.meta
+    except Exception:
+        return False
+    if isinstance(meta, dict):
+        return bool(meta.get("skip_death_red"))
+    return False
+
+
+def disable_death_red(fig: go.Figure) -> go.Figure:
+    """Impede que a regra global de óbito force vermelho em gráficos específicos."""
+    if fig is None:
+        return fig
+    try:
+        meta = fig.layout.meta if isinstance(fig.layout.meta, dict) else {}
+        meta = dict(meta)
+        meta["skip_death_red"] = True
+        fig.update_layout(meta=meta)
+    except Exception:
+        pass
+    return fig
 
 
 def _sequence_values(values: object) -> List[object]:
@@ -283,8 +320,9 @@ def _apply_distinct_trace_colors(fig: go.Figure) -> None:
     if len(data) <= 1:
         return
     color_idx = 0
+    force_death_red = not _figure_skip_death_red(fig)
     for trace in data:
-        if _trace_mentions_death(trace):
+        if force_death_red and _trace_mentions_death(trace):
             _set_trace_color(trace, DEATH_RED)
             continue
         color = APP_COLOR_SEQUENCE[color_idx % len(APP_COLOR_SEQUENCE)]
@@ -293,18 +331,16 @@ def _apply_distinct_trace_colors(fig: go.Figure) -> None:
 
 
 def enforce_death_related_red(fig: go.Figure) -> None:
-    """Garante vermelho para traços, barras ou gráficos identificados como óbito/morte/letalidade."""
-    if fig is None:
+    """Garante vermelho apenas quando o traço/categoria é explicitamente de óbito/morte/letalidade."""
+    if fig is None or _figure_skip_death_red(fig):
         return
     data = list(getattr(fig, "data", []) or [])
-    axis_mentions_death = _figure_axis_mentions_death(fig)
-    context_mentions_death = _figure_context_mentions_death(fig)
+    title_or_legend_mentions_death = _figure_title_or_legend_mentions_death(fig)
     for trace in data:
         point_level_colored = _apply_death_red_to_bar_points(trace)
         is_death_trace = (
-            axis_mentions_death
-            or _trace_mentions_death(trace)
-            or (context_mentions_death and len(data) == 1 and not point_level_colored)
+            _trace_mentions_death(trace)
+            or (title_or_legend_mentions_death and len(data) == 1 and not point_level_colored)
         )
         if not is_death_trace:
             continue
@@ -1842,29 +1878,38 @@ def category_label_expr(category_sql: str, default: str = "Sem informação") ->
 
 
 def municipality_display_expr(col: str) -> str:
+    """Rótulo municipal estável baseado somente no código IBGE informado na própria base.
+
+    A etapa de demografia/território não depende mais de `municipios_ibge.csv`.
+    O CSV externo pode continuar existindo como referência para consulta manual
+    dos rótulos, mas os gráficos usam o código IBGE de 6 dígitos para evitar
+    falhas de leitura/download do dicionário externo.
+    """
     raw = clean_str_expr(col)
     digits = f"regexp_replace(COALESCE({raw}, ''), '[^0-9]', '', 'g')"
-    code6 = f"CASE WHEN LENGTH({digits}) >= 6 THEN SUBSTR({digits}, 1, 6) ELSE {digits} END"
-    if _resolve_municipios_ibge_csv_source():
-        lookup = (
-            f"(SELECT label FROM {qident(MUNICIPIOS_IBGE_VIEW_NAME)} "
-            f"WHERE codigo_ibge_6 = {code6} LIMIT 1)"
-        )
-        return f"""
-        CASE
-            WHEN {raw} IS NULL THEN 'Sem informação'
-            WHEN {digits} <> '' THEN COALESCE({lookup}, 'Código informado: ' || {raw})
-            ELSE {raw}
-        END
-        """
+    code6 = f"SUBSTR({digits}, 1, 6)"
+    return f"""
+    CASE
+        WHEN {raw} IS NULL THEN 'Sem informação'
+        WHEN LENGTH({digits}) >= 6 THEN 'IBGE ' || {code6}
+        WHEN {digits} <> '' THEN 'Código informado: ' || {digits}
+        ELSE {raw}
+    END
+    """
 
 
 # ================================
-# OTIMIZAÇÃO: MUNICÍPIOS (ANTI-CRASH)
+# MUNICÍPIOS — TOP 15 POR CÓDIGO IBGE
 # ================================
 
-def _municipality_code_expr(col: str) -> str:
-    raw = clean_str_expr(col)
+def _municipality_code_expr_from_sql(value_sql: str) -> str:
+    """Extrai código IBGE de 6 dígitos de uma expressão SQL já montada.
+
+    `value_sql` pode ser uma coluna bruta, uma expressão `clean_str_expr(...)`
+    ou o retorno de `municipality_display_expr(...)`. Por isso a função não usa
+    `qident`; ela trata o parâmetro como expressão SQL.
+    """
+    raw = f"NULLIF(TRIM(CAST(({value_sql}) AS VARCHAR)), '')"
     digits = f"regexp_replace(COALESCE({raw}, ''), '[^0-9]', '', 'g')"
     return f"""
     CASE
@@ -1875,8 +1920,10 @@ def _municipality_code_expr(col: str) -> str:
     """
 
 
-def query_municipality_top(table, col, where_sql, top_n=15):
-    code_expr = _municipality_code_expr(col)
+def query_municipality_top(table, municipality_sql, where_sql, top_n=15):
+    """Lista os principais municípios por código IBGE, sem depender de CSV externo."""
+    top_n = max(1, int(top_n or 15))
+    code_expr = _municipality_code_expr_from_sql(municipality_sql)
 
     sql = f"""
         WITH base AS (
@@ -1886,42 +1933,37 @@ def query_municipality_top(table, col, where_sql, top_n=15):
         ),
         agg AS (
             SELECT
-                COALESCE(m.label, 'Código não mapeado') AS categoria,
+                CASE
+                    WHEN codigo_ibge_6 IS NULL THEN 'Sem informação'
+                    ELSE 'IBGE ' || codigo_ibge_6
+                END AS categoria,
+                codigo_ibge_6,
                 COUNT(*) AS n
-            FROM base b
-            LEFT JOIN {MUNICIPIOS_IBGE_VIEW_NAME} m
-                ON b.codigo_ibge_6 = m.codigo_ibge_6
-            GROUP BY 1
+            FROM base
+            GROUP BY 1, 2
         ),
         ranked AS (
             SELECT *,
-                   ROW_NUMBER() OVER (ORDER BY n DESC) AS rn,
+                   ROW_NUMBER() OVER (ORDER BY n DESC, categoria) AS rn,
                    SUM(n) OVER () AS total
             FROM agg
         ),
         final AS (
             SELECT
-                CASE WHEN rn <= {int(top_n)} THEN categoria ELSE 'Outros municípios' END AS categoria,
+                CASE WHEN rn <= {top_n} THEN categoria ELSE 'Outros municípios' END AS categoria,
+                CASE WHEN rn <= {top_n} THEN codigo_ibge_6 ELSE NULL END AS codigo_ibge_6,
                 SUM(n) AS n,
                 MAX(total) AS denominador,
                 MIN(rn) AS ordem
             FROM ranked
-            GROUP BY 1
+            GROUP BY 1, 2
         )
-        SELECT categoria, n, denominador,
-               ROUND(100.0 * n / denominador, 2) AS pct
+        SELECT categoria, codigo_ibge_6, n, denominador,
+               ROUND(100.0 * n / NULLIF(denominador, 0), 2) AS pct
         FROM final
-        ORDER BY ordem, n DESC
+        ORDER BY ordem, n DESC, categoria
     """
     return run_query(table, sql)
-
-    return f"""
-    CASE
-        WHEN {raw} IS NULL THEN 'Sem informação'
-        WHEN {digits} <> '' THEN 'Código informado: ' || {raw}
-        ELSE {raw}
-    END
-    """
 
 
 def date_expr(col: str) -> str:
@@ -3385,21 +3427,19 @@ def query_sinan_education_outcomes(
     table: LoadedTable,
     education_sql: str,
     classi_sql: str,
-    evol_sql: str,
     where_sql: str,
 ) -> pd.DataFrame:
     escolaridade_labels = education_category_labels("SINAN", include_missing=True)
     cats_cte = values_cte_from_labels(escolaridade_labels, "escolaridade", "ordem_escolaridade")
     group_values = ", ".join(
         f"({qstr(label)}, {idx})"
-        for idx, label in enumerate(["Casos confirmados", "Óbitos por meningite", "Óbitos por outra causa"], start=1)
+        for idx, label in enumerate(["Casos confirmados", "Casos descartados"], start=1)
     )
     sql = f"""
         WITH base AS (
             SELECT
                 COALESCE({education_sql}, 'Sem informação/ignorado') AS escolaridade,
-                {classi_sql} AS classi,
-                {evol_sql} AS evol
+                {classi_sql} AS classi
             FROM {table.ref_sql}
             {where_sql}
         ), categorias AS (
@@ -3415,36 +3455,34 @@ def query_sinan_education_outcomes(
             FROM base
             WHERE classi = '1'
             UNION ALL
-            SELECT 'Óbitos por meningite' AS grupo, escolaridade
+            SELECT 'Casos descartados' AS grupo, escolaridade
             FROM base
-            WHERE classi = '1' AND evol = '2'
-            UNION ALL
-            SELECT 'Óbitos por outra causa' AS grupo, escolaridade
-            FROM base
-            WHERE classi = '1' AND evol = '3'
+            WHERE classi = '2'
         ), counts AS (
             SELECT grupo, escolaridade, COUNT(*) AS n
             FROM grupos
             GROUP BY 1, 2
-        ), total_confirmados AS (
-            SELECT COUNT(*) FILTER (WHERE classi = '1') AS denominador
-            FROM base
+        ), totals AS (
+            SELECT grupo, COUNT(*) AS denominador
+            FROM grupos
+            GROUP BY 1
         )
         SELECT
             grid.grupo,
             grid.escolaridade,
             COALESCE(counts.n, 0) AS n,
-            total_confirmados.denominador,
-            CASE WHEN total_confirmados.denominador > 0
-                 THEN ROUND(100.0 * COALESCE(counts.n, 0) / total_confirmados.denominador, 2)
+            COALESCE(totals.denominador, 0) AS denominador,
+            CASE WHEN COALESCE(totals.denominador, 0) > 0
+                 THEN ROUND(100.0 * COALESCE(counts.n, 0) / totals.denominador, 2)
                  ELSE NULL END AS pct,
             grid.ordem_escolaridade,
             grid.ordem_grupo
         FROM grid
-        CROSS JOIN total_confirmados
         LEFT JOIN counts
           ON counts.grupo = grid.grupo
          AND counts.escolaridade = grid.escolaridade
+        LEFT JOIN totals
+          ON totals.grupo = grid.grupo
         ORDER BY grid.ordem_escolaridade, grid.ordem_grupo
     """
     return run_query(table, sql)
@@ -4923,8 +4961,11 @@ def render_quimio_interpretation() -> None:
         "epidemiologia e avaliação clínica. Os limites variam com idade, coleta traumática, antibiótico prévio e laboratório."
     )
     copyable_dataframe(pd.DataFrame(SINAN_QUIMIO_INTERPRETATION_ROWS), width="stretch", hide_index=True)
-    st.markdown("#### Referências bibliográficas usadas para esta síntese")
-    copyable_dataframe(pd.DataFrame(SINAN_QUIMIO_REFERENCES), width="stretch", hide_index=True)
+    refs_text = "\n".join(
+        f"- {row['Referência']} — {row['Uso no painel']}"
+        for row in SINAN_QUIMIO_REFERENCES
+    )
+    st.markdown("**Referências bibliográficas usadas para esta síntese:**\n" + refs_text)
 
 
 def render_loader(source: str) -> Optional[LoadedTable]:
@@ -5357,7 +5398,7 @@ def render_sinan_lcr_indicators(table: LoadedTable, exprs: Dict[str, Optional[st
 
     st.markdown("### Punção laboratorial e exame quimiocitológico do líquor")
     st.caption(
-        "Estes gráficos usam o recorte exploratório atual, o qual é determinado pelo filtro definido pelo usuário (quando aplicável). "
+        "Estes gráficos usam o recorte exploratório atual, o qual é determinado pelo filtro determinado pelo usuário (se houver determinação, claro). "
         f"Material analisado no bloco quimiocitológico: {SINAN_QUIMIO_MATERIAL}."
     )
 
@@ -5683,33 +5724,6 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, grap
         render_plotly_chart(fig)
         render_interval_total(count_long, value_col="n", by_col="indicador")
 
-        if exprs.get("evol_label") and exprs.get("dt") and exprs.get("classi_code"):
-            evol_confirmados = query_yearly_category(
-                table,
-                exprs["dt"],
-                exprs["evol_label"],
-                append_clause(base_where, f"{exprs['classi_code']} = '1'"),
-            )
-            if not evol_confirmados.empty:
-                evol_confirmados = add_text_column(evol_confirmados)
-                fig_evol_confirmados = px.line(
-                    evol_confirmados,
-                    x="ano",
-                    y="n",
-                    color="categoria",
-                    markers=True,
-                    text="texto",
-                    title="SINAN: Evolução de casos confirmados",
-                    labels={"ano": "Ano", "n": "Confirmados", "categoria": "Evolução", "pct": "% no ano"},
-                    hover_data={"texto": False, "pct": ":.2f", "total_ano": True},
-                )
-                fig_evol_confirmados.update_traces(textposition="top center")
-                render_plotly_chart(fig_evol_confirmados)
-                render_interval_total(evol_confirmados, value_col="n", by_col="categoria")
-                copyable_dataframe(evol_confirmados, width="stretch", hide_index=True)
-                download_button(evol_confirmados, "sinan_evolucao_confirmados.csv")
-        else:
-            st.info("Para gerar o gráfico de evolução dos confirmados, CLASSI_FIN, EVOLUCAO e data precisam existir no SINAN.")
 
         prop_specs = [
             ("pct_confirmacao", "Confirmados", "confirmados", "notificacoes", "% das notificações"),
@@ -5774,37 +5788,39 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, grap
         else:
             st.info("Para gerar o gráfico comparativo de hospitalização, CLASSI_FIN, data e ATE_HOSPIT precisam existir no SINAN.")
 
-        etio = query_sinan_etiology_lethality(table, exprs, base_where)
-        if not etio.empty:
-            st.markdown("**Letalidade por grupo etiológico entre confirmados**")
-            st.caption("Denominador do gráfico: casos confirmados do respectivo grupo etiológico (CLASSI_FIN = 1). Fórmula: óbitos por meningite entre confirmados / casos confirmados do grupo.")
-            copyable_dataframe(etio, width="stretch", hide_index=True)
-            etio = etio.copy()
-            etio["denominador_letalidade"] = etio["confirmados"]
-            etio["texto"] = [
-                f"{br_pct(p)} ({br_int(o)}/{br_int(c)})"
-                for p, o, c in zip(etio["letalidade_pct"], etio["obitos_meningite"], etio["denominador_letalidade"])
-            ]
-            fig3 = px.bar(
-                etio,
-                x="letalidade_pct",
-                y="grupo_etiologico",
-                orientation="h",
-                text="texto",
-                title="Letalidade por grupo etiológico — denominador: casos confirmados",
-                labels={"letalidade_pct": "Óbitos por meningite / casos confirmados (%)", "grupo_etiologico": "Grupo etiológico", "denominador_letalidade": "Casos confirmados do grupo"},
-                hover_data={"obitos_meningite": True, "denominador_letalidade": True},
-                color_discrete_sequence=[DEATH_RED],
+        if exprs.get("evol_label") and exprs.get("dt") and exprs.get("classi_code") and exprs.get("evol_code"):
+            evol_confirmados = query_yearly_category(
+                table,
+                exprs["dt"],
+                exprs["evol_label"],
+                append_clause(base_where, f"{exprs['classi_code']} = '1' AND {exprs['evol_code']} IN ('1','2','3')"),
             )
-            fig3.update_layout(yaxis={"categoryorder": "total ascending"})
-            render_plotly_chart(fig3)
-            render_interval_total(etio, value_col="obitos_meningite", denominator_col="confirmados", value_label="óbitos por meningite", denominator_label="casos confirmados")
-            download_button(etio, "sinan_letalidade_por_etiologia.csv")
+            if not evol_confirmados.empty:
+                evol_confirmados = add_text_column(evol_confirmados)
+                fig_evol_confirmados = px.line(
+                    evol_confirmados,
+                    x="ano",
+                    y="n",
+                    color="categoria",
+                    markers=True,
+                    text="texto",
+                    title="Evolução dos casos Confirmados com evolução conhecida",
+                    labels={"ano": "Ano", "n": "Confirmados com evolução conhecida", "categoria": "Evolução", "pct": "% no ano"},
+                    hover_data={"texto": False, "pct": ":.2f", "total_ano": True},
+                )
+                fig_evol_confirmados.update_traces(textposition="top center")
+                render_plotly_chart(fig_evol_confirmados)
+                render_interval_total(evol_confirmados, value_col="n", by_col="categoria")
+                copyable_dataframe(evol_confirmados, width="stretch", hide_index=True)
+                download_button(evol_confirmados, "sinan_evolucao_confirmados_evolucao_conhecida.csv")
+        else:
+            st.info("Para gerar o gráfico de evolução dos casos confirmados com evolução conhecida, CLASSI_FIN, EVOLUCAO e data precisam existir no SINAN.")
+
 
         if symptom_specs and exprs.get("classi_code") and exprs.get("dt"):
             sintomas = query_sinan_symptom_prevalence(table, exprs, base_where, symptom_specs)
             if not sintomas.empty:
-                st.markdown('<h2 style="font-size: 2.0rem; line-height: 1.18; margin: 1.1rem 0 0.65rem 0;">Prevalência de sinais e sintomas entre casos confirmados</h2>', unsafe_allow_html=True)
+                st.markdown("### Prevalência de sinais e sintomas entre casos confirmados")
                 opcoes_sintomas = sorted(sintomas["sintoma"].dropna().unique().tolist())
                 sintoma_sel = st.selectbox(
                     "Escolha o sintoma para se analisar a curva anual entre confirmados",
@@ -5860,6 +5876,7 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, grap
         comunicantes = query_sinan_communicants_prophylaxis(table, exprs, base_where, communicants_col, prophylaxis_col)
         if not comunicantes.empty:
             st.markdown("**Comunicantes e quimioprofilaxia**")
+            st.caption("Segundo a estrutura do dicionário de dados do SINAN para meningite, `MED_NUCOMU` registra o número de comunicantes identificados e `MED_QUIMIO` informa se foi realizada quimioprofilaxia, codificada como Sim, Não ou Ignorado. O gráfico cruza o total de comunicantes registrados por ano com a situação de realização da quimioprofilaxia.")
             comunicantes = comunicantes.copy()
             comunicantes["texto_comunicantes"] = [br_int(v) for v in comunicantes["comunicantes_total"]]
             fig_comunicantes = px.line(
@@ -5950,7 +5967,9 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, grap
                     "denominador": "Óbitos no recorte",
                 },
                 hover_data={"texto": False, "pct": ":.2f", "denominador": True},
+                color_discrete_sequence=APP_COLOR_SEQUENCE,
             )
+            disable_death_red(fig)
             fig.update_traces(textposition="top center")
             render_plotly_chart(fig)
             render_interval_total(sim_cid_long, value_col="n", by_col="definicao")
@@ -5982,7 +6001,9 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, grap
                 title=figure_title,
                 labels={"ano": "Ano", "n": "Óbitos", "categoria": field_label, "pct": "% no ano"},
                 hover_data={"texto": False, "pct": ":.2f", "total_ano": True},
+                color_discrete_sequence=APP_COLOR_SEQUENCE,
             )
+            disable_death_red(fig_cycle)
             render_plotly_chart(fig_cycle)
             render_interval_total(df, value_col="n", by_col="categoria")
             copyable_dataframe(df, width="stretch", hide_index=True)
@@ -6141,7 +6162,7 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, grap
         st.info("Para gerar o gráfico de dias de permanência, o campo DIAS_PERM precisa existir na CIHA e ser detectado automaticamente.")
 
 
-def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dict[str, Optional[str]]) -> None:
+def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dict[str, Optional[str]], base_where: Optional[str] = None) -> None:
     def br_int(value: object) -> str:
         if pd.isna(value):
             return "—"
@@ -6301,24 +6322,62 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
     # O gráfico CON_DIAGES detalhado foi removido porque o Grupo etiológico SINAN já é derivado do mesmo campo,
     # com agrupamento mais adequado para leitura epidemiológica.
     for label, expr in [
-        ("CLASSI_FIN", exprs.get("classi_label")),
+        ("Classificação final dos casos", exprs.get("classi_label")),
         ("Grupo etiológico SINAN", exprs.get("con_group")),
     ]:
         if expr:
             df = query_category(table, expr, graph_where, top_n=40)
             if not df.empty:
+                df = add_text(df)
                 st.markdown(f"**{label}**")
-                fig = px.bar(df, x="n", y="categoria", orientation="h", text="pct", labels={"categoria": label, "n": "Registros"})
+                fig = px.bar(
+                    df,
+                    x="n",
+                    y="categoria",
+                    orientation="h",
+                    text="texto",
+                    title=label,
+                    labels={"categoria": label, "n": "Registros", "pct": "%"},
+                    hover_data={"texto": False, "pct": ":.2f"},
+                )
                 fig.update_layout(yaxis={"categoryorder": "total ascending"})
                 render_plotly_chart(fig)
                 render_interval_total(df, value_col="n")
                 copyable_dataframe(df, width="stretch", hide_index=True)
 
-
         if label == "Grupo etiológico SINAN":
+            etio_where = base_where if base_where is not None else graph_where
+            etio = query_sinan_etiology_lethality(table, exprs, etio_where)
+            if not etio.empty:
+                st.markdown("**Letalidade por grupo etiológico entre confirmados**")
+                st.caption("Denominador do gráfico: casos confirmados do respectivo grupo etiológico (CLASSI_FIN = 1). Fórmula: óbitos por meningite entre confirmados / casos confirmados do grupo.")
+                etio = etio.copy()
+                etio["denominador_letalidade"] = etio["confirmados"]
+                etio["texto"] = [
+                    f"{br_pct(p)} ({br_int(o)}/{br_int(c)})"
+                    for p, o, c in zip(etio["letalidade_pct"], etio["obitos_meningite"], etio["denominador_letalidade"])
+                ]
+                fig3 = px.bar(
+                    etio,
+                    x="letalidade_pct",
+                    y="grupo_etiologico",
+                    orientation="h",
+                    text="texto",
+                    title="Letalidade por grupo etiológico entre confirmados",
+                    labels={"letalidade_pct": "Óbitos por meningite / casos confirmados (%)", "grupo_etiologico": "Grupo etiológico", "denominador_letalidade": "Casos confirmados do grupo"},
+                    hover_data={"obitos_meningite": True, "denominador_letalidade": True},
+                    color_discrete_sequence=[PLOTLY_DEFAULT_BLUE],
+                )
+                disable_death_red(fig3)
+                fig3.update_traces(marker_color=PLOTLY_DEFAULT_BLUE)
+                fig3.update_layout(yaxis={"categoryorder": "total ascending"})
+                render_plotly_chart(fig3)
+                render_interval_total(etio, value_col="obitos_meningite", denominator_col="confirmados", value_label="óbitos por meningite", denominator_label="casos confirmados")
+                copyable_dataframe(etio, width="stretch", hide_index=True)
+                download_button(etio, "sinan_letalidade_por_etiologia.csv")
+
             by_year = query_sinan_diagnostics_by_year(table, exprs, graph_where)
             if not by_year.empty:
-                st.markdown("**Confirmados por grupo etiológico convertido em CID-10**")
                 st.caption(
                     "Usa a classificação CID-10 derivada de CON_DIAGES, CLA_ME_BAC e campos complementares do SINAN, "
                     "restrita a casos confirmados. O ID_AGRAVO/CID bruto do SINAN não é usado para estratificar este gráfico."
@@ -6330,7 +6389,7 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                     x="ano",
                     y="confirmados",
                     color="grupo_etiologico",
-                    title="Confirmados por grupo etiológico convertido em CID-10 — SINAN",
+                    title="Confirmados por grupo etiológico convertido em CID-10",
                     labels={
                         "grupo_etiologico": "CID-10 convertido / grupo etiológico",
                         "confirmados": "Confirmados",
@@ -6370,16 +6429,6 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                     fig_conv.update_layout(yaxis={"categoryorder": "total ascending"})
                     render_plotly_chart(fig_conv)
                     render_interval_total(conv_yes, value_col="n")
-                    display_cols = [
-                        c for c in [
-                            "cid10_grupo", "cid10_classificacao", "n", "pct",
-                            "grupos_sinan", "conclusoes_sinan", "bacterias_sinan",
-                            "agentes_asseptica_sinan", "outras_etiologias_sinan",
-                            "doencas_base_g01_provaveis", "justificativas",
-                        ]
-                        if c in conv_yes.columns
-                    ]
-                    copyable_dataframe(conv_yes[display_cols], width="stretch", hide_index=True)
                     download_button(conv_yes, "sinan_cid10_conversao_grupo_etiologico.csv")
 
                 with st.expander("Regra usada para converter CON_DIAGES em CID-10"):
@@ -6400,33 +6449,8 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                     copyable_dataframe(conv_no[conv_no_cols], width="stretch", hide_index=True)
 
 
-                g01_base = query_sinan_g01_base_disease(table, exprs, graph_where)
-                if not g01_base.empty:
-                    g01_base = add_text(g01_base)
-                    st.markdown("**G01 + doença de base provável**")
-                    st.caption(
-                        "Este gráfico mostra apenas registros cuja conversão operacional resultou em G01. "
-                        "A doença de base provável é inferida de CLA_ME_BAC e dos campos textuais/auxiliares detectados automaticamente."
-                    )
-                    fig_g01 = px.bar(
-                        g01_base,
-                        x="n",
-                        y="doenca_base_provavel",
-                        orientation="h",
-                        text="texto",
-                        title="SINAN: G01 + doença bacteriana de base provável",
-                        labels={"doenca_base_provavel": "Doença de base provável", "n": "Registros", "pct": "%"},
-                        hover_data={"texto": False, "pct": ":.2f", "denominador": True, "conclusoes_sinan": True, "bacterias_sinan": True},
-                    )
-                    fig_g01.update_layout(yaxis={"categoryorder": "total ascending"})
-                    render_plotly_chart(fig_g01)
-                    render_interval_total(g01_base, value_col="n")
-                    copyable_dataframe(g01_base, width="stretch", hide_index=True)
-                    download_button(g01_base, "sinan_g01_doenca_base_provavel.csv")
-
 
     for label, expr in [
-        ("EVOLUCAO", exprs.get("evol_label")),
         ("Critério de confirmação para classificação etiológica do caso", exprs.get("criterio_label")),
     ]:
         if expr:
@@ -6440,6 +6464,7 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                     y="categoria",
                     orientation="h",
                     text="texto",
+                    title=label,
                     labels={"categoria": label, "n": "Registros", "pct": "%"},
                     hover_data={"texto": False, "pct": ":.2f"},
                 )
@@ -6506,22 +6531,21 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
         st.markdown("### Escolaridade")
         if not education:
             st.info("Para gerar o gráfico de escolaridade no SINAN, o campo CS_ESCOL_N/ESCOLARIDADE precisa existir e ser detectado automaticamente.")
-        elif not (exprs.get("classi_code") and exprs.get("evol_code")):
-            st.info("Para gerar a escolaridade por confirmados e óbitos no SINAN, os campos CLASSI_FIN e EVOLUCAO precisam existir e ser detectados automaticamente.")
+        elif not exprs.get("classi_code"):
+            st.info("Para gerar a escolaridade por confirmados e descartados no SINAN, o campo CLASSI_FIN precisa existir e ser detectado automaticamente.")
         else:
             schooling_where = base_where if base_where is not None else graph_where
             edu_df = query_sinan_education_outcomes(
                 table,
                 education,
                 exprs["classi_code"],
-                exprs["evol_code"],
                 schooling_where,
             )
             if edu_df.empty or pd.to_numeric(edu_df.get("denominador"), errors="coerce").fillna(0).max() <= 0:
-                st.info("Sem casos confirmados para calcular a escolaridade com os filtros atuais.")
+                st.info("Sem casos confirmados ou descartados para calcular a escolaridade com os filtros atuais.")
             else:
                 edu_df = add_text(edu_df)
-                grupo_order = ["Casos confirmados", "Óbitos por meningite", "Óbitos por outra causa"]
+                grupo_order = ["Casos confirmados", "Casos descartados"]
                 categoria_order = education_category_labels("SINAN", education, include_missing=True)
                 edu_df = edu_df.sort_values(["ordem_escolaridade", "ordem_grupo", "grupo"]).reset_index(drop=True)
                 fig_edu = px.bar(
@@ -6532,24 +6556,24 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
                     orientation="h",
                     barmode="group",
                     text="texto",
-                    title="SINAN: escolaridade — confirmados e óbitos",
+                    title="SINAN: escolaridade — casos confirmados e descartados",
                     labels={
                         "escolaridade": "Escolaridade",
                         "n": "Registros",
                         "grupo": "Grupo",
-                        "pct": "% dos casos confirmados",
-                        "denominador": "Total de casos confirmados",
+                        "pct": "% no grupo",
+                        "denominador": "Total no grupo",
                     },
                     hover_data={"texto": False, "pct": ":.2f", "denominador": True},
                     category_orders={"escolaridade": categoria_order, "grupo": grupo_order},
                 )
                 fig_edu.update_layout(yaxis={"categoryorder": "array", "categoryarray": categoria_order[::-1]})
-                st.caption("O gráfico exibe todas as categorias operacionais de escolaridade do SINAN; os percentuais usam o total de casos confirmados como denominador comum.")
+                st.caption("O gráfico exibe todas as categorias operacionais de escolaridade do SINAN; os percentuais usam o denominador do próprio grupo, separando casos confirmados e descartados.")
                 render_plotly_chart(fig_edu)
                 render_interval_total(edu_df, value_col="n", by_col="grupo")
                 edu_out = edu_df.drop(columns=["ordem_escolaridade", "ordem_grupo"], errors="ignore")
                 copyable_dataframe(edu_out, width="stretch", hide_index=True)
-                download_button(edu_out, "sinan_escolaridade_confirmados_obitos.csv")
+                download_button(edu_out, "sinan_escolaridade_confirmados_descartados.csv")
     elif source == "SIM":
         st.markdown("### Escolaridade")
         if not education:
@@ -6572,7 +6596,10 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
                     labels={"categoria": "Escolaridade", "n": "Óbitos", "pct": "% do total filtrado", "denominador": "Total filtrado"},
                     hover_data={"texto": False, "pct": ":.2f", "denominador": True},
                     category_orders={"categoria": categoria_order},
+                    color_discrete_sequence=[PLOTLY_DEFAULT_BLUE],
                 )
+                disable_death_red(fig_edu)
+                fig_edu.update_traces(marker_color=PLOTLY_DEFAULT_BLUE)
                 fig_edu.update_layout(yaxis={"categoryorder": "array", "categoryarray": categoria_order[::-1]})
                 st.caption("O gráfico exibe todas as categorias operacionais de escolaridade detectadas para o campo do SIM; os percentuais usam o total de registros filtrados como denominador.")
                 render_plotly_chart(fig_edu)
@@ -6594,9 +6621,9 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
     if cols:
         st.markdown("### Categorias demográficas e territoriais")
         if any(is_mun for _, _, is_mun, _ in cols):
-            top_municipios = st.slider("Municípios principais no gráfico territorial", 10, 15, 15, key=f"top_municipios_{source}")
-            st.caption("Nos gráficos de município, todas as categorias fora do Top N são somadas em 'Outros municípios'; assim o percentual e o denominador continuam representando 100% dos dados filtrados.")
-            st.caption("Dicionário IBGE: os rótulos de município são lidos do CSV externo `municipios_ibge.csv` ou da URL configurada em Desempenho e memória; hospede esse CSV no GitHub como arquivo raw para manter o script sem dicionário embutido.")
+            top_municipios = 15
+            st.caption("Nos gráficos de município, são exibidos os 15 principais códigos IBGE; todas as demais categorias são somadas em 'Outros municípios'. Assim, percentual e denominador continuam representando 100% dos dados filtrados.")
+            st.caption("Observação: No GitHub deste painel (https://github.com/borbito123/Streamlit-para-analise-epidemiolgica-de-meningite-e-encefalite/blob/main/municipios_ibge.csv) há um arquivo .CSV com os rótulos de município, de modo que é possível ver quais são os principais municípios que reportaram casos de meningite.")
         else:
             top_municipios = 15
         for label, expr, is_mun, top_n in cols:
@@ -6830,7 +6857,7 @@ def render_source(source: str) -> Optional[Dict[str, object]]:
     analysis_sections = [
         "Principais indicadores epidemiológicos",
         "Temporal",
-        "Análise etiológica e CID-10",
+        "Análise epidemiológica e CID-10",
         "Demografia e território",
     ]
     if source == "SINAN":
@@ -6855,8 +6882,8 @@ def render_source(source: str) -> Optional[Dict[str, object]]:
         render_indicators_tab(table, source, base_where, graph_where, exprs)
     elif selected_section == "Temporal":
         render_temporal_tab(table, source, graph_where, exprs)
-    elif selected_section == "Análise etiológica e CID-10":
-        render_cid_tab(table, source, graph_where, exprs)
+    elif selected_section == "Análise epidemiológica e CID-10":
+        render_cid_tab(table, source, graph_where, exprs, base_where=base_where)
     elif selected_section == "Demografia e território":
         render_demography_tab(table, source, graph_where, exprs, base_where=base_where)
     elif selected_section == "Sobreposição NU_NOTIFIC" and source == "SINAN":
@@ -6923,7 +6950,7 @@ def render_source(source: str) -> Optional[Dict[str, object]]:
 
 
 def render_comparison(loaded: Sequence[Dict[str, object]]) -> None:
-    st.markdown("### Comparação de bancos de dados")
+    st.markdown("### Comparação entre bancos de dados")
     available = [x for x in loaded if x and x.get("exprs", {}).get("dt")]
     if len(available) < 2:
         st.info("Carregue ao menos duas bases com data detectada para comparar séries.")
@@ -7008,7 +7035,7 @@ def render_comparison(loaded: Sequence[Dict[str, object]]) -> None:
             if not nonzero.empty:
                 comp.loc[idx, "valor"] = comp.loc[idx, "valor"] / nonzero.iloc[0] * 100
 
-    fig = px.line(comp, x="periodo", y="valor", color="serie", markers=True, title="Comparação de bancos de dados — tendências", labels={"valor": "Índice" if normalize else "Registros", "periodo": "Período", "serie": "Série"})
+    fig = px.line(comp, x="periodo", y="valor", color="serie", markers=True, title="Comparação entre bancos de dados — tendências", labels={"valor": "Índice" if normalize else "Registros", "periodo": "Período", "serie": "Série"})
     render_plotly_chart(fig)
     if not normalize:
         render_interval_total(comp, value_col="valor", by_col="serie")
@@ -7030,12 +7057,11 @@ def render_methodology():
     st.markdown(
         """
         1. Comece pela aba **Principais indicadores epidemiológicos** do SINAN para separar notificações, confirmados, descartados e óbitos.
-        2. Use **Análise etiológica e CID-10** para comparar o CID bruto com a classificação específica. No SINAN, dê prioridade a `CON_DIAGES`, `CLA_ME_BAC`, `CLA_ME_ASS` e `CLA_ME_ETI`.
-        3. Use **Sobreposição NU_NOTIFIC** no SINAN para verificar repetição do número de notificação e levantar possíveis duplicidades.
-        4. Use **Temporal** para verificar queda, recuperação e sazonalidade.
-        5. Use **Demografia e território** para levantar hipóteses por idade, sexo, residência e atendimento.
-        6. Use **Prévia** para inspecionar casos filtrados e exportar a planilha completa quando necessário.
-        7. Use **SQL Lab** para transformar a hipótese em uma consulta reprodutível.
+        2. Use **Análise epidemiológica e CID-10** para comparar o CID bruto com a classificação específica. No SINAN, dê prioridade a `CON_DIAGES`, `CLA_ME_BAC`, `CLA_ME_ASS` e `CLA_ME_ETI`.
+        3. Use **Temporal** para verificar queda, recuperação e sazonalidade.
+        4. Use **Demografia e território** para levantar hipóteses por idade, sexo, residência e atendimento.
+        5. Use **Prévia** para inspecionar casos filtrados e exportar a planilha completa quando necessário.
+        6. Use **SQL Lab** para transformar a hipótese em uma consulta reprodutível.
         """
     )
     st.info(
@@ -7043,41 +7069,41 @@ def render_methodology():
         "SINAN pode mudar após investigação/encerramento do caso; SIM pode mudar após codificação e qualificação da causa básica; CIHA pode sofrer recomposição por competência e processamento administrativo."
     )
     st.markdown("### Dicionário externo de municípios IBGE")
-    st.write(
-        "O dicionário nacional de municípios foi retirado do script Python e deve ser mantido como CSV externo. "
-        "Hospede `municipios_ibge.csv` no GitHub e informe a URL raw no controle **CSV externo de municípios IBGE**, ou mantenha o arquivo no mesmo diretório do script."
-    )
+    st.write("O dicionário nacional de municípios se encontra disponível no github no formato csv - municipios_ibge.csv")
     st.caption(municipios_ibge_csv_status())
-    st.markdown("### Guia de campos por base")
-    guide_rows = [
-        {"Base": base, "Campo": field, "Papel": role, "Uso no painel": use}
-        for base, rows in FIELD_GUIDE.items()
-        for field, role, use in rows
-    ]
-    copyable_dataframe(pd.DataFrame(guide_rows), width="stretch", hide_index=True)
-    st.markdown("### Definições principais usadas")
-    copyable_dataframe(
-        pd.DataFrame(
-            [
-                ["SINAN — notificação", "todos os registros após filtros"],
-                ["SINAN — confirmado", "CLASSI_FIN = 1"],
-                ["SINAN — descartado", "CLASSI_FIN = 2"],
-                ["SINAN — óbito por meningite", "CLASSI_FIN = 1 e EVOLUCAO = 2"],
-                ["SIM — causa básica", "CID de meningite/encefalite detectado em CAUSABAS"],
-                ["SIM — menção", "CID de meningite/encefalite detectado em CAUSABAS, linhas da DO ou ATESTADO"],
-                ["SIM — óbito na gravidez", "campo OBITOGRAV quando disponível"],
-                ["CIHA — atendimento", "registro administrativo com data/diagnóstico, incluindo os novos CID-10 de meningite/encefalite quando detectados"],
-                ["CIHA — morte administrativa", "MORTE = 1"],
-                ["CIHA — permanência zero", "DIAS_PERM = 0"],
-            ],
-            columns=["Conceito", "Regra operacional"],
-        ),
-        width="stretch",
-        hide_index=True,
-    )
     st.markdown("### Referência CID-10")
     render_cid_reference()
     render_quimio_interpretation()
+
+
+def render_main_navigation() -> str:
+    """Navegação principal com separadores visuais entre metodologia, bases e comparação."""
+    main_sections = ["Metodologia", "SINAN", "SIM", "CIHA", "Comparação entre bancos de dados"]
+    main_section_key = "main_section"
+    current = st.session_state.get(main_section_key, "Metodologia")
+    if current not in main_sections:
+        current = "Metodologia"
+    st.session_state[main_section_key] = current
+
+    def nav_button(label: str, key: str) -> None:
+        if st.button(
+            label,
+            key=key,
+            type="primary" if st.session_state[main_section_key] == label else "secondary",
+            width="stretch",
+        ):
+            st.session_state[main_section_key] = label
+
+    st.markdown("#### Metodologia")
+    nav_button("Metodologia", "nav_metodologia")
+    st.divider()
+    st.markdown("#### Bases")
+    for source_name in ["SINAN", "SIM", "CIHA"]:
+        nav_button(source_name, f"nav_{source_name.lower()}")
+    st.divider()
+    st.markdown("#### Comparação entre bancos de dados")
+    nav_button("Comparação entre bancos de dados", "nav_comparacao_bancos")
+    return st.session_state[main_section_key]
 
 
 def main() -> None:
@@ -7087,29 +7113,21 @@ def main() -> None:
 
     with st.sidebar:
         render_performance_controls()
-        main_sections = ["Metodologia", "SINAN", "SIM", "CIHA", "Comparação de bancos de dados"]
-        main_section_key = "main_section"
-        if st.session_state.get(main_section_key) not in (None, *main_sections):
-            st.session_state.pop(main_section_key, None)
-        section = st.radio(
-            "Seção",
-            main_sections,
-            key=main_section_key,
-        )
+        section = render_main_navigation()
 
     if section in {"SINAN", "SIM", "CIHA"}:
         st.divider()
         render_source(section)
     elif section == "Metodologia":
         render_methodology()
-    elif section == "Comparação de bancos de dados":
+    elif section == "Comparação entre bancos de dados":
         loaded = [
             st.session_state.get(f"loaded_context_{src}")
             for src in ["SINAN", "SIM", "CIHA"]
             if st.session_state.get(f"loaded_context_{src}")
         ]
         st.caption(
-            "A Comparação de bancos de dados usa as bases já carregadas nas seções SINAN/SIM/CIHA. "
+            "A Comparação entre bancos de dados usa as bases já carregadas nas seções SINAN/SIM/CIHA. "
             "Carregue cada base separadamente antes de comparar para evitar sobrecarga."
         )
         render_comparison([x for x in loaded if x])
