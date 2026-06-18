@@ -1763,6 +1763,13 @@ def clean_code_expr(col: str, pad2: bool = False) -> str:
     return code
 
 
+
+def sqlsafe(expr: object) -> str:
+    if expr is None:
+        return "NULL"
+    return str(expr)
+
+
 def case_from_mapping(code_sql: str, mapping: Dict[str, str], default: str) -> str:
     parts = [f"WHEN {qstr(k)} THEN {qstr(v)}" for k, v in mapping.items()]
     return f"CASE {code_sql} {' '.join(parts)} ELSE {qstr(default)} END"
@@ -5292,7 +5299,7 @@ def render_sinan_lcr_indicators(table: LoadedTable, exprs: Dict[str, Optional[st
 
     st.markdown("### Punção laboratorial e exame quimiocitológico do líquor")
     st.caption(
-        "Estes gráficos usam o recorte exploratório atual. "
+        "Estes gráficos usam o recorte exploratório atual, o qual é determinado pelo filtro definido pelo usuário (quando aplicável). "
         f"Material analisado no bloco quimiocitológico: {SINAN_QUIMIO_MATERIAL}."
     )
 
@@ -6362,7 +6369,7 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
 
     for label, expr in [
         ("EVOLUCAO", exprs.get("evol_label")),
-        ("Critério de confirmação para classificação do caso", exprs.get("criterio_label")),
+        ("Critério de confirmação para classificação etiológica do caso", exprs.get("criterio_label")),
     ]:
         if expr:
             df = query_category(table, expr, graph_where, top_n=40)
