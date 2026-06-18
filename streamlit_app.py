@@ -1857,6 +1857,64 @@ def municipality_display_expr(col: str) -> str:
             ELSE {raw}
         END
         """
+
+
+# ================================
+# OTIMIZAÇÃO: MUNICÍPIOS (ANTI-CRASH)
+# ================================
+
+def _municipality_code_expr(col: str) -> str:
+    raw = clean_str_expr(col)
+    digits = f"regexp_replace(COALESCE({raw}, ''), '[^0-9]', '', 'g')"
+    return f"""
+    CASE
+        WHEN {raw} IS NULL THEN NULL
+        WHEN LENGTH({digits}) >= 6 THEN SUBSTR({digits}, 1, 6)
+        ELSE NULL
+    END
+    """
+
+
+def query_municipality_top(table, col, where_sql, top_n=15):
+    code_expr = _municipality_code_expr(col)
+
+    sql = f"""
+        WITH base AS (
+            SELECT {code_expr} AS codigo_ibge_6
+            FROM {table.ref_sql}
+            {where_sql}
+        ),
+        agg AS (
+            SELECT
+                COALESCE(m.label, 'Código não mapeado') AS categoria,
+                COUNT(*) AS n
+            FROM base b
+            LEFT JOIN {MUNICIPIOS_IBGE_VIEW_NAME} m
+                ON b.codigo_ibge_6 = m.codigo_ibge_6
+            GROUP BY 1
+        ),
+        ranked AS (
+            SELECT *,
+                   ROW_NUMBER() OVER (ORDER BY n DESC) AS rn,
+                   SUM(n) OVER () AS total
+            FROM agg
+        ),
+        final AS (
+            SELECT
+                CASE WHEN rn <= {int(top_n)} THEN categoria ELSE 'Outros municípios' END AS categoria,
+                SUM(n) AS n,
+                MAX(total) AS denominador,
+                MIN(rn) AS ordem
+            FROM ranked
+            GROUP BY 1
+        )
+        SELECT categoria, n, denominador,
+               ROUND(100.0 * n / denominador, 2) AS pct
+        FROM final
+        ORDER BY ordem, n DESC
+    """
+    return run_query(table, sql)
+
     return f"""
     CASE
         WHEN {raw} IS NULL THEN 'Sem informação'
@@ -6543,7 +6601,7 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
             top_municipios = 15
         for label, expr, is_mun, top_n in cols:
             if is_mun:
-                df = query_category_top_with_outros(table, expr, graph_where, top_n=top_municipios)
+                df = query_municipality_top(table, expr, graph_where, top_n=top_municipios)
                 filename = f"{source.lower()}_{safe_filename(label)}_top{top_municipios}_outros.csv"
             else:
                 df = query_category(table, expr, graph_where, top_n=top_n)
@@ -6966,7 +7024,8 @@ def render_comparison(loaded: Sequence[Dict[str, object]]) -> None:
     )
 
 
-def render_methodology() -> None:
+def render_methodology()
+    st.divider() -> None:
     st.markdown("### Como usar este app para investigação epidemiológica")
     st.markdown(
         """
@@ -7028,7 +7087,7 @@ def main() -> None:
 
     with st.sidebar:
         render_performance_controls()
-        main_sections = ["SINAN", "SIM", "CIHA", "Comparação de bancos de dados", "Metodologia"]
+        main_sections = ["Metodologia", "SINAN", "SIM", "CIHA", "Comparação de bancos de dados"]
         main_section_key = "main_section"
         if st.session_state.get(main_section_key) not in (None, *main_sections):
             st.session_state.pop(main_section_key, None)
@@ -7039,9 +7098,11 @@ def main() -> None:
         )
 
     if section in {"SINAN", "SIM", "CIHA"}:
-        render_source(section)
+        st.divider()
+    render_source(section)
     elif section == "Metodologia":
         render_methodology()
+    st.divider()
     else:
         loaded = [
             st.session_state.get(f"loaded_context_{src}")
@@ -7053,6 +7114,7 @@ def main() -> None:
             "Carregue cada base separadamente antes de comparar para evitar sobrecarga."
         )
         render_comparison([x for x in loaded if x])
+    st.divider()
 
 
 if __name__ == "__main__":
