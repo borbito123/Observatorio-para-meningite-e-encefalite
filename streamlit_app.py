@@ -7025,7 +7025,7 @@ def render_comparison(loaded: Sequence[Dict[str, object]]) -> None:
 
 
 def render_methodology():
-    st.divider() -> None:
+    st.divider()
     st.markdown("### Como usar este app para investigação epidemiológica")
     st.markdown(
         """
@@ -7099,11 +7099,10 @@ def main() -> None:
 
     if section in {"SINAN", "SIM", "CIHA"}:
         st.divider()
-    render_source(section)
+        render_source(section)
     elif section == "Metodologia":
         render_methodology()
-    st.divider()
-    else:
+    elif section == "Comparação de bancos de dados":
         loaded = [
             st.session_state.get(f"loaded_context_{src}")
             for src in ["SINAN", "SIM", "CIHA"]
