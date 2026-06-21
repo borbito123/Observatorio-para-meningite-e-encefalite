@@ -55,7 +55,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-06-18-v31-revisao-classificacao-geral"
+APP_VERSION = "2026-06-21-v32-ajustes-sinan-demografia-cid10"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos
@@ -381,10 +381,29 @@ def enforce_death_related_red(fig: go.Figure) -> None:
                 pass
 
 
+def _strip_database_prefix_from_title(fig: go.Figure) -> None:
+    """Remove prefixos de base nos títulos dos gráficos, como SINAN:, SIM: ou CIHA:."""
+    if fig is None:
+        return
+    try:
+        title_text = fig.layout.title.text
+    except Exception:
+        return
+    if not title_text:
+        return
+    cleaned = re.sub(r"^\s*(SINAN|SIM|CIHA)\s*[:\-–—]\s*", "", str(title_text), flags=re.IGNORECASE)
+    if cleaned != title_text:
+        try:
+            fig.update_layout(title_text=cleaned)
+        except Exception:
+            pass
+
+
 def style_plotly_figure(fig: go.Figure) -> go.Figure:
     """Padroniza margem, legenda, fonte e cor de óbito/letalidade em todos os gráficos."""
     if fig is None:
         return fig
+    _strip_database_prefix_from_title(fig)
     _apply_distinct_trace_colors(fig)
     enforce_death_related_red(fig)
     trace_types = {str(getattr(trace, "type", "")) for trace in (getattr(fig, "data", []) or [])}
@@ -3527,6 +3546,27 @@ def query_yearly_category(table: LoadedTable, dt_sql: str, category_sql: str, wh
     return run_query(table, sql)
 
 
+def collapse_sinan_evolucao_ignorado(df: pd.DataFrame) -> pd.DataFrame:
+    """Agrupa EVOLUCAO=9 em Sem evolução/ignorado para evitar categorias redundantes no gráfico."""
+    if df is None or df.empty or "categoria" not in df.columns:
+        return df
+    out = df.copy()
+    out["categoria"] = out["categoria"].replace({"9 — ignorado": "Sem evolução/ignorado"})
+    if not {"ano", "categoria", "n"}.issubset(out.columns):
+        return out
+    grouped = (
+        out
+        .groupby(["ano", "categoria"], dropna=False, as_index=False)
+        .agg(n=("n", "sum"), total_ano=("total_ano", "max"))
+    )
+    grouped["pct"] = np.where(
+        pd.to_numeric(grouped["total_ano"], errors="coerce").fillna(0).gt(0),
+        (100.0 * pd.to_numeric(grouped["n"], errors="coerce").fillna(0) / grouped["total_ano"]).round(2),
+        np.nan,
+    )
+    return grouped.sort_values(["ano", "categoria"]).reset_index(drop=True)
+
+
 def query_age_dist(table: LoadedTable, age_sql: str, where_sql: str, sex_sql: Optional[str] = None) -> pd.DataFrame:
     if sex_sql:
         sql = f"""
@@ -3808,34 +3848,110 @@ def summarize_cid10_adequacy_plot(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def query_sinan_cid10_conversion(table: LoadedTable, exprs: Dict[str, Optional[str]], where_sql: str) -> pd.DataFrame:
+    """Converte CON_DIAGES do SINAN para famílias CID-10 com consulta otimizada.
+
+    A versão anterior embutia as mesmas expressões CASE/regex diversas vezes no SELECT e
+    no GROUP BY. Em bases grandes, especialmente com campos auxiliares concatenados, isso
+    fazia o DuckDB recalcular regexp_matches e UPPER/concatenação repetidamente. Esta versão
+    materializa con_code, CLA_ME_BAC e texto auxiliar uma única vez em CTEs pequenas e só
+    depois agrega o resultado final usado no gráfico.
+    """
     con_code = exprs.get("con_code")
     if not con_code:
         return pd.DataFrame()
+
     con_label = exprs.get("con_label") or "NULL"
     con_group = exprs.get("con_group") or "NULL"
+    bac_code = exprs.get("cla_me_bac_code") or "NULL"
     bac_label = exprs.get("cla_me_bac_label") or "NULL"
     ass_label = exprs.get("cla_me_ass_label") or "NULL"
     eti_label = exprs.get("cla_me_eti_label") or "NULL"
-    cid_group = exprs.get("sinan_cid10_conversion_group") or sinan_cid10_conversion_group_expr(con_code)
-    cid_type = exprs.get("sinan_cid10_conversion_type") or sinan_cid10_conversion_type_expr(con_code)
-    cid_reason = exprs.get("sinan_cid10_conversion_reason") or "NULL"
-    include = exprs.get("sinan_cid10_conversion_include") or sinan_cid10_conversion_include_expr(con_code)
-    g01_base = exprs.get("sinan_g01_base_disease") or "NULL"
+    aux_text = exprs.get("sinan_aux_text")
+    aux_select = f"{aux_text} AS aux_text" if aux_text else "NULL AS aux_text"
+    g01_codes_sql = ", ".join(qstr(code) for code in sorted(SINAN_CLA_ME_BAC_G01_CODES))
+    mapped_codes_sql = ", ".join(qstr(code) for code in SINAN_CID10_FROM_CON_DIAGES)
+    g01_detail_pattern_sql = qstr(SINAN_G01_DETAIL_REGEX)
+
     sql = f"""
         WITH base AS (
             SELECT {con_code} AS con_code,
                    {con_label} AS conclusao_diagnostica,
                    {con_group} AS grupo_etiologico_sinan,
+                   {bac_code} AS bacteria_code,
                    {bac_label} AS bacteria_sinan,
                    {ass_label} AS agente_asseptica_sinan,
                    {eti_label} AS outra_etiologia_sinan,
-                   {cid_group} AS cid10_grupo,
-                   {cid_type} AS cid10_classificacao,
-                   {cid_reason} AS justificativa_cid10,
-                   {g01_base} AS doenca_base_g01_provavel,
-                   {include} AS incluido_comparacao
+                   {aux_select}
             FROM {table.ref_sql}
             {where_sql}
+        ), tagged AS (
+            SELECT *,
+                   CASE
+                       WHEN con_code <> '05' OR con_code IS NULL THEN FALSE
+                       WHEN bacteria_code IN ({g01_codes_sql}) THEN TRUE
+                       WHEN regexp_matches(COALESCE(aux_text, ''), {g01_detail_pattern_sql}) THEN TRUE
+                       ELSE FALSE
+                   END AS g01_match
+            FROM base
+        ), converted AS (
+            SELECT con_code,
+                   conclusao_diagnostica,
+                   grupo_etiologico_sinan,
+                   bacteria_sinan,
+                   agente_asseptica_sinan,
+                   outra_etiologia_sinan,
+                   CASE
+                       WHEN con_code IN ('02', '03') THEN 'A39.0'
+                       WHEN con_code = '04' THEN 'A17.0'
+                       WHEN con_code = '05' AND g01_match THEN 'G01'
+                       WHEN con_code = '05' THEN 'G00'
+                       WHEN con_code = '06' THEN 'G03'
+                       WHEN con_code = '07' THEN 'A87'
+                       WHEN con_code = '08' THEN 'G02'
+                       WHEN con_code IN ('09', '10') THEN 'G00'
+                       WHEN con_code = '01' THEN 'Não convertido — meningococcemia isolada'
+                       ELSE 'Sem conversão — CON_DIAGES ausente ou não mapeado'
+                   END AS cid10_grupo,
+                   CASE
+                       WHEN con_code IN ('02', '03') THEN 'A39.0 — meningite meningocócica'
+                       WHEN con_code = '04' THEN 'A17.0 — meningite tuberculosa'
+                       WHEN con_code = '05' AND g01_match THEN 'G01 — meningite bacteriana em doença classificada em outra parte'
+                       WHEN con_code = '05' THEN 'G00 — meningite bacteriana não classificada em outra parte'
+                       WHEN con_code = '06' THEN 'G03 — meningite por outras causas / não especificada'
+                       WHEN con_code = '07' THEN 'A87 — meningite viral'
+                       WHEN con_code = '08' THEN 'G02 — meningite em outras doenças infecciosas/parasitárias'
+                       WHEN con_code IN ('09', '10') THEN 'G00 — meningite bacteriana não classificada em outra parte'
+                       WHEN con_code = '01' THEN 'Não convertido — meningococcemia isolada'
+                       ELSE 'Sem conversão — CON_DIAGES ausente ou não mapeado'
+                   END AS cid10_classificacao,
+                   CASE
+                       WHEN con_code IN ('02', '03') THEN 'Forma meningítica meningocócica: A39.0.'
+                       WHEN con_code = '04' THEN 'Meningite tuberculosa: A17.0.'
+                       WHEN con_code = '05' AND g01_match THEN 'CON_DIAGES=05 refinado como G01 por CLA_ME_BAC/texto: agente/doença bacteriana classificada em outra parte.'
+                       WHEN con_code = '05' AND bacteria_code IS NULL THEN 'CON_DIAGES=05 sem CLA_ME_BAC detectado/preenchido: classificado conservadoramente como G00.'
+                       WHEN con_code = '05' AND bacteria_code IN ('81') THEN 'CON_DIAGES=05 com bactéria não especificada: G00.'
+                       WHEN con_code = '05' THEN 'CON_DIAGES=05 com bactéria comum/outra bactéria: G00.'
+                       WHEN con_code = '06' THEN 'Meningite não especificada: G03.'
+                       WHEN con_code = '07' THEN 'Meningite asséptica no SINAN: A87 como leitura operacional viral; validar etiologia quando disponível.'
+                       WHEN con_code = '08' THEN 'Outra etiologia infecciosa/parasitária: G02 como família comparável; validar CLA_ME_ETI.'
+                       WHEN con_code IN ('09', '10') THEN 'Haemophilus influenzae/pneumocócica: G00.'
+                       WHEN con_code = '01' THEN 'Meningococcemia isolada: fora da comparação de meningite.'
+                       ELSE 'CON_DIAGES ausente ou sem regra.'
+                   END AS justificativa_cid10,
+                   CASE WHEN con_code IN ({mapped_codes_sql}) THEN 'Sim' ELSE 'Não' END AS incluido_comparacao,
+                   CASE
+                       WHEN g01_match = FALSE THEN NULL
+                       WHEN bacteria_code = '11' OR regexp_matches(COALESCE(aux_text, ''), 'SALMONEL') THEN 'Salmonella sp / salmonelose invasiva'
+                       WHEN bacteria_code = '21' OR regexp_matches(COALESCE(aux_text, ''), 'LISTERI') THEN 'Listeriose / Listeria monocytogenes'
+                       WHEN bacteria_code = '45' OR regexp_matches(COALESCE(aux_text, ''), 'NEUROSS[ÍI]FIL|NEUROSYPH|S[ÍI]FIL|SYPHIL|TREPONEMA') THEN 'Sífilis / neurossífilis'
+                       WHEN bacteria_code = '49' OR regexp_matches(COALESCE(aux_text, ''), 'LEPTOSPI') THEN 'Leptospirose'
+                       WHEN regexp_matches(COALESCE(aux_text, ''), 'CARB[UÚ]NCULO|ANTRAZ|ANTHRAX') THEN 'Carbúnculo / antraz'
+                       WHEN regexp_matches(COALESCE(aux_text, ''), 'LYME|BORREL') THEN 'Doença de Lyme / borreliose'
+                       WHEN regexp_matches(COALESCE(aux_text, ''), 'TIF[OÓ]IDE|TYPHOID') THEN 'Febre tifóide'
+                       WHEN regexp_matches(COALESCE(aux_text, ''), 'GONOCOC|GONOCOCO') THEN 'Infecção gonocócica'
+                       ELSE 'Doença bacteriana de base provável não especificada'
+                   END AS doenca_base_g01_provavel
+            FROM tagged
         ), agg AS (
             SELECT cid10_grupo,
                    cid10_classificacao,
@@ -3856,11 +3972,10 @@ def query_sinan_cid10_conversion(table: LoadedTable, exprs: Dict[str, Optional[s
                        FILTER (WHERE cid10_grupo = 'G01' AND doenca_base_g01_provavel IS NOT NULL) AS doencas_base_g01_provaveis,
                    string_agg(DISTINCT justificativa_cid10, '; ' ORDER BY justificativa_cid10)
                        FILTER (WHERE justificativa_cid10 IS NOT NULL) AS justificativas
-            FROM base
+            FROM converted
             GROUP BY 1, 2, 3
         ), with_totals AS (
-            SELECT *,
-                   SUM(n) OVER () AS denominador
+            SELECT *, SUM(n) OVER () AS denominador
             FROM agg
         )
         SELECT *,
@@ -5714,8 +5829,9 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, grap
                 append_clause(base_where, f"{exprs['classi_code']} = '1'"),
             )
             if not evol_geral.empty:
+                evol_geral = collapse_sinan_evolucao_ignorado(evol_geral)
                 evol_geral = add_text_column(evol_geral)
-                evol_geral_order = ["1 — alta", "2 — óbito por meningite", "3 — óbito por outra causa", "9 — ignorado", "Sem evolução/ignorado"]
+                evol_geral_order = ["1 — alta", "2 — óbito por meningite", "3 — óbito por outra causa", "Sem evolução/ignorado"]
                 evol_geral_order = [c for c in evol_geral_order if c in evol_geral["categoria"].unique().tolist()] + [
                     c for c in evol_geral["categoria"].dropna().unique().tolist() if c not in evol_geral_order
                 ]
@@ -5728,7 +5844,6 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, grap
                         "1 — alta": "#2CA02C",
                         "2 — óbito por meningite": DEATH_RED,
                         "3 — óbito por outra causa": "#1F77B4",
-                        "9 — ignorado": "#7F7F7F",
                         "Sem evolução/ignorado": "#7F7F7F",
                     }.get(str(categoria), APP_COLOR_SEQUENCE[idx % len(APP_COLOR_SEQUENCE)])
                     fig_evol_geral.add_trace(
@@ -6583,11 +6698,73 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
         out["texto"] = [f"{br_int(n)} ({br_pct(pct)})" for n, pct in zip(out["n"], out[pct_col])]
         return out
 
+    classi_code = exprs.get("classi_code") if source == "SINAN" else None
+    sex = exprs.get("sex")
+    race = exprs.get("race")
     age = exprs.get("age")
+    demography_case_base_where = base_where if (source == "SINAN" and base_where is not None) else graph_where
+    sinan_case_filter_options = ["Casos confirmados", "Casos descartados / sem classificação"]
+
+    def sinan_case_filter_where(selection: str) -> str:
+        if not (source == "SINAN" and classi_code):
+            return graph_where
+        if selection == "Casos confirmados":
+            return append_clause(demography_case_base_where, f"{classi_code} = '1'")
+        return append_clause(demography_case_base_where, f"({classi_code} IS NULL OR {classi_code} <> '1')")
+
+    def sinan_case_filter_suffix(selection: Optional[str]) -> str:
+        if selection == "Casos confirmados":
+            return "confirmados"
+        if selection == "Casos descartados / sem classificação":
+            return "descartados_sem_classificacao"
+        return ""
+
+    def sinan_case_filter_title(selection: Optional[str]) -> str:
+        if not selection:
+            return ""
+        return " — " + selection.lower()
+
+    def render_age_pyramid_chart(pyramid_where: str, selection: Optional[str] = None) -> None:
+        if not (age and sex):
+            return
+        pyr = query_age_dist(table, age, pyramid_where, sex_sql=sex)
+        if pyr.empty:
+            st.info("Sem dados suficientes de idade e sexo para gerar a pirâmide etária com os filtros atuais.")
+            return
+        pyr = pyr.sort_values("faixa_ini").reset_index(drop=True)
+        pyr["faixa"] = pyr["faixa_ini"].astype(int).astype(str) + "–" + (pyr["faixa_ini"].astype(int) + 4).astype(str)
+        pyr["valor"] = np.where(pyr["sexo"].eq("Masculino"), -pyr["n"], pyr["n"])
+        faixa_order_pyr = pyr.sort_values("faixa_ini")["faixa"].drop_duplicates().tolist()
+        fig_pyr = px.bar(
+            pyr,
+            x="valor",
+            y="faixa",
+            color="sexo",
+            orientation="h",
+            title="Pirâmide etária por sexo" + sinan_case_filter_title(selection),
+            labels={"valor": "Registros", "faixa": "Faixa etária"},
+            category_orders={"faixa": faixa_order_pyr},
+        )
+        fig_pyr.update_layout(barmode="relative", yaxis={"categoryorder": "array", "categoryarray": faixa_order_pyr})
+        render_plotly_chart(fig_pyr)
+        render_interval_total(pyr, value_col="n", by_col="sexo")
+        suffix = sinan_case_filter_suffix(selection)
+        filename = f"{source.lower()}_piramide_{suffix}.csv" if suffix else f"{source.lower()}_piramide.csv"
+        download_button(pyr, filename)
+
     if not age:
         st.warning("Configure idade para gerar os gráficos etários. As categorias territoriais ainda podem ser exibidas abaixo.")
     else:
-        age_df = query_age_dist(table, age, graph_where)
+        age_selection = None
+        age_where = graph_where
+        if source == "SINAN" and classi_code:
+            age_selection = st.selectbox(
+                "Grupo de casos para a distribuição por faixa etária",
+                sinan_case_filter_options,
+                key="sinan_age_distribution_case_filter",
+            )
+            age_where = sinan_case_filter_where(age_selection)
+        age_df = query_age_dist(table, age, age_where)
         if not age_df.empty:
             age_df = age_df.sort_values("faixa_ini").reset_index(drop=True)
             age_df["faixa"] = age_df["faixa_ini"].astype(int).astype(str) + "–" + (age_df["faixa_ini"].astype(int) + 4).astype(str)
@@ -6595,42 +6772,27 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
             age_df["pct"] = np.where(age_df["denominador"].gt(0), (age_df["n"] / age_df["denominador"] * 100).round(2), np.nan)
             age_df = add_text(age_df)
             faixa_order = age_df["faixa"].tolist()
-            fig = px.bar(
+            fig_age = px.bar(
                 age_df,
                 x="faixa",
                 y="n",
                 text="texto",
-                title="Distribuição de casos conforme faixa etária",
+                title="Distribuição de casos conforme faixa etária" + sinan_case_filter_title(age_selection),
                 labels={"faixa": "Faixa etária", "n": "Registros", "pct": "%", "denominador": "Denominador"},
                 hover_data={"texto": False, "pct": ":.2f", "denominador": True},
                 category_orders={"faixa": faixa_order},
             )
-            fig.update_traces(textposition="outside", cliponaxis=False)
-            render_plotly_chart(fig)
+            fig_age.update_traces(textposition="outside", cliponaxis=False)
+            render_plotly_chart(fig_age)
             render_interval_total(age_df, value_col="n")
-            download_button(age_df, f"{source.lower()}_idade.csv")
-        sex = exprs.get("sex")
-        if sex:
-            pyr = query_age_dist(table, age, graph_where, sex_sql=sex)
-            if not pyr.empty:
-                pyr = pyr.sort_values("faixa_ini").reset_index(drop=True)
-                pyr["faixa"] = pyr["faixa_ini"].astype(int).astype(str) + "–" + (pyr["faixa_ini"].astype(int) + 4).astype(str)
-                pyr["valor"] = np.where(pyr["sexo"].eq("Masculino"), -pyr["n"], pyr["n"])
-                faixa_order_pyr = pyr.sort_values("faixa_ini")["faixa"].drop_duplicates().tolist()
-                fig = px.bar(
-                    pyr,
-                    x="valor",
-                    y="faixa",
-                    color="sexo",
-                    orientation="h",
-                    title="Pirâmide etária por sexo",
-                    labels={"valor": "Registros", "faixa": "Faixa etária"},
-                    category_orders={"faixa": faixa_order_pyr},
-                )
-                fig.update_layout(barmode="relative", yaxis={"categoryorder": "array", "categoryarray": faixa_order_pyr})
-                render_plotly_chart(fig)
-                render_interval_total(pyr, value_col="n", by_col="sexo")
-                download_button(pyr, f"{source.lower()}_piramide.csv")
+            suffix = sinan_case_filter_suffix(age_selection)
+            filename = f"{source.lower()}_idade_{suffix}.csv" if suffix else f"{source.lower()}_idade.csv"
+            download_button(age_df, filename)
+
+        # Para o SINAN com CLASSI_FIN, a pirâmide é renderizada logo abaixo do gráfico de sexo,
+        # conforme solicitado. Nas demais bases, mantém-se a posição original junto dos gráficos etários.
+        if sex and not (source == "SINAN" and classi_code):
+            render_age_pyramid_chart(graph_where, None)
 
 
     education = exprs.get("education")
@@ -6771,6 +6933,15 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
             out_export = out_df.drop(columns=["ordem_categoria", "ordem_grupo"], errors="ignore")
             copyable_dataframe(out_export, width="stretch", hide_index=True)
             download_button(out_export, f"sinan_{safe_filename(label)}_confirmados_descartados_sem_classificacao.csv")
+
+            if label == "Sexo" and age and sex:
+                st.markdown("### Pirâmide etária por sexo")
+                pyramid_selection = st.selectbox(
+                    "Grupo de casos para a pirâmide etária",
+                    sinan_case_filter_options,
+                    key="sinan_age_pyramid_case_filter",
+                )
+                render_age_pyramid_chart(sinan_case_filter_where(pyramid_selection), pyramid_selection)
 
     cols = []
     if not classi_code:
