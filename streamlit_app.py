@@ -55,7 +55,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-06-21-v32-ajustes-sinan-demografia-cid10"
+APP_VERSION = "2026-06-21-v33-titulos-sinan-cid10-performance"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos
@@ -381,22 +381,106 @@ def enforce_death_related_red(fig: go.Figure) -> None:
                 pass
 
 
+TITLE_DATABASE_PREFIX_RE = re.compile(r"^\s*(SINAN|SIM|CIHA)\s*[:\-–—]\s*", flags=re.IGNORECASE)
+TITLE_SOURCE_PREFIX_RE = re.compile(r"^\s*\{source\}\s*[:\-–—]\s*", flags=re.IGNORECASE)
+TITLE_MULTI_SPACE_RE = re.compile(r"\s+")
+
+TITLE_EXACT_FIXES = {
+    "total de notificações, confirmados, descartados e sem classificação / ignorados": "Total de notificações, confirmados, descartados e sem classificação/ignorados",
+    "distribuição por escolaridade": "Distribuição por escolaridade",
+    "escolaridade — casos confirmados e descartados": "Escolaridade — casos confirmados e descartados",
+    "ocorrência de hospitalização por definição de caso": "Ocorrência de hospitalização por definição de caso",
+    "prevalência acumulada dos sinais e sintomas entre confirmados": "Prevalência acumulada dos sinais e sintomas entre confirmados",
+    "número de comunicantes por realização de quimioprofilaxia": "Número de comunicantes por realização de quimioprofilaxia",
+    "vacinação informada como 'sim' por classificação final do caso": "Vacinação informada como “Sim” por classificação final do caso",
+    "critério de confirmação entre casos confirmados": "Critério de confirmação entre casos confirmados",
+    "classificação etiológica convertida para cid-10": "Classificação etiológica convertida para CID-10",
+    "conversão para adequação ao cid-10 de meningite / encefalite": "Conversão para adequação ao CID-10 de meningite/encefalite",
+    "registros classificados como g01 ou g02": "Registros classificados como G01 ou G02",
+    "cid-10 dos registros com morte administrativa": "CID-10 dos registros com morte administrativa",
+    "atendimentos e mortes administrativas": "Atendimentos e mortes administrativas",
+    "atendimentos por modalidade hospitalar e ambulatorial": "Atendimentos por modalidade hospitalar e ambulatorial",
+    "dias de permanência": "Dias de permanência",
+    "principais nu_notific com sobreposição": "Principais NU_NOTIFIC com sobreposição",
+    "média dos parâmetros do exame quimiocitológico do líquor (lcr)": "Média dos parâmetros do exame quimiocitológico do líquor (LCR)",
+}
+
+TITLE_TOKEN_FIXES = (
+    (re.compile(r"\bcid\s*-\s*10\b", flags=re.IGNORECASE), "CID-10"),
+    (re.compile(r"\bsinan\b", flags=re.IGNORECASE), "SINAN"),
+    (re.compile(r"\bsim\b", flags=re.IGNORECASE), "SIM"),
+    (re.compile(r"\bciha\b", flags=re.IGNORECASE), "CIHA"),
+    (re.compile(r"\blcr\b", flags=re.IGNORECASE), "LCR"),
+    (re.compile(r"\bnu_notific\b", flags=re.IGNORECASE), "NU_NOTIFIC"),
+    (re.compile(r"\bclassi_fin\b", flags=re.IGNORECASE), "CLASSI_FIN"),
+    (re.compile(r"\bcon_diages\b", flags=re.IGNORECASE), "CON_DIAGES"),
+    (re.compile(r"\bg0([0-9])\b", flags=re.IGNORECASE), lambda m: f"G0{m.group(1)}"),
+    (re.compile(r"\ba([0-9]{2})\.([0-9])\b", flags=re.IGNORECASE), lambda m: f"A{m.group(1)}.{m.group(2)}"),
+)
+
+
+def clean_chart_title_text(title_text: object) -> str:
+    """Padroniza títulos de gráficos sem mexer em rótulos técnicos dos eixos/séries."""
+    if title_text is None:
+        return ""
+    cleaned = str(title_text).replace("\xa0", " ").strip()
+    if not cleaned:
+        return ""
+    cleaned = re.sub(r"<br\s*/?>", " — ", cleaned, flags=re.IGNORECASE)
+    cleaned = TITLE_DATABASE_PREFIX_RE.sub("", cleaned)
+    cleaned = TITLE_SOURCE_PREFIX_RE.sub("", cleaned)
+    cleaned = cleaned.replace(" / ", "/")
+    cleaned = re.sub(r"\s*[:;]\s*", lambda m: ": " if m.group(0).strip().startswith(":") else "; ", cleaned)
+    cleaned = re.sub(r"\s*[–—-]\s*", " — ", cleaned)
+    cleaned = TITLE_MULTI_SPACE_RE.sub(" ", cleaned).strip(" —:-")
+
+    # Remove duplicidade literal, comum quando seção e gráfico recebem o mesmo texto.
+    repeated = re.match(r"^(.+?)\s+—\s+\1$", cleaned, flags=re.IGNORECASE)
+    if repeated:
+        cleaned = repeated.group(1)
+
+    exact = TITLE_EXACT_FIXES.get(cleaned.lower())
+    if exact:
+        cleaned = exact
+    elif cleaned:
+        cleaned = cleaned[0].upper() + cleaned[1:]
+
+    for pattern, replacement in TITLE_TOKEN_FIXES:
+        cleaned = pattern.sub(replacement, cleaned)
+    cleaned = TITLE_MULTI_SPACE_RE.sub(" ", cleaned).strip()
+    return cleaned
+
+
+def _clean_figure_annotations(fig: go.Figure) -> None:
+    """Limpa títulos de subplots/annotations quando existirem."""
+    try:
+        annotations = list(fig.layout.annotations or [])
+    except Exception:
+        return
+    for annotation in annotations:
+        try:
+            if annotation.text:
+                annotation.text = clean_chart_title_text(annotation.text)
+        except Exception:
+            pass
+
+
 def _strip_database_prefix_from_title(fig: go.Figure) -> None:
-    """Remove prefixos de base nos títulos dos gráficos, como SINAN:, SIM: ou CIHA:."""
+    """Remove prefixos de base, corrige capitalização e normaliza espaçamento dos títulos."""
     if fig is None:
         return
     try:
         title_text = fig.layout.title.text
     except Exception:
-        return
-    if not title_text:
-        return
-    cleaned = re.sub(r"^\s*(SINAN|SIM|CIHA)\s*[:\-–—]\s*", "", str(title_text), flags=re.IGNORECASE)
-    if cleaned != title_text:
-        try:
-            fig.update_layout(title_text=cleaned)
-        except Exception:
-            pass
+        title_text = None
+    if title_text:
+        cleaned = clean_chart_title_text(title_text)
+        if cleaned != title_text:
+            try:
+                fig.update_layout(title_text=cleaned)
+            except Exception:
+                pass
+    _clean_figure_annotations(fig)
 
 
 def style_plotly_figure(fig: go.Figure) -> go.Figure:
@@ -3850,11 +3934,10 @@ def summarize_cid10_adequacy_plot(df: pd.DataFrame) -> pd.DataFrame:
 def query_sinan_cid10_conversion(table: LoadedTable, exprs: Dict[str, Optional[str]], where_sql: str) -> pd.DataFrame:
     """Converte CON_DIAGES do SINAN para famílias CID-10 com consulta otimizada.
 
-    A versão anterior embutia as mesmas expressões CASE/regex diversas vezes no SELECT e
-    no GROUP BY. Em bases grandes, especialmente com campos auxiliares concatenados, isso
-    fazia o DuckDB recalcular regexp_matches e UPPER/concatenação repetidamente. Esta versão
-    materializa con_code, CLA_ME_BAC e texto auxiliar uma única vez em CTEs pequenas e só
-    depois agrega o resultado final usado no gráfico.
+    Gargalo corrigido: a consulta anterior montava texto auxiliar e executava regex em todos
+    os registros confirmados, mesmo quando CON_DIAGES não era 05. Aqui o texto auxiliar só
+    é avaliado para o subconjunto que realmente precisa de refinamento G01/G00. Além disso,
+    a maior parte dos testes textuais usa contains(), que é mais barato que regexp_matches().
     """
     con_code = exprs.get("con_code")
     if not con_code:
@@ -3867,10 +3950,23 @@ def query_sinan_cid10_conversion(table: LoadedTable, exprs: Dict[str, Optional[s
     ass_label = exprs.get("cla_me_ass_label") or "NULL"
     eti_label = exprs.get("cla_me_eti_label") or "NULL"
     aux_text = exprs.get("sinan_aux_text")
-    aux_select = f"{aux_text} AS aux_text" if aux_text else "NULL AS aux_text"
     g01_codes_sql = ", ".join(qstr(code) for code in sorted(SINAN_CLA_ME_BAC_G01_CODES))
     mapped_codes_sql = ", ".join(qstr(code) for code in SINAN_CID10_FROM_CON_DIAGES)
-    g01_detail_pattern_sql = qstr(SINAN_G01_DETAIL_REGEX)
+
+    if aux_text:
+        # Restrição crítica de desempenho: não concatenar/normalizar campos textuais para
+        # todas as linhas. A conversão textual só é necessária para CON_DIAGES=05 quando
+        # CLA_ME_BAC não resolve o refinamento G01.
+        aux_text_select = f"""
+                   CASE
+                       WHEN {con_code} = '05'
+                            AND (({bac_code}) IS NULL OR ({bac_code}) NOT IN ({g01_codes_sql}))
+                       THEN COALESCE({aux_text}, '')
+                       ELSE ''
+                   END AS aux_text_g01
+        """
+    else:
+        aux_text_select = "'' AS aux_text_g01"
 
     sql = f"""
         WITH base AS (
@@ -3881,18 +3977,35 @@ def query_sinan_cid10_conversion(table: LoadedTable, exprs: Dict[str, Optional[s
                    {bac_label} AS bacteria_sinan,
                    {ass_label} AS agente_asseptica_sinan,
                    {eti_label} AS outra_etiologia_sinan,
-                   {aux_select}
+                   {aux_text_select}
             FROM {table.ref_sql}
             {where_sql}
+        ), flags AS (
+            SELECT *,
+                   contains(aux_text_g01, 'SALMONEL') AS txt_salmonel,
+                   contains(aux_text_g01, 'LISTERI') AS txt_listeri,
+                   (contains(aux_text_g01, 'NEUROSSÍFIL') OR contains(aux_text_g01, 'NEUROSSIFIL')
+                    OR contains(aux_text_g01, 'NEUROSYPH') OR contains(aux_text_g01, 'SÍFIL')
+                    OR contains(aux_text_g01, 'SIFIL') OR contains(aux_text_g01, 'SYPHIL')
+                    OR contains(aux_text_g01, 'TREPONEMA')) AS txt_sifilis,
+                   contains(aux_text_g01, 'LEPTOSPI') AS txt_leptospi,
+                   (contains(aux_text_g01, 'CARBÚNCULO') OR contains(aux_text_g01, 'CARBUNCULO')
+                    OR contains(aux_text_g01, 'ANTRAZ') OR contains(aux_text_g01, 'ANTHRAX')) AS txt_antraz,
+                   (contains(aux_text_g01, 'LYME') OR contains(aux_text_g01, 'BORREL')) AS txt_lyme,
+                   (contains(aux_text_g01, 'TIFÓIDE') OR contains(aux_text_g01, 'TIFOIDE')
+                    OR contains(aux_text_g01, 'TYPHOID')) AS txt_tifoide,
+                   (contains(aux_text_g01, 'GONOCOC') OR contains(aux_text_g01, 'GONOCOCO')) AS txt_gonococica
+            FROM prepared
         ), tagged AS (
             SELECT *,
                    CASE
                        WHEN con_code <> '05' OR con_code IS NULL THEN FALSE
                        WHEN bacteria_code IN ({g01_codes_sql}) THEN TRUE
-                       WHEN regexp_matches(COALESCE(aux_text, ''), {g01_detail_pattern_sql}) THEN TRUE
+                       WHEN txt_salmonel OR txt_listeri OR txt_sifilis OR txt_leptospi
+                            OR txt_antraz OR txt_lyme OR txt_tifoide OR txt_gonococica THEN TRUE
                        ELSE FALSE
                    END AS g01_match
-            FROM base
+            FROM flags
         ), converted AS (
             SELECT con_code,
                    conclusao_diagnostica,
@@ -3917,7 +4030,7 @@ def query_sinan_cid10_conversion(table: LoadedTable, exprs: Dict[str, Optional[s
                        WHEN con_code = '04' THEN 'A17.0 — meningite tuberculosa'
                        WHEN con_code = '05' AND g01_match THEN 'G01 — meningite bacteriana em doença classificada em outra parte'
                        WHEN con_code = '05' THEN 'G00 — meningite bacteriana não classificada em outra parte'
-                       WHEN con_code = '06' THEN 'G03 — meningite por outras causas / não especificada'
+                       WHEN con_code = '06' THEN 'G03 — meningite por outras causas/não especificada'
                        WHEN con_code = '07' THEN 'A87 — meningite viral'
                        WHEN con_code = '08' THEN 'G02 — meningite em outras doenças infecciosas/parasitárias'
                        WHEN con_code IN ('09', '10') THEN 'G00 — meningite bacteriana não classificada em outra parte'
@@ -3941,14 +4054,14 @@ def query_sinan_cid10_conversion(table: LoadedTable, exprs: Dict[str, Optional[s
                    CASE WHEN con_code IN ({mapped_codes_sql}) THEN 'Sim' ELSE 'Não' END AS incluido_comparacao,
                    CASE
                        WHEN g01_match = FALSE THEN NULL
-                       WHEN bacteria_code = '11' OR regexp_matches(COALESCE(aux_text, ''), 'SALMONEL') THEN 'Salmonella sp / salmonelose invasiva'
-                       WHEN bacteria_code = '21' OR regexp_matches(COALESCE(aux_text, ''), 'LISTERI') THEN 'Listeriose / Listeria monocytogenes'
-                       WHEN bacteria_code = '45' OR regexp_matches(COALESCE(aux_text, ''), 'NEUROSS[ÍI]FIL|NEUROSYPH|S[ÍI]FIL|SYPHIL|TREPONEMA') THEN 'Sífilis / neurossífilis'
-                       WHEN bacteria_code = '49' OR regexp_matches(COALESCE(aux_text, ''), 'LEPTOSPI') THEN 'Leptospirose'
-                       WHEN regexp_matches(COALESCE(aux_text, ''), 'CARB[UÚ]NCULO|ANTRAZ|ANTHRAX') THEN 'Carbúnculo / antraz'
-                       WHEN regexp_matches(COALESCE(aux_text, ''), 'LYME|BORREL') THEN 'Doença de Lyme / borreliose'
-                       WHEN regexp_matches(COALESCE(aux_text, ''), 'TIF[OÓ]IDE|TYPHOID') THEN 'Febre tifóide'
-                       WHEN regexp_matches(COALESCE(aux_text, ''), 'GONOCOC|GONOCOCO') THEN 'Infecção gonocócica'
+                       WHEN bacteria_code = '11' OR txt_salmonel THEN 'Salmonella sp / salmonelose invasiva'
+                       WHEN bacteria_code = '21' OR txt_listeri THEN 'Listeriose / Listeria monocytogenes'
+                       WHEN bacteria_code = '45' OR txt_sifilis THEN 'Sífilis / neurossífilis'
+                       WHEN bacteria_code = '49' OR txt_leptospi THEN 'Leptospirose'
+                       WHEN txt_antraz THEN 'Carbúnculo / antraz'
+                       WHEN txt_lyme THEN 'Doença de Lyme / borreliose'
+                       WHEN txt_tifoide THEN 'Febre tifóide'
+                       WHEN txt_gonococica THEN 'Infecção gonocócica'
                        ELSE 'Doença bacteriana de base provável não especificada'
                    END AS doenca_base_g01_provavel
             FROM tagged
@@ -3987,7 +4100,6 @@ def query_sinan_cid10_conversion(table: LoadedTable, exprs: Dict[str, Optional[s
                  n DESC, cid10_grupo
     """
     return run_query(table, sql)
-
 
 
 def query_sinan_g01_base_disease(table: LoadedTable, exprs: Dict[str, Optional[str]], where_sql: str) -> pd.DataFrame:
@@ -5472,7 +5584,7 @@ def render_temporal_tab(table: LoadedTable, source: str, graph_where: str, exprs
                 hovertemplate="Ano %{y}<br>Mês %{x}<br>Registros %{z}<extra></extra>",
             )
         )
-        fig.update_layout(title="Sazonalidade: ano × mês", xaxis_title="Mês", yaxis_title="Ano")
+        fig.update_layout(title="Sazonalidade — ano × mês", xaxis_title="Mês", yaxis_title="Ano")
         render_plotly_chart(fig)
         render_interval_total(heat, value_col="n")
         download_button(heat, f"{source.lower()}_heatmap_ano_mes.csv", "Baixar dados do heatmap")
@@ -5552,7 +5664,7 @@ def render_sinan_lcr_indicators(table: LoadedTable, exprs: Dict[str, Optional[st
             x="faixa",
             y="n",
             text="texto",
-            title=f"SINAN: distribuição de {titulo}",
+            title=f"Distribuição de {titulo}",
             labels={"faixa": titulo, "n": "Registros", "pct": "%"},
             hover_data={"texto": False, "pct": ":.2f", "denominador": True, "faixa_inicio": ":.2f", "faixa_fim": ":.2f"},
         )
@@ -5573,7 +5685,7 @@ def render_sinan_lcr_indicators(table: LoadedTable, exprs: Dict[str, Optional[st
             x="parametro",
             y="media",
             text="texto",
-            title="SINAN: média dos parâmetros do exame quimiocitológico do líquor (LCR)",
+            title="Média dos parâmetros do exame quimiocitológico do líquor (LCR)",
             labels={
                 "parametro": "Parâmetro",
                 "material_analisado": "Material analisado",
@@ -5740,7 +5852,7 @@ def render_sinan_overlap_tab(table: LoadedTable, base_where: str, exprs: Dict[st
         y="nu_notific",
         orientation="h",
         text="texto",
-        title="SINAN: principais NU_NOTIFIC com sobreposição",
+        title="Principais NU_NOTIFIC com sobreposição",
         labels={"nu_notific": "NU_NOTIFIC", "registros": "Registros"},
     )
     fig.update_layout(yaxis={"categoryorder": "array", "categoryarray": plot_df["nu_notific"].tolist()[::-1]})
@@ -5813,7 +5925,7 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, grap
             color="indicador",
             markers=True,
             text="texto",
-            title="SINAN: total de notificações, confirmados, descartados e sem classificação / ignorados",
+            title="Total de notificações, confirmados, descartados e sem classificação/ignorados",
             labels={"ano": "Ano", "n": "Registros", "indicador": "Indicador", "pct": "% das notificações"},
             hover_data={"texto": False, "pct": ":.2f", "denominador_pct": True},
         )
@@ -5982,7 +6094,7 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, grap
                 color="grupo_caso",
                 barmode="group",
                 text="texto",
-                title="SINAN: ocorrência de hospitalização por definição de caso",
+                title="Ocorrência de hospitalização por definição de caso",
                 labels={"ano": "Ano", "pct": "% no grupo", "grupo_caso": "Grupo", "n": "Registros", "denominador": "Denominador"},
                 hover_data={"texto": False, "n": True, "denominador": True},
                 category_orders={"grupo_caso": grupo_hosp_order},
@@ -6016,7 +6128,7 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, grap
                     y="sintoma",
                     orientation="h",
                     text="texto",
-                    title="SINAN: prevalência acumulada dos sinais e sintomas entre confirmados",
+                    title="Prevalência acumulada dos sinais e sintomas entre confirmados",
                     labels={"pct_sintoma_confirmados": "% dos confirmados", "sintoma": "Sinal/sintoma"},
                     hover_data={"texto": False, "sintoma_sim": True, "confirmados": True, "sintoma_nao": True, "sintoma_ignorado": True},
                 )
@@ -6039,7 +6151,7 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, grap
                     y="pct_sintoma_confirmados",
                     markers=True,
                     text="texto",
-                    title=f"SINAN: prevalência anual de {sintoma_sel} entre casos confirmados",
+                    title=f"Prevalência anual de {sintoma_sel} entre casos confirmados",
                     labels={"ano": "Ano", "pct_sintoma_confirmados": "% dos confirmados", "sintoma_sim": "Confirmados com sintoma"},
                     hover_data={"texto": False, "sintoma_sim": True, "confirmados": True, "sintoma_nao": True, "sintoma_ignorado": True},
                 )
@@ -6054,7 +6166,7 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, grap
 
         comunicantes = query_sinan_communicants_prophylaxis(table, exprs, base_where, communicants_col, prophylaxis_col)
         if not comunicantes.empty:
-            st.markdown("**SINAN: número de comunicantes por realização de quimioprofilaxia**")
+            st.markdown("**Número de comunicantes por realização de quimioprofilaxia**")
             st.caption("Segundo a estrutura do dicionário de dados do SINAN para meningite, `MED_NUCOMU` registra o número de comunicantes identificados e `MED_QUIMIO` informa se foi realizada quimioprofilaxia, codificada como Sim, Não ou Ignorado. O gráfico cruza o total de comunicantes registrados por ano com a situação de realização da quimioprofilaxia e inclui a série total de comunicantes.")
             comunicantes = comunicantes.copy()
             comunicantes["serie"] = comunicantes["quimioprofilaxia"].astype(str)
@@ -6083,7 +6195,7 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, grap
                 color="serie",
                 markers=True,
                 text="texto_comunicantes",
-                title="SINAN: número de comunicantes por realização de quimioprofilaxia",
+                title="Número de comunicantes por realização de quimioprofilaxia",
                 labels={"ano": "Ano", "valor": "Comunicantes", "serie": "Quimioprofilaxia / total"},
                 hover_data={"texto_comunicantes": False, "registros": True, "registros_com_comunicantes": True, "media_comunicantes": True, "pct_comunicantes_ano": ":.2f"},
             )
@@ -6108,7 +6220,7 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, grap
                 color="grupo_classificacao",
                 barmode="group",
                 text="texto",
-                title="SINAN: vacinação informada como 'Sim' por classificação final do caso",
+                title="Vacinação informada como “Sim” por classificação final do caso",
                 labels={"vacina": "Vacina", "pct_vacinados_sim": "% com vacinação = Sim", "grupo_classificacao": "Classificação", "denominador": "Denominador"},
                 hover_data={"texto": False, "vacinados_sim": True, "vacinados_nao": True, "vacinacao_ignorada": True, "denominador": True},
                 category_orders={"grupo_classificacao": grupo_vacina_order},
@@ -6156,7 +6268,7 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, grap
                 color="definicao",
                 markers=True,
                 text="texto",
-                title="SIM:  Óbitos em que o agravo meningite foi mencionado ou atuou como sua causa básica",
+                title="Óbitos em que o agravo meningite foi mencionado ou atuou como causa básica",
                 labels={
                     "ano": "Ano",
                     "n": "Óbitos",
@@ -6310,7 +6422,7 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, grap
             color="indicador",
             markers=True,
             text="texto",
-            title="CIHA: atendimentos e mortes administrativas",
+            title="Atendimentos e mortes administrativas",
             labels={"ano": "Ano", "n": "Atendimentos/registros", "indicador": "Indicador", "pct": "% dos atendimentos"},
             hover_data={"texto": False, "pct": ":.2f", "denominador": True},
         )
@@ -6329,7 +6441,7 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, grap
                 y="n",
                 color="categoria",
                 text="texto",
-                title="CIHA: atendimentos por modalidade hospitalar e ambulatorial",
+                title="Atendimentos por modalidade hospitalar e ambulatorial",
                 labels={"ano": "Ano", "n": "Atendimentos", "categoria": "Modalidade", "pct": "% no ano"},
                 hover_data={"texto": False, "pct": ":.2f", "total_ano": True},
             )
@@ -6352,7 +6464,7 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, grap
             x="faixa_dias_perm",
             y="n",
             text="texto",
-            title="CIHA: dias de permanência",
+            title="Dias de permanência",
             labels={"faixa_dias_perm": "Dias de permanência", "n": "Atendimentos", "pct": "%"},
             hover_data={"texto": False, "pct": ":.2f", "denominador": True},
         )
@@ -6420,7 +6532,7 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                         y="categoria_grafico",
                         orientation="h",
                         text="texto",
-                        title=f"{source}: Conversão para adequação ao CID-10 de meningite / encefalite",
+                        title="Conversão para adequação ao CID-10 de meningite/encefalite",
                         labels={"categoria_grafico": "CID-10 adequado (prefixo)", "n": "Registros", "pct": "% do total detectado"},
                         hover_data={
                             "texto": False,
@@ -6469,7 +6581,7 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                     y="tipo",
                     orientation="h",
                     text="texto",
-                    title=f"{source}: registros classificados como G01 ou G02",
+                    title="Registros classificados como G01 ou G02",
                     labels={"tipo": "Tipo CID-10", "n": "Registros", "pct": "%"},
                     hover_data={"texto": False, "pct": ":.2f", "denominador": True},
                 )
@@ -6504,7 +6616,7 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                             y="tipo",
                             orientation="h",
                             text="texto",
-                            title="CIHA: CID-10 dos registros com morte administrativa",
+                            title="CID-10 dos registros com morte administrativa",
                             labels={"tipo": "Tipo CID-10", "n": "Óbitos CIHA", "pct": "% dos óbitos"},
                             hover_data={"texto": False, "pct": ":.2f", "cids_encontrados": True, "campos_origem": True},
                         )
@@ -6558,7 +6670,7 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                 y="categoria",
                 orientation="h",
                 text="texto",
-                title="SINAN: critério de confirmação entre casos confirmados",
+                title="Critério de confirmação entre casos confirmados",
                 labels={"categoria": "Critério", "n": "Casos confirmados", "pct": "%"},
                 hover_data={"texto": False, "pct": ":.2f"},
             )
@@ -6646,7 +6758,7 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                 y="cid10_classificacao",
                 orientation="h",
                 text="texto",
-                title="SINAN: classificação etiológica convertida para CID-10",
+                title="Classificação etiológica convertida para CID-10",
                 labels={"cid10_classificacao": "CID-10 convertido", "n": "Confirmados", "pct": "%"},
                 hover_data={"texto": False, "pct": ":.2f", "denominador": True, "grupos_sinan": True, "conclusoes_sinan": True},
             )
@@ -6825,7 +6937,7 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
                     orientation="h",
                     barmode="group",
                     text="texto",
-                    title="SINAN: escolaridade — casos confirmados e descartados",
+                    title="Escolaridade — casos confirmados e descartados",
                     labels={
                         "escolaridade": "Escolaridade",
                         "n": "Registros",
@@ -6861,7 +6973,7 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
                     y="categoria",
                     orientation="h",
                     text="texto",
-                    title="SIM: distribuição por escolaridade",
+                    title="Distribuição por escolaridade",
                     labels={"categoria": "Escolaridade", "n": "Óbitos", "pct": "% do total filtrado", "denominador": "Total filtrado"},
                     hover_data={"texto": False, "pct": ":.2f", "denominador": True},
                     category_orders={"categoria": categoria_order},
@@ -6916,7 +7028,7 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
                 orientation="h",
                 barmode="group",
                 text="texto",
-                title=f"SINAN: {label.lower()} — confirmados, descartados e sem classificação / ignorados",
+                title=f"{label} — confirmados, descartados e sem classificação/ignorados",
                 labels={
                     cat_col: label,
                     "n": "Registros",
@@ -6935,7 +7047,6 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
             download_button(out_export, f"sinan_{safe_filename(label)}_confirmados_descartados_sem_classificacao.csv")
 
             if label == "Sexo" and age and sex:
-                st.markdown("### Pirâmide etária por sexo")
                 pyramid_selection = st.selectbox(
                     "Grupo de casos para a pirâmide etária",
                     sinan_case_filter_options,
