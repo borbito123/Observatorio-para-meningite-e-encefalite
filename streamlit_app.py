@@ -36,6 +36,7 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 
 try:
@@ -3364,6 +3365,103 @@ def query_sinan_education_outcomes(
     return run_query(table, sql)
 
 
+SINAN_OUTCOME_GROUP_ORDER = ["Casos confirmados", "Casos descartados", "Sem classificação / ignorados"]
+
+
+def query_sinan_category_outcomes(
+    table: LoadedTable,
+    category_sql: str,
+    classi_sql: str,
+    where_sql: str,
+    category_col: str = "categoria",
+    default_label: str = "Sem informação/ignorado",
+    top_n: Optional[int] = None,
+) -> pd.DataFrame:
+    """Distribui uma categoria (ex.: sexo, raça/cor) por confirmados, descartados e sem classificação/ignorados.
+
+    'Sem classificação / ignorados' inclui tanto CLASSI_FIN ausente quanto qualquer valor
+    diferente de '1' (confirmado) e '2' (descartado), preservando a mesma variável usada
+    nos demais indicadores do SINAN para esse grupo.
+    """
+    cat_ident = qident(category_col)
+    base_sql = f"""
+        SELECT
+            COALESCE({category_sql}, {qstr(default_label)}) AS {cat_ident},
+            {classi_sql} AS classi
+        FROM {table.ref_sql}
+        {where_sql}
+    """
+    if top_n:
+        categorias_cte = f"""
+            categorias AS (
+                SELECT {cat_ident}, ROW_NUMBER() OVER (ORDER BY COUNT(*) DESC, {cat_ident}) AS ordem_categoria
+                FROM ({base_sql}) base_para_top
+                GROUP BY 1
+                LIMIT {int(top_n)}
+            )
+        """
+    else:
+        categorias_cte = f"""
+            categorias AS (
+                SELECT DISTINCT {cat_ident}, DENSE_RANK() OVER (ORDER BY {cat_ident}) AS ordem_categoria
+                FROM ({base_sql}) base_para_categorias
+            )
+        """
+    group_values = ", ".join(
+        f"({qstr(label)}, {idx})"
+        for idx, label in enumerate(SINAN_OUTCOME_GROUP_ORDER, start=1)
+    )
+    sql = f"""
+        WITH base AS (
+            {base_sql}
+        ), {categorias_cte}, grupos_ref AS (
+            SELECT * FROM (VALUES {group_values}) AS t(grupo, ordem_grupo)
+        ), grid AS (
+            SELECT g.grupo, g.ordem_grupo, c.{cat_ident}, c.ordem_categoria
+            FROM grupos_ref g
+            CROSS JOIN categorias c
+        ), grupos AS (
+            SELECT 'Casos confirmados' AS grupo, {cat_ident}
+            FROM base
+            WHERE classi = '1'
+            UNION ALL
+            SELECT 'Casos descartados' AS grupo, {cat_ident}
+            FROM base
+            WHERE classi = '2'
+            UNION ALL
+            SELECT 'Sem classificação / ignorados' AS grupo, {cat_ident}
+            FROM base
+            WHERE classi IS NULL OR classi NOT IN ('1', '2')
+        ), counts AS (
+            SELECT grupo, {cat_ident}, COUNT(*) AS n
+            FROM grupos
+            GROUP BY 1, 2
+        ), totals AS (
+            SELECT grupo, COUNT(*) AS denominador
+            FROM grupos
+            GROUP BY 1
+        )
+        SELECT
+            grid.grupo,
+            grid.{cat_ident},
+            COALESCE(counts.n, 0) AS n,
+            COALESCE(totals.denominador, 0) AS denominador,
+            CASE WHEN COALESCE(totals.denominador, 0) > 0
+                 THEN ROUND(100.0 * COALESCE(counts.n, 0) / totals.denominador, 2)
+                 ELSE NULL END AS pct,
+            grid.ordem_categoria,
+            grid.ordem_grupo
+        FROM grid
+        LEFT JOIN counts
+          ON counts.grupo = grid.grupo
+         AND counts.{cat_ident} = grid.{cat_ident}
+        LEFT JOIN totals
+          ON totals.grupo = grid.grupo
+        ORDER BY grid.ordem_categoria, grid.ordem_grupo
+    """
+    return run_query(table, sql)
+
+
 def query_education_distribution_all_categories(
     table: LoadedTable,
     source: str,
@@ -5608,39 +5706,65 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, grap
         render_plotly_chart(fig)
         render_interval_total(count_long, value_col="n", by_col="indicador")
 
-        rate_rows = []
-        for _, row in ind.iterrows():
-            notificacoes = row["notificacoes"]
-            rate_specs = [
-                ("Confirmados", row["confirmados"], row.get("pct_confirmacao"), "notificações"),
-                ("Descartados", row["descartados"], row.get("pct_descarte"), "notificações"),
-                ("Sem classificação / ignorados", row["sem_classificacao"], row.get("pct_sem_classificacao"), "notificações"),
-            ]
-            for label, n_abs, pct, denom_label in rate_specs:
-                rate_rows.append({
-                    "ano": row["ano"],
-                    "indicador": label,
-                    "pct": pct,
-                    "n": n_abs,
-                    "denominador": notificacoes,
-                    "denominador_label": denom_label,
-                    "texto": f"{br_pct(pct)} (n={br_int(n_abs)})",
-                })
-        rates_long = pd.DataFrame(rate_rows)
-        fig_rates = px.line(
-            rates_long,
-            x="ano",
-            y="pct",
-            color="indicador",
-            markers=True,
-            text="texto",
-            title="SINAN: taxas de confirmados, descartados e sem classificação / ignorados",
-            labels={"ano": "Ano", "pct": "% das notificações", "indicador": "Indicador", "n": "Valor absoluto"},
-            hover_data={"texto": False, "n": True, "denominador": True, "denominador_label": True},
-        )
-        fig_rates.update_traces(textposition="top center")
-        render_plotly_chart(fig_rates)
-        render_interval_total(rates_long, value_col="n", by_col="indicador", denominator_col="denominador", denominator_label="notificações")
+        if exprs.get("evol_label") and exprs.get("dt") and exprs.get("classi_code"):
+            evol_geral = query_yearly_category(
+                table,
+                exprs["dt"],
+                exprs["evol_label"],
+                append_clause(base_where, f"{exprs['classi_code']} = '1'"),
+            )
+            if not evol_geral.empty:
+                evol_geral = add_text_column(evol_geral)
+                evol_geral_order = ["1 — alta", "2 — óbito por meningite", "3 — óbito por outra causa", "9 — ignorado", "Sem evolução/ignorado"]
+                evol_geral_order = [c for c in evol_geral_order if c in evol_geral["categoria"].unique().tolist()] + [
+                    c for c in evol_geral["categoria"].dropna().unique().tolist() if c not in evol_geral_order
+                ]
+                fig_evol_geral = go.Figure()
+                for idx, categoria in enumerate(evol_geral_order):
+                    df_cat = evol_geral[evol_geral["categoria"].eq(categoria)].copy()
+                    if df_cat.empty:
+                        continue
+                    color = {
+                        "1 — alta": "#2CA02C",
+                        "2 — óbito por meningite": DEATH_RED,
+                        "3 — óbito por outra causa": "#1F77B4",
+                        "9 — ignorado": "#7F7F7F",
+                        "Sem evolução/ignorado": "#7F7F7F",
+                    }.get(str(categoria), APP_COLOR_SEQUENCE[idx % len(APP_COLOR_SEQUENCE)])
+                    fig_evol_geral.add_trace(
+                        go.Scatter(
+                            x=df_cat["ano"],
+                            y=df_cat["n"],
+                            mode="lines+markers+text",
+                            name=str(categoria),
+                            text=df_cat["texto"],
+                            textposition="top center",
+                            line={"color": color},
+                            marker={"color": color},
+                            customdata=np.stack([df_cat["pct"], df_cat["total_ano"]], axis=-1),
+                            hovertemplate=(
+                                "Ano %{x}<br>" + str(categoria) + ": %{y}<br>"
+                                "% no ano: %{customdata[0]:.2f}<br>"
+                                "Total de confirmados no ano: %{customdata[1]}<extra></extra>"
+                            ),
+                        )
+                    )
+                fig_evol_geral.update_layout(
+                    title="Evolução dos casos",
+                    xaxis_title="Ano",
+                    yaxis_title="Casos confirmados",
+                )
+                st.caption(
+                    "Usa o campo Evolução (item 59 da ficha de investigação do SINAN) para todos os casos confirmados, "
+                    "incluindo os registros sem evolução preenchida/ignorada. O gráfico abaixo restringe a mesma análise "
+                    "aos casos com evolução efetivamente conhecida (alta ou óbito)."
+                )
+                disable_death_red(fig_evol_geral)
+                preserve_trace_colors(fig_evol_geral)
+                render_plotly_chart(fig_evol_geral)
+                render_interval_total(evol_geral, value_col="n", by_col="categoria")
+                copyable_dataframe(evol_geral, width="stretch", hide_index=True)
+                download_button(evol_geral, "sinan_evolucao_casos_confirmados.csv")
 
         if exprs.get("evol_label") and exprs.get("dt") and exprs.get("classi_code") and exprs.get("evol_code"):
             evol_confirmados = query_yearly_category(
@@ -5651,7 +5775,13 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, grap
             )
             if not evol_confirmados.empty:
                 evol_confirmados = add_text_column(evol_confirmados)
-                fig_evol_confirmados = go.Figure()
+                fig_evol_confirmados = make_subplots(
+                    rows=2,
+                    cols=1,
+                    shared_xaxes=True,
+                    row_heights=[0.7, 0.3],
+                    vertical_spacing=0.1,
+                )
                 evol_color_map = {
                     "1 — alta": "#2CA02C",
                     "2 — óbito por meningite": DEATH_RED,
@@ -5677,7 +5807,9 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, grap
                                 "% no ano: %{customdata[0]:.2f}<br>"
                                 "Total com evolução conhecida: %{customdata[1]}<extra></extra>"
                             ),
-                        )
+                        ),
+                        row=1,
+                        col=1,
                     )
                 letalidade_df = ind[["ano", "letalidade_confirmados", "obitos_meningite_confirmados", "confirmados"]].copy()
                 letalidade_df = letalidade_df[pd.to_numeric(letalidade_df["confirmados"], errors="coerce").fillna(0).gt(0)]
@@ -5690,23 +5822,29 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, grap
                             mode="lines+markers+text",
                             name=LETHALITY_LABEL,
                             text=letalidade_df["texto_letalidade"],
-                            textposition="bottom center",
+                            textposition="top center",
                             line={"color": "#000000", "dash": "dash"},
                             marker={"color": "#000000"},
-                            yaxis="y2",
                             customdata=np.stack([letalidade_df["obitos_meningite_confirmados"], letalidade_df["confirmados"]], axis=-1),
                             hovertemplate=(
                                 "Ano %{x}<br>Letalidade: %{y:.2f}%<br>"
                                 "Óbitos por meningite: %{customdata[0]}<br>"
                                 "Confirmados: %{customdata[1]}<extra></extra>"
                             ),
-                        )
+                        ),
+                        row=2,
+                        col=1,
                     )
                 fig_evol_confirmados.update_layout(
-                    title="Evolução dos casos Confirmados com evolução conhecida",
-                    xaxis_title="Ano",
-                    yaxis_title="Confirmados com evolução conhecida",
-                    yaxis2={"title": "Letalidade (%)", "overlaying": "y", "side": "right", "ticksuffix": "%"},
+                    title="Evolução dos casos confirmados com evolução conhecida",
+                )
+                fig_evol_confirmados.update_xaxes(title_text="Ano", row=2, col=1)
+                fig_evol_confirmados.update_yaxes(title_text="Confirmados com evolução conhecida", row=1, col=1)
+                fig_evol_confirmados.update_yaxes(title_text="Letalidade (%)", ticksuffix="%", row=2, col=1)
+                st.caption(
+                    "A letalidade (óbitos por meningite / confirmados) é exibida em um painel separado, abaixo, "
+                    "para evitar que sua escala em % seja confundida visualmente com as contagens absolutas de 'alta' acima. "
+                    "O cálculo da letalidade não foi alterado, apenas a forma como o gráfico é organizado."
                 )
                 disable_death_red(fig_evol_confirmados)
                 preserve_trace_colors(fig_evol_confirmados)
@@ -6451,18 +6589,21 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
     else:
         age_df = query_age_dist(table, age, graph_where)
         if not age_df.empty:
+            age_df = age_df.sort_values("faixa_ini").reset_index(drop=True)
             age_df["faixa"] = age_df["faixa_ini"].astype(int).astype(str) + "–" + (age_df["faixa_ini"].astype(int) + 4).astype(str)
             age_df["denominador"] = int(age_df["n"].sum())
             age_df["pct"] = np.where(age_df["denominador"].gt(0), (age_df["n"] / age_df["denominador"] * 100).round(2), np.nan)
             age_df = add_text(age_df)
+            faixa_order = age_df["faixa"].tolist()
             fig = px.bar(
                 age_df,
                 x="faixa",
                 y="n",
                 text="texto",
-                title="Distribuição por faixa etária de 5 anos",
+                title="Distribuição de casos conforme faixa etária",
                 labels={"faixa": "Faixa etária", "n": "Registros", "pct": "%", "denominador": "Denominador"},
                 hover_data={"texto": False, "pct": ":.2f", "denominador": True},
+                category_orders={"faixa": faixa_order},
             )
             fig.update_traces(textposition="outside", cliponaxis=False)
             render_plotly_chart(fig)
@@ -6472,13 +6613,25 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
         if sex:
             pyr = query_age_dist(table, age, graph_where, sex_sql=sex)
             if not pyr.empty:
+                pyr = pyr.sort_values("faixa_ini").reset_index(drop=True)
                 pyr["faixa"] = pyr["faixa_ini"].astype(int).astype(str) + "–" + (pyr["faixa_ini"].astype(int) + 4).astype(str)
                 pyr["valor"] = np.where(pyr["sexo"].eq("Masculino"), -pyr["n"], pyr["n"])
-                fig = px.bar(pyr, x="valor", y="faixa", color="sexo", orientation="h", title="Pirâmide etária por sexo", labels={"valor": "Registros", "faixa": "Faixa etária"})
-                fig.update_layout(barmode="relative")
+                faixa_order_pyr = pyr.sort_values("faixa_ini")["faixa"].drop_duplicates().tolist()
+                fig = px.bar(
+                    pyr,
+                    x="valor",
+                    y="faixa",
+                    color="sexo",
+                    orientation="h",
+                    title="Pirâmide etária por sexo",
+                    labels={"valor": "Registros", "faixa": "Faixa etária"},
+                    category_orders={"faixa": faixa_order_pyr},
+                )
+                fig.update_layout(barmode="relative", yaxis={"categoryorder": "array", "categoryarray": faixa_order_pyr})
                 render_plotly_chart(fig)
                 render_interval_total(pyr, value_col="n", by_col="sexo")
                 download_button(pyr, f"{source.lower()}_piramide.csv")
+
 
     education = exprs.get("education")
     if source == "SINAN":
@@ -6564,11 +6717,67 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
                 download_button(edu_out, "sim_escolaridade.csv")
 
     sex = exprs.get("sex")
+    race = exprs.get("race")
+    classi_code = exprs.get("classi_code") if source == "SINAN" else None
+    outcome_demography_where = base_where if base_where is not None else graph_where
+
+    if classi_code and (sex or race):
+        st.markdown("### Sexo e raça/cor — confirmados, descartados e sem classificação / ignorados")
+        st.caption(
+            "'Sem classificação / ignorados' reúne CLASSI_FIN ausente ou com qualquer valor diferente de "
+            "confirmado (1) e descartado (2) — a mesma variável usada nos demais indicadores do SINAN para esse grupo."
+        )
+        outcome_specs = []
+        if sex:
+            outcome_specs.append(("Sexo", sex, "sexo"))
+        if race:
+            outcome_specs.append(("Raça/cor", race, "raca_cor"))
+        for label, expr, cat_col in outcome_specs:
+            out_df = query_sinan_category_outcomes(
+                table,
+                expr,
+                classi_code,
+                outcome_demography_where,
+                category_col=cat_col,
+            )
+            if out_df.empty or pd.to_numeric(out_df.get("denominador"), errors="coerce").fillna(0).max() <= 0:
+                st.info(f"Sem casos confirmados, descartados ou sem classificação para calcular {label.lower()} com os filtros atuais.")
+                continue
+            out_df = add_text(out_df)
+            categoria_order = out_df.sort_values("ordem_categoria")[cat_col].drop_duplicates().tolist()
+            out_df = out_df.sort_values(["ordem_categoria", "ordem_grupo"]).reset_index(drop=True)
+            fig_outcome = px.bar(
+                out_df,
+                x="n",
+                y=cat_col,
+                color="grupo",
+                orientation="h",
+                barmode="group",
+                text="texto",
+                title=f"SINAN: {label.lower()} — confirmados, descartados e sem classificação / ignorados",
+                labels={
+                    cat_col: label,
+                    "n": "Registros",
+                    "grupo": "Grupo",
+                    "pct": "% no grupo",
+                    "denominador": "Total no grupo",
+                },
+                hover_data={"texto": False, "pct": ":.2f", "denominador": True},
+                category_orders={cat_col: categoria_order, "grupo": SINAN_OUTCOME_GROUP_ORDER},
+            )
+            fig_outcome.update_layout(yaxis={"categoryorder": "array", "categoryarray": categoria_order[::-1]})
+            render_plotly_chart(fig_outcome)
+            render_interval_total(out_df, value_col="n", by_col="grupo")
+            out_export = out_df.drop(columns=["ordem_categoria", "ordem_grupo"], errors="ignore")
+            copyable_dataframe(out_export, width="stretch", hide_index=True)
+            download_button(out_export, f"sinan_{safe_filename(label)}_confirmados_descartados_sem_classificacao.csv")
+
     cols = []
-    if sex:
-        cols.append(("Sexo", sex, False, 25))
-    if exprs.get("race"):
-        cols.append(("Raça/cor", exprs["race"], False, 25))
+    if not classi_code:
+        if sex:
+            cols.append(("Sexo", sex, False, 25))
+        if race:
+            cols.append(("Raça/cor", race, False, 25))
     # O gráfico de município de residência foi removido conforme revisão metodológica.
     if exprs.get("mun_event_label") or exprs.get("mun_event"):
         cols.append(("Município de ocorrência/atendimento/notificação", exprs.get("mun_event_label") or exprs["mun_event"], True, 15))
