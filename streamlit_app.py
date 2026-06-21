@@ -3938,6 +3938,14 @@ def query_sinan_cid10_conversion(table: LoadedTable, exprs: Dict[str, Optional[s
     os registros confirmados, mesmo quando CON_DIAGES não era 05. Aqui o texto auxiliar só
     é avaliado para o subconjunto que realmente precisa de refinamento G01/G00. Além disso,
     a maior parte dos testes textuais usa contains(), que é mais barato que regexp_matches().
+
+    Erro corrigido: a CTE `flags` referenciava `prepared`, uma CTE inexistente (resquício de
+    refatoração), o que disparava duckdb.CatalogException e impedia o gráfico de carregar.
+    A cadeia correta é src -> base -> flags -> tagged -> converted -> agg.
+
+    Otimização adicional: CON_DIAGES e CLA_ME_BAC são normalizados uma única vez na CTE `src`
+    (`_con_code`/`_bac_code`) e reutilizados, evitando reexecutar a limpeza por regex desses
+    códigos várias vezes por linha.
     """
     con_code = exprs.get("con_code")
     if not con_code:
@@ -3956,11 +3964,13 @@ def query_sinan_cid10_conversion(table: LoadedTable, exprs: Dict[str, Optional[s
     if aux_text:
         # Restrição crítica de desempenho: não concatenar/normalizar campos textuais para
         # todas as linhas. A conversão textual só é necessária para CON_DIAGES=05 quando
-        # CLA_ME_BAC não resolve o refinamento G01.
+        # CLA_ME_BAC não resolve o refinamento G01. Os códigos já normalizados (_con_code/
+        # _bac_code, calculados uma única vez na CTE `src`) são reutilizados aqui para evitar
+        # reavaliar a limpeza por regex de CON_DIAGES/CLA_ME_BAC em cada linha.
         aux_text_select = f"""
                    CASE
-                       WHEN {con_code} = '05'
-                            AND (({bac_code}) IS NULL OR ({bac_code}) NOT IN ({g01_codes_sql}))
+                       WHEN _con_code = '05'
+                            AND (_bac_code IS NULL OR _bac_code NOT IN ({g01_codes_sql}))
                        THEN COALESCE({aux_text}, '')
                        ELSE ''
                    END AS aux_text_g01
@@ -3969,17 +3979,22 @@ def query_sinan_cid10_conversion(table: LoadedTable, exprs: Dict[str, Optional[s
         aux_text_select = "'' AS aux_text_g01"
 
     sql = f"""
-        WITH base AS (
-            SELECT {con_code} AS con_code,
+        WITH src AS (
+            SELECT *,
+                   {con_code} AS _con_code,
+                   {bac_code} AS _bac_code
+            FROM {table.ref_sql}
+            {where_sql}
+        ), base AS (
+            SELECT _con_code AS con_code,
                    {con_label} AS conclusao_diagnostica,
                    {con_group} AS grupo_etiologico_sinan,
-                   {bac_code} AS bacteria_code,
+                   _bac_code AS bacteria_code,
                    {bac_label} AS bacteria_sinan,
                    {ass_label} AS agente_asseptica_sinan,
                    {eti_label} AS outra_etiologia_sinan,
                    {aux_text_select}
-            FROM {table.ref_sql}
-            {where_sql}
+            FROM src
         ), flags AS (
             SELECT *,
                    contains(aux_text_g01, 'SALMONEL') AS txt_salmonel,
@@ -3995,7 +4010,7 @@ def query_sinan_cid10_conversion(table: LoadedTable, exprs: Dict[str, Optional[s
                    (contains(aux_text_g01, 'TIFÓIDE') OR contains(aux_text_g01, 'TIFOIDE')
                     OR contains(aux_text_g01, 'TYPHOID')) AS txt_tifoide,
                    (contains(aux_text_g01, 'GONOCOC') OR contains(aux_text_g01, 'GONOCOCO')) AS txt_gonococica
-            FROM prepared
+            FROM base
         ), tagged AS (
             SELECT *,
                    CASE
