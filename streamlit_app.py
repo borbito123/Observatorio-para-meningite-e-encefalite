@@ -2,20 +2,26 @@
 """
 Painel epidemiológico para meningite — SINAN, SIM e CIHA
 
-O app aceita upload de DuckDB, upload de Parquet ou bancos hospedados no github em Parquet, calcula indicadores descritivos e separa:
+O app aceita upload de DuckDB, Parquet, CSV ou DBF, além de bancos hospedados no github em
+Parquet, calcula indicadores descritivos e separa:
 - CID-10 bruto do caso/óbito/atendimento;
 - classificação epidemiológica específica do SINAN, especialmente CON_DIAGES;
 - definições operacionais de série: total de notificações, confirmados, descartados e sem classificação/ignorados.
+
+Arquivos CSV e DBF enviados são convertidos internamente para Parquet (mantendo todos os
+campos como texto, para preservar zeros à esquerda em identificadores como NU_NOTIFIC) e passam
+a usar exatamente o mesmo caminho de consulta dos demais formatos.
 
 Executar:
     streamlit run app_meningite_epidemiologico.py
 
 Dependências:
-    pip install streamlit duckdb pandas numpy plotly fastparquet
+    pip install streamlit duckdb pandas numpy plotly fastparquet dbfread
 """
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import html as html_lib
 import json
@@ -43,6 +49,12 @@ try:
     import fastparquet as fp
 except Exception:  # fallback defensivo: o app segue com DuckDB nativo se fastparquet não estiver instalado
     fp = None
+
+try:
+    from dbfread import DBF as _DBFReader
+except Exception:  # fallback defensivo: upload de DBF fica indisponível, mas o resto do app segue funcionando
+    _DBFReader = None
+
 
 
 # =============================================================================
@@ -412,6 +424,7 @@ TITLE_TOKEN_FIXES = (
     (re.compile(r"\bciha\b", flags=re.IGNORECASE), "CIHA"),
     (re.compile(r"\blcr\b", flags=re.IGNORECASE), "LCR"),
     (re.compile(r"\bnu_notific\b", flags=re.IGNORECASE), "NU_NOTIFIC"),
+    (re.compile(r"\bnm_pacient\b", flags=re.IGNORECASE), "NM_PACIENT"),
     (re.compile(r"\bclassi_fin\b", flags=re.IGNORECASE), "CLASSI_FIN"),
     (re.compile(r"\bcon_diages\b", flags=re.IGNORECASE), "CON_DIAGES"),
     (re.compile(r"\bg0([0-9])\b", flags=re.IGNORECASE), lambda m: f"G0{m.group(1)}"),
@@ -2663,6 +2676,221 @@ def _safe_duckdb_memory_limit(value: object) -> str:
     if re.fullmatch(r"(?:[1-9]\d*)(?:\.\d+)?(?:KB|MB|GB|TB)|(?:[1-9]\d?|100)%", text):
         return text
     return DEFAULT_DUCKDB_MEMORY_LIMIT
+
+
+# =============================================================================
+# Conversão de CSV e DBF para Parquet
+# -----------------------------------------------------------------------------
+# CSV e DBF não são consultados diretamente: são convertidos uma única vez (com
+# cache em disco baseado no hash do arquivo enviado) para Parquet e, a partir
+# daí, seguem exatamente o mesmo caminho de carga/consulta já usado pelos
+# Parquets nativos (LoadedTable(kind="parquet", ...)). Isso garante que todas
+# as análises do app — incluindo a sobreposição de NU_NOTIFIC/NM_PACIENT —
+# funcionem de forma idêntica, independentemente do formato de origem.
+#
+# Todas as colunas são lidas/gravadas como texto (VARCHAR). Campos do
+# DATASUS/SINAN como NU_NOTIFIC, CEP, CON_DIAGES etc. podem ter zeros à
+# esquerda (ex.: "0007") que seriam perdidos se o tipo fosse inferido como
+# número; manter tudo como VARCHAR preserva o valor original e evita falsas
+# divergências na verificação de sobreposição.
+# =============================================================================
+
+CSV_ENCODING_CANDIDATES = ("utf-8-sig", "utf-8", "cp1252", "latin1")
+DBF_ENCODING_CANDIDATES = ("cp850", "cp1252", "latin1", "utf-8")
+
+
+def _sniff_csv_delimiter(sample_text: str) -> str:
+    try:
+        dialect = csv.Sniffer().sniff(sample_text, delimiters=";,|\t")
+        return dialect.delimiter
+    except Exception:
+        first_line = sample_text.splitlines()[0] if sample_text else ""
+        counts = {sep: first_line.count(sep) for sep in (";", ",", "|", "\t")}
+        best = max(counts, key=counts.get)
+        return best if counts[best] > 0 else ","
+
+
+def _detect_csv_encoding_and_delimiter(path: str) -> Tuple[str, str]:
+    """Detecta encoding e delimitador lendo apenas uma amostra do início do arquivo."""
+    sample_bytes = Path(path).open("rb").read(65536)
+    for enc in CSV_ENCODING_CANDIDATES:
+        try:
+            sample_text = sample_bytes.decode(enc)
+            delim = _sniff_csv_delimiter(sample_text)
+            return enc, delim
+        except UnicodeDecodeError:
+            continue
+    # último recurso: latin1 nunca falha ao decodificar
+    sample_text = sample_bytes.decode("latin1", errors="replace")
+    return "latin1", _sniff_csv_delimiter(sample_text)
+
+
+def convert_csv_to_parquet(csv_path: str, namespace: str) -> str:
+    """Converte um CSV enviado para Parquet (todas as colunas como VARCHAR), com cache em disco.
+
+    Usa o próprio DuckDB (read_csv) para a leitura, que é robusto a arquivos grandes e detecta
+    cabeçalho automaticamente; encoding e delimitador são detectados antes, por amostragem.
+    """
+    src = Path(csv_path)
+    digest = hashlib.sha1(src.read_bytes()[:1 << 20]).hexdigest()[:16] if src.stat().st_size < (1 << 27) else None
+    if digest is None:
+        # arquivos muito grandes: hash incremental para não carregar tudo em memória
+        h = hashlib.sha1()
+        with src.open("rb") as fobj:
+            while True:
+                chunk = fobj.read(UPLOAD_CHUNK_SIZE)
+                if not chunk:
+                    break
+                h.update(chunk)
+        digest = h.hexdigest()[:16]
+
+    temp_dir = Path(tempfile.gettempdir())
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    clean_name = safe_filename(src.stem)
+    out_path = temp_dir / f"meningite_{namespace}_{clean_name}_{digest}_from_csv.parquet"
+    if out_path.exists():
+        return str(out_path)
+
+    encoding, delimiter = _detect_csv_encoding_and_delimiter(str(src))
+    # O parâmetro encoding do read_csv só existe a partir do DuckDB 1.2.0 e só aceita 'utf-8'
+    # (padrão), 'latin-1' ou 'utf-16'. Para UTF-8 omitimos o parâmetro (funciona em qualquer
+    # versão); para os demais, mapeamos para 'latin-1' (cp1252/latin1 são compatíveis o
+    # suficiente para os caracteres usados em arquivos do DATASUS). Se a versão do DuckDB
+    # disponível não reconhecer o parâmetro, ou o arquivo não for estritamente válido no
+    # encoding informado, o except abaixo aciona o fallback via pandas.
+    encoding_clause = "" if encoding in ("utf-8", "utf-8-sig") else f", encoding={qstr('latin-1')}"
+
+    con = open_duckdb_connection(runtime_settings=duckdb_runtime_settings())
+    try:
+        read_csv_sql = (
+            f"read_csv({qstr(str(src))}, delim={qstr(delimiter)}, header=true, "
+            f"all_varchar=true{encoding_clause}, "
+            "ignore_errors=true, null_padding=true, sample_size=-1)"
+        )
+        con.execute(
+            f"COPY (SELECT * FROM {read_csv_sql}) TO {qstr(str(out_path))} (FORMAT PARQUET)"
+        )
+    except Exception:
+        # fallback: leitura via pandas (mais tolerante a CSVs irregulares e a encodings que o
+        # DuckDB instalado não reconheça), depois grava Parquet via DuckDB
+        try:
+            df = pd.read_csv(
+                str(src),
+                sep=delimiter,
+                encoding=encoding,
+                dtype=str,
+                keep_default_na=False,
+                na_values=[""],
+                engine="python",
+                on_bad_lines="skip",
+            )
+        except UnicodeDecodeError:
+            df = pd.read_csv(
+                str(src),
+                sep=delimiter,
+                encoding=encoding,
+                encoding_errors="replace",
+                dtype=str,
+                keep_default_na=False,
+                na_values=[""],
+                engine="python",
+                on_bad_lines="skip",
+            )
+        con.register("df_csv_fallback", df)
+        con.execute(f"COPY (SELECT * FROM df_csv_fallback) TO {qstr(str(out_path))} (FORMAT PARQUET)")
+        con.unregister("df_csv_fallback")
+    finally:
+        con.close()
+    return str(out_path)
+
+
+def _detect_dbf_encoding(path: str) -> str:
+    for enc in DBF_ENCODING_CANDIDATES:
+        try:
+            table = _DBFReader(path, encoding=enc, char_decode_errors="strict", load=False)
+            # força a leitura de alguns registros para validar o encoding escolhido
+            for i, _ in enumerate(table):
+                if i >= 50:
+                    break
+            return enc
+        except (UnicodeDecodeError, ValueError):
+            continue
+        except Exception:
+            continue
+    return "latin1"
+
+
+def convert_dbf_to_parquet(dbf_path: str, namespace: str) -> str:
+    """Converte um DBF enviado (típico do SINAN/DATASUS) para Parquet, todas as colunas como texto.
+
+    Usa dbfread, lendo registro a registro para não carregar o DBF inteiro em memória de uma vez,
+    e grava em lotes via DuckDB. O encoding (geralmente cp850 em arquivos do DATASUS) é detectado
+    automaticamente entre os candidatos mais comuns.
+    """
+    if _DBFReader is None:
+        raise RuntimeError(
+            "Suporte a DBF requer o pacote 'dbfread' (pip install dbfread), que não está instalado neste ambiente."
+        )
+
+    src = Path(dbf_path)
+    h = hashlib.sha1()
+    with src.open("rb") as fobj:
+        while True:
+            chunk = fobj.read(UPLOAD_CHUNK_SIZE)
+            if not chunk:
+                break
+            h.update(chunk)
+    digest = h.hexdigest()[:16]
+
+    temp_dir = Path(tempfile.gettempdir())
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    clean_name = safe_filename(src.stem)
+    out_path = temp_dir / f"meningite_{namespace}_{clean_name}_{digest}_from_dbf.parquet"
+    if out_path.exists():
+        return str(out_path)
+
+    encoding = _detect_dbf_encoding(str(src))
+    table = _DBFReader(str(src), encoding=encoding, char_decode_errors="replace", load=False)
+    fieldnames = [f.name for f in table.fields if f.name != "DeletionFlag"]
+
+    con = open_duckdb_connection(runtime_settings=duckdb_runtime_settings())
+    try:
+        batch_rows: List[Dict[str, Optional[str]]] = []
+        batch_size = 50000
+        first_batch = True
+        for record in table:
+            row = {}
+            for name in fieldnames:
+                value = record.get(name)
+                if value is None:
+                    row[name] = None
+                elif isinstance(value, bytes):
+                    row[name] = value.decode(encoding, errors="replace").strip()
+                else:
+                    row[name] = str(value).strip()
+            batch_rows.append(row)
+            if len(batch_rows) >= batch_size:
+                batch_df = pd.DataFrame(batch_rows, columns=fieldnames, dtype="object")
+                con.register("dbf_batch", batch_df)
+                if first_batch:
+                    con.execute(f"CREATE TABLE dbf_accum AS SELECT * FROM dbf_batch")
+                    first_batch = False
+                else:
+                    con.execute("INSERT INTO dbf_accum SELECT * FROM dbf_batch")
+                con.unregister("dbf_batch")
+                batch_rows = []
+        if batch_rows or first_batch:
+            batch_df = pd.DataFrame(batch_rows, columns=fieldnames, dtype="object")
+            con.register("dbf_batch", batch_df)
+            if first_batch:
+                con.execute("CREATE TABLE dbf_accum AS SELECT * FROM dbf_batch")
+            else:
+                con.execute("INSERT INTO dbf_accum SELECT * FROM dbf_batch")
+            con.unregister("dbf_batch")
+        con.execute(f"COPY dbf_accum TO {qstr(str(out_path))} (FORMAT PARQUET)")
+    finally:
+        con.close()
+    return str(out_path)
 
 
 def duckdb_runtime_settings() -> Tuple[str, int, str]:
@@ -5200,7 +5428,7 @@ def render_loader(source: str) -> Optional[LoadedTable]:
     st.markdown(f"### {source} — {cfg.title}")
     st.caption(f"Período esperado no arquivo enviado: {cfg.expected_period}")
 
-    load_modes = [GITHUB_HOSTED_PARQUETS_LABEL, "Upload DuckDB", "Upload Parquet"]
+    load_modes = [GITHUB_HOSTED_PARQUETS_LABEL, "Upload DuckDB", "Upload Parquet", "Upload CSV", "Upload DBF"]
     load_mode_key = f"load_mode_{source}"
     if st.session_state.get(load_mode_key) not in (None, *load_modes):
         st.session_state.pop(load_mode_key, None)
@@ -5334,6 +5562,84 @@ def render_loader(source: str) -> Optional[LoadedTable]:
         default_idx = tables.index(cfg.default_table) if cfg.default_table in tables else 0
         table_name = st.selectbox("Tabela", options=tables, index=default_idx, key=f"upload_duckdb_table_{source}")
         return LoadedTable(source=source, kind="duckdb", db_path=path, table_name=table_name, ref_sql=qident(table_name), label=f"upload:{upload.name}:{table_name}")
+
+    if mode == "Upload CSV":
+        st.caption(
+            "Todas as colunas do CSV são lidas como texto, preservando zeros à esquerda em campos como "
+            "NU_NOTIFIC. Encoding (UTF-8/Latin-1/cp1252) e delimitador (`;`, `,`, tab ou `|`) são detectados "
+            "automaticamente a partir do próprio arquivo."
+        )
+        uploads = st.file_uploader(
+            "Envie um ou mais arquivos .csv", type=["csv"], accept_multiple_files=True, key=f"upload_csv_{source}"
+        )
+        if not uploads:
+            st.info("Envie CSV(s) para continuar.")
+            return None
+        max_files = perf_int("perf_max_parquet_files", DEFAULT_MAX_PARQUET_FILES_PER_LOAD)
+        if len(uploads) > max_files:
+            st.error(
+                f"Foram enviados {len(uploads)} CSVs, acima do limite atual de {max_files}. "
+                "Reduza a seleção ou aumente o limite em Desempenho e memória."
+            )
+            return None
+        paths = []
+        try:
+            with st.spinner(f"Convertendo {len(uploads)} CSV(s) para Parquet..."):
+                for up in uploads:
+                    raw_path = materialize_upload(up, f"{source.lower()}_csv_raw")
+                    paths.append(convert_csv_to_parquet(raw_path, f"{source.lower()}_csv"))
+        except Exception as exc:
+            st.error(f"Não consegui converter o(s) CSV(s) enviado(s): {exc}")
+            return None
+        return LoadedTable(
+            source=source,
+            kind="parquet",
+            parquet_paths=paths,
+            ref_sql=parquet_object_name(source, paths),
+            label=f"{len(paths)} CSV(s) enviados (convertidos para Parquet)",
+        )
+
+    if mode == "Upload DBF":
+        st.caption(
+            "Formato típico de exportação do SINAN/DATASUS. Todas as colunas são lidas como texto, preservando "
+            "zeros à esquerda em campos como NU_NOTIFIC. O encoding (geralmente cp850 nos arquivos do DATASUS) "
+            "é detectado automaticamente."
+        )
+        if _DBFReader is None:
+            st.error(
+                "O suporte a DBF requer o pacote `dbfread`, que não está instalado neste ambiente. "
+                "Instale com `pip install dbfread` e reinicie o app, ou converta o DBF para CSV/Parquet antes do upload."
+            )
+            return None
+        uploads = st.file_uploader(
+            "Envie um ou mais arquivos .dbf", type=["dbf"], accept_multiple_files=True, key=f"upload_dbf_{source}"
+        )
+        if not uploads:
+            st.info("Envie DBF(s) para continuar.")
+            return None
+        max_files = perf_int("perf_max_parquet_files", DEFAULT_MAX_PARQUET_FILES_PER_LOAD)
+        if len(uploads) > max_files:
+            st.error(
+                f"Foram enviados {len(uploads)} DBFs, acima do limite atual de {max_files}. "
+                "Reduza a seleção ou aumente o limite em Desempenho e memória."
+            )
+            return None
+        paths = []
+        try:
+            with st.spinner(f"Convertendo {len(uploads)} DBF(s) para Parquet..."):
+                for up in uploads:
+                    raw_path = materialize_upload(up, f"{source.lower()}_dbf_raw")
+                    paths.append(convert_dbf_to_parquet(raw_path, f"{source.lower()}_dbf"))
+        except Exception as exc:
+            st.error(f"Não consegui converter o(s) DBF(s) enviado(s): {exc}")
+            return None
+        return LoadedTable(
+            source=source,
+            kind="parquet",
+            parquet_paths=paths,
+            ref_sql=parquet_object_name(source, paths),
+            label=f"{len(paths)} DBF(s) enviados (convertidos para Parquet)",
+        )
 
     uploads = st.file_uploader("Envie um ou mais Parquets", type=["parquet"], accept_multiple_files=True, key=f"upload_parquet_{source}")
     if not uploads:
@@ -5726,57 +6032,66 @@ def render_sinan_lcr_indicators(table: LoadedTable, exprs: Dict[str, Optional[st
 
 
 
-def query_sinan_nu_notific_overlap_summary(
+def query_sinan_overlap_summary(
     table: LoadedTable,
-    nu_notific_col: str,
+    target_col: str,
     where_sql: str,
 ) -> pd.DataFrame:
-    nu_expr = clean_str_expr(nu_notific_col)
+    """Resumo de sobreposição (valores repetidos) para uma coluna genérica (ex.: NU_NOTIFIC, NM_PACIENT)."""
+    target_expr = clean_str_expr(target_col)
     sql = f"""
         WITH base AS (
-            SELECT {nu_expr} AS nu_notific
+            SELECT {target_expr} AS valor_alvo
             FROM {table.ref_sql}
             {where_sql}
         ), counts AS (
-            SELECT nu_notific, COUNT(*) AS n
+            SELECT valor_alvo, COUNT(*) AS n
             FROM base
-            WHERE nu_notific IS NOT NULL
+            WHERE valor_alvo IS NOT NULL
             GROUP BY 1
         ), totals AS (
             SELECT
                 COUNT(*) AS total_registros,
-                COUNT(*) FILTER (WHERE nu_notific IS NOT NULL) AS registros_com_nu_notific,
-                COUNT(*) FILTER (WHERE nu_notific IS NULL) AS registros_sem_nu_notific
+                COUNT(*) FILTER (WHERE valor_alvo IS NOT NULL) AS registros_com_valor,
+                COUNT(*) FILTER (WHERE valor_alvo IS NULL) AS registros_sem_valor
             FROM base
         )
         SELECT
             totals.total_registros,
-            totals.registros_com_nu_notific,
-            totals.registros_sem_nu_notific,
-            COALESCE((SELECT COUNT(*) FROM counts), 0) AS nu_notific_distintos,
-            COALESCE((SELECT COUNT(*) FROM counts WHERE n > 1), 0) AS nu_notific_com_sobreposicao,
+            totals.registros_com_valor,
+            totals.registros_sem_valor,
+            COALESCE((SELECT COUNT(*) FROM counts), 0) AS valores_distintos,
+            COALESCE((SELECT COUNT(*) FROM counts WHERE n > 1), 0) AS valores_com_sobreposicao,
             COALESCE((SELECT SUM(n) FROM counts WHERE n > 1), 0) AS registros_em_sobreposicao,
-            CASE WHEN totals.registros_com_nu_notific > 0
-                 THEN ROUND(100.0 * COALESCE((SELECT SUM(n) FROM counts WHERE n > 1), 0) / totals.registros_com_nu_notific, 2)
+            CASE WHEN totals.registros_com_valor > 0
+                 THEN ROUND(100.0 * COALESCE((SELECT SUM(n) FROM counts WHERE n > 1), 0) / totals.registros_com_valor, 2)
                  ELSE NULL END AS pct_registros_com_sobreposicao
         FROM totals
     """
     return run_query(table, sql)
 
 
-def query_sinan_nu_notific_overlap_details(
+def query_sinan_overlap_details(
     table: LoadedTable,
-    nu_notific_col: str,
+    target_col: str,
     where_sql: str,
     exprs: Dict[str, Optional[str]],
+    value_label: str = "valor",
+    extra_cols: Optional[List[Tuple[str, str]]] = None,
     limit: int = 200,
 ) -> pd.DataFrame:
-    nu_expr = clean_str_expr(nu_notific_col)
+    """Detalhe de sobreposição: lista cada valor repetido, quantas vezes aparece e colunas de contexto.
+
+    extra_cols: lista de (expressão_sql, nome_da_coluna_resultado) adicionais a exibir junto,
+    útil para mostrar, por exemplo, o NU_NOTIFIC junto da sobreposição de NM_PACIENT (e vice-versa),
+    deixando claro o que está se repetindo na planilha.
+    """
+    target_expr = clean_str_expr(target_col)
     dt_expr = exprs.get("dt")
     classi_expr = exprs.get("classi_label")
     evol_expr = exprs.get("evol_label")
     con_expr = exprs.get("con_group")
-    select_bits = [f"{nu_expr} AS nu_notific"]
+    select_bits = [f"{target_expr} AS valor_alvo"]
     if dt_expr:
         select_bits.append(f"{dt_expr} AS data_referencia")
     if classi_expr:
@@ -5785,6 +6100,12 @@ def query_sinan_nu_notific_overlap_details(
         select_bits.append(f"{evol_expr} AS evolucao")
     if con_expr:
         select_bits.append(f"{con_expr} AS grupo_etiologico")
+    extra_cols = extra_cols or []
+    extra_select_names: List[str] = []
+    for idx, (extra_expr, extra_name) in enumerate(extra_cols):
+        safe_name = extra_name or f"extra_{idx}"
+        select_bits.append(f"{extra_expr} AS {safe_name}")
+        extra_select_names.append(safe_name)
     select_sql = ",\n                ".join(select_bits)
     optional_cols = []
     if dt_expr:
@@ -5798,6 +6119,10 @@ def query_sinan_nu_notific_overlap_details(
         optional_cols.append("STRING_AGG(DISTINCT evolucao, '; ' ORDER BY evolucao) AS evolucoes")
     if con_expr:
         optional_cols.append("STRING_AGG(DISTINCT grupo_etiologico, '; ' ORDER BY grupo_etiologico) AS grupos_etiologicos")
+    for safe_name in extra_select_names:
+        optional_cols.append(
+            f"STRING_AGG(DISTINCT CAST({safe_name} AS VARCHAR), '; ' ORDER BY CAST({safe_name} AS VARCHAR)) AS {safe_name}_observados"
+        )
     optional_sql = (",\n            " + ",\n            ".join(optional_cols)) if optional_cols else ""
     sql = f"""
         WITH base AS (
@@ -5806,46 +6131,57 @@ def query_sinan_nu_notific_overlap_details(
             FROM {table.ref_sql}
             {where_sql}
         ), counts AS (
-            SELECT nu_notific, COUNT(*) AS registros
+            SELECT valor_alvo, COUNT(*) AS registros
             FROM base
-            WHERE nu_notific IS NOT NULL
+            WHERE valor_alvo IS NOT NULL
             GROUP BY 1
             HAVING COUNT(*) > 1
         )
         SELECT
-            base.nu_notific,
+            base.valor_alvo AS "{value_label}",
             counts.registros{optional_sql}
         FROM base
-        JOIN counts USING (nu_notific)
-        GROUP BY base.nu_notific, counts.registros
-        ORDER BY counts.registros DESC, base.nu_notific
+        JOIN counts USING (valor_alvo)
+        GROUP BY base.valor_alvo, counts.registros
+        ORDER BY counts.registros DESC, base.valor_alvo
         LIMIT {int(limit)}
     """
     return run_query(table, sql)
 
 
-def render_sinan_overlap_tab(table: LoadedTable, base_where: str, exprs: Dict[str, Optional[str]]) -> None:
-    st.markdown("### Sobreposição de `NU_NOTIFIC`")
+def render_overlap_block(
+    table: LoadedTable,
+    base_where: str,
+    exprs: Dict[str, Optional[str]],
+    col_name: str,
+    candidates: Sequence[str],
+    value_label: str,
+    display_label: str,
+    file_slug: str,
+    extra_cols: Optional[List[Tuple[str, str]]] = None,
+) -> None:
+    """Renderiza um bloco completo de análise de sobreposição (repetição de valores) para uma coluna do SINAN."""
+    st.markdown(f"### Sobreposição de `{display_label}`")
     st.caption(
-        "Esta análise verifica se o mesmo número de notificação aparece em mais de um registro após os filtros-base. "
-        "Sobreposição de `NU_NOTIFIC` é um sinal operacional de possível duplicidade ou repetição de caso; a revisão final deve considerar datas, classificação e evolução."
+        f"Esta análise verifica se o mesmo valor de `{display_label}` aparece em mais de um registro após os filtros-base. "
+        "Sobreposição é um sinal operacional de possível duplicidade ou repetição de caso; a revisão final deve considerar datas, classificação e evolução."
     )
     schema = schema_df(table)
     columns = schema["coluna"].astype(str).tolist() if "coluna" in schema.columns else []
-    nu_col = choose_candidate(columns, ["NU_NOTIFIC", "NUM_NOTIFIC", "NUNOTIFIC", "NU_NOTIF"])
-    if not nu_col:
-        st.warning("Não localizei o campo `NU_NOTIFIC` no SINAN carregado.")
+    target_col = choose_candidate(columns, candidates)
+    if not target_col:
+        st.warning(f"Não localizei o campo `{display_label}` no SINAN carregado.")
         return
 
-    summary = query_sinan_nu_notific_overlap_summary(table, nu_col, base_where)
+    summary = query_sinan_overlap_summary(table, target_col, base_where)
     if summary.empty:
-        st.info("Sem registros para avaliar `NU_NOTIFIC` com os filtros atuais.")
+        st.info(f"Sem registros para avaliar `{display_label}` com os filtros atuais.")
         return
     row = summary.iloc[0]
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Registros avaliados", f"{int(row['total_registros']):,}".replace(",", "."))
-    c2.metric("NU_NOTIFIC preenchidos", f"{int(row['registros_com_nu_notific']):,}".replace(",", "."))
-    c3.metric("NU_NOTIFIC sobrepostos", f"{int(row['nu_notific_com_sobreposicao']):,}".replace(",", "."))
+    c2.metric(f"{display_label} preenchidos", f"{int(row['registros_com_valor']):,}".replace(",", "."))
+    c3.metric(f"{display_label} sobrepostos (valores distintos)", f"{int(row['valores_com_sobreposicao']):,}".replace(",", "."))
     pct = row.get("pct_registros_com_sobreposicao")
     c4.metric(
         "Registros em sobreposição",
@@ -5853,27 +6189,66 @@ def render_sinan_overlap_tab(table: LoadedTable, base_where: str, exprs: Dict[st
         None if pd.isna(pct) else f"{float(pct):.2f}%".replace(".", ","),
     )
     copyable_dataframe(summary, width="stretch", hide_index=True)
-    download_button(summary, "sinan_sobreposicao_nu_notific_resumo.csv")
+    download_button(summary, f"sinan_sobreposicao_{file_slug}_resumo.csv")
 
-    details = query_sinan_nu_notific_overlap_details(table, nu_col, base_where, exprs, limit=200)
+    details = query_sinan_overlap_details(
+        table, target_col, base_where, exprs,
+        value_label=value_label, extra_cols=extra_cols, limit=200,
+    )
     if details.empty:
-        st.success("Não há `NU_NOTIFIC` repetido no recorte atual.")
+        st.success(f"Não há `{display_label}` repetido no recorte atual.")
         return
+
+    st.markdown(f"**Valores de `{display_label}` que se repetem na planilha e quantas vezes cada um aparece:**")
     plot_df = details.head(30).copy()
     plot_df["texto"] = plot_df["registros"].astype(int).astype(str)
     fig = px.bar(
         plot_df,
         x="registros",
-        y="nu_notific",
+        y=value_label,
         orientation="h",
         text="texto",
-        title="Principais NU_NOTIFIC com sobreposição",
-        labels={"nu_notific": "NU_NOTIFIC", "registros": "Registros"},
+        title=f"Principais {display_label} com sobreposição",
+        labels={value_label: display_label, "registros": "Registros"},
     )
-    fig.update_layout(yaxis={"categoryorder": "array", "categoryarray": plot_df["nu_notific"].tolist()[::-1]})
+    fig.update_layout(yaxis={"categoryorder": "array", "categoryarray": plot_df[value_label].tolist()[::-1]})
     render_plotly_chart(fig)
     copyable_dataframe(details, width="stretch", hide_index=True)
-    download_button(details, "sinan_sobreposicao_nu_notific_detalhes.csv")
+    download_button(details, f"sinan_sobreposicao_{file_slug}_detalhes.csv")
+
+
+def render_sinan_overlap_tab(table: LoadedTable, base_where: str, exprs: Dict[str, Optional[str]]) -> None:
+    st.caption(
+        "Verificação de duplicidade/repetição no SINAN: avalia separadamente se o mesmo `NU_NOTIFIC` (identificador "
+        "operacional da notificação) e o mesmo `NM_PACIENT` (nome do paciente) aparecem em mais de um registro do "
+        "arquivo carregado, após os filtros-base aplicados."
+    )
+    schema = schema_df(table)
+    columns = schema["coluna"].astype(str).tolist() if "coluna" in schema.columns else []
+    nu_col = choose_candidate(columns, ["NU_NOTIFIC", "NUM_NOTIFIC", "NUNOTIFIC", "NU_NOTIF"])
+    nm_col = choose_candidate(columns, ["NM_PACIENT", "NOME_PACIENTE", "NM_PACIENTE", "PACIENTE"])
+
+    render_overlap_block(
+        table, base_where, exprs,
+        col_name="NU_NOTIFIC",
+        candidates=["NU_NOTIFIC", "NUM_NOTIFIC", "NUNOTIFIC", "NU_NOTIF"],
+        value_label="nu_notific",
+        display_label="NU_NOTIFIC",
+        file_slug="nu_notific",
+        extra_cols=[(clean_str_expr(nm_col), "nm_pacient")] if nm_col else None,
+    )
+
+    st.markdown("---")
+
+    render_overlap_block(
+        table, base_where, exprs,
+        col_name="NM_PACIENT",
+        candidates=["NM_PACIENT", "NOME_PACIENTE", "NM_PACIENTE", "PACIENTE"],
+        value_label="nm_pacient",
+        display_label="NM_PACIENT",
+        file_slug="nm_pacient",
+        extra_cols=[(clean_str_expr(nu_col), "nu_notific")] if nu_col else None,
+    )
 
 def render_indicators_tab(table: LoadedTable, source: str, base_where: str, graph_where: str, exprs: Dict[str, Optional[str]]) -> None:
     st.markdown("Os principais indicadores epidemiológicos usam os filtros-base. Os blocos laboratoriais movidos para esta área usam o recorte exploratório atual para preservar a leitura original dos gráficos.")
@@ -7320,7 +7695,7 @@ def render_source(source: str) -> Optional[Dict[str, object]]:
         "Demografia e território",
     ]
     if source == "SINAN":
-        analysis_sections.append("Sobreposição NU_NOTIFIC")
+        analysis_sections.append("Sobreposição NU_NOTIFIC / NM_PACIENT")
     analysis_sections.extend([
         "Campos importantes não preenchidos",
         "Prévia",
@@ -7345,7 +7720,7 @@ def render_source(source: str) -> Optional[Dict[str, object]]:
         render_cid_tab(table, source, graph_where, exprs, base_where=base_where)
     elif selected_section == "Demografia e território":
         render_demography_tab(table, source, graph_where, exprs, base_where=base_where)
-    elif selected_section == "Sobreposição NU_NOTIFIC" and source == "SINAN":
+    elif selected_section == "Sobreposição NU_NOTIFIC / NM_PACIENT" and source == "SINAN":
         render_sinan_overlap_tab(table, base_where, exprs)
     elif selected_section == "Campos importantes não preenchidos":
         render_quality_tab(table, source, base_where, exprs)
