@@ -5,3 +5,4 @@ streamlit>=1.57,<1.58
 pyarrow>=14,<25
 plotly>=5.20,<7.0
 fastparquet>=2024.0
+dbfread>=2.0.7
