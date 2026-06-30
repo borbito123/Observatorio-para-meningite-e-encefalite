@@ -67,7 +67,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-06-30-v40-lcr-sinan-ajustes-distribuicoes-faixas"
+APP_VERSION = "2026-06-30-v42-lcr-duas-analises"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos
@@ -1539,6 +1539,27 @@ SINAN_LAB_ASPECT = {
     "5": "Xantocrômico",
     "6": "Outro",
     "9": "Ignorado",
+}
+
+SINAN_LAB_ASPECT_ORDER = [
+    "Límpido",
+    "Purulento",
+    "Hemorrágico",
+    "Turvo",
+    "Xantocrômico",
+    "Outro",
+    "Ignorado",
+    "Sem informação/ignorado",
+]
+
+# Leitura operacional do aspecto do líquor por etiologia. O objetivo é comparar
+# o aspecto observado no campo 48 da ficha do SINAN com o padrão esperado na
+# literatura, sem transformar essa comparação em critério diagnóstico isolado.
+SINAN_LCR_EXPECTED_ASPECT = {
+    "Viral": {"descricao": "Límpido", "compatible_codes": {"1"}},
+    "Bacteriana": {"descricao": "Turvo ou purulento", "compatible_codes": {"2", "4"}},
+    "Tuberculosa": {"descricao": "Límpido ou turvo", "compatible_codes": {"1", "4"}},
+    "Fúngica": {"descricao": "Frequentemente límpido", "compatible_codes": {"1"}},
 }
 
 # =============================================================================
@@ -5229,6 +5250,357 @@ def query_sinan_confirmed_glucose_vs_expected(
     return run_query(table, sql)
 
 
+
+def query_sinan_confirmed_aspect_vs_expected(
+    table: LoadedTable, exprs: Dict[str, Optional[str]], where_sql: str
+) -> pd.DataFrame:
+    """Compara o aspecto do líquor observado no campo LAB_ASPECT com o aspecto
+    esperado para o grupo etiológico registrado no SINAN.
+
+    A comparação é propositalmente descritiva: aspecto límpido, turvo ou
+    purulento ajuda a contextualizar a etiologia, mas não substitui cultura,
+    PCR, antígeno, bacterioscopia ou a interpretação clínico-laboratorial.
+    """
+    expected = exprs.get("expected_etiology_group")
+    aspect_code = exprs.get("lab_aspect_code")
+    aspect_label = exprs.get("lab_aspect_label")
+    if not expected or not aspect_code or not aspect_label:
+        return pd.DataFrame()
+
+    expected_aspect_case = "CASE " + " ".join(
+        f"WHEN grupo = {qstr(grupo)} THEN {qstr(info['descricao'])}"
+        for grupo, info in SINAN_LCR_EXPECTED_ASPECT.items()
+    ) + " ELSE NULL END"
+
+    compatibility_rows = []
+    for grupo, info in SINAN_LCR_EXPECTED_ASPECT.items():
+        codes = ", ".join(qstr(code) for code in sorted(info["compatible_codes"]))
+        compatibility_rows.append(
+            f"WHEN grupo = {qstr(grupo)} AND aspecto_code IN ({codes}) THEN 'Compatível com o esperado'"
+        )
+    compatibility_case = "CASE " + " ".join(compatibility_rows) + """
+        WHEN aspecto_code IS NULL OR aspecto_code = '9' THEN 'Ignorado/sem informação'
+        WHEN aspecto_code IN ('3', '5', '6') THEN 'Outro aspecto/atípico'
+        ELSE 'Discordante do esperado'
+    END"""
+
+    sql = f"""
+        WITH base AS (
+            SELECT {expected} AS grupo,
+                   {aspect_code} AS aspecto_code,
+                   {aspect_label} AS aspecto_observado
+            FROM {table.ref_sql}
+            {where_sql}
+        ), classified AS (
+            SELECT grupo,
+                   COALESCE(aspecto_observado, 'Sem informação/ignorado') AS aspecto_observado,
+                   {expected_aspect_case} AS aspecto_esperado,
+                   {compatibility_case} AS situacao
+            FROM base
+            WHERE grupo IS NOT NULL
+        ), totals AS (
+            SELECT grupo, COUNT(*) AS total FROM classified GROUP BY 1
+        )
+        SELECT c.grupo AS grupo_etiologico,
+               c.aspecto_esperado,
+               c.situacao,
+               STRING_AGG(DISTINCT c.aspecto_observado, ', ') AS aspectos_observados,
+               COUNT(*) AS n,
+               t.total AS denominador,
+               ROUND(100.0 * COUNT(*) / NULLIF(t.total, 0), 1) AS pct
+        FROM classified c
+        JOIN totals t USING (grupo)
+        GROUP BY c.grupo, c.aspecto_esperado, c.situacao, t.total
+        ORDER BY 1,
+                 CASE c.situacao
+                    WHEN 'Compatível com o esperado' THEN 1
+                    WHEN 'Discordante do esperado' THEN 2
+                    WHEN 'Outro aspecto/atípico' THEN 3
+                    WHEN 'Ignorado/sem informação' THEN 4
+                    ELSE 5
+                 END
+    """
+    return run_query(table, sql)
+
+
+
+def _sinan_lcr_independent_classification_with_sql(
+    table: LoadedTable,
+    exprs: Dict[str, Optional[str]],
+    where_sql: str,
+) -> Optional[str]:
+    """Monta CTE com classificação provável pelo LCR sem usar CON_DIAGES.
+
+    A classificação é deliberadamente exploratória: cada etiologia recebe um
+    ponto quando o parâmetro disponível combina com seu padrão típico
+    (leucócitos, proteína, glicose absoluta, predomínio celular e aspecto).
+    A etiologia com maior pontuação é apresentada como "provável pelo LCR";
+    empate, ausência de dados ou pontuação zero são tratados como
+    indeterminados.
+    """
+    leuco = exprs.get("lab_leuco") or "NULL"
+    prot = exprs.get("lab_prot") or "NULL"
+    glico = exprs.get("lab_glico") or "NULL"
+    predominio = _lcr_predominio_expr(exprs) or "NULL"
+    aspecto_code = exprs.get("lab_aspect_code") or "NULL"
+    expected = exprs.get("expected_etiology_group") or "NULL"
+    classi_code = exprs.get("classi_code")
+    if classi_code:
+        case_status = f"""
+            CASE
+                WHEN {classi_code} = '1' THEN 'Casos confirmados'
+                WHEN {classi_code} = '2' THEN 'Casos descartados'
+                ELSE 'Sem classificação / ignorados'
+            END
+        """
+    else:
+        case_status = qstr("Casos avaliados")
+
+    valid_count = " + ".join([
+        "CASE WHEN leuco IS NOT NULL AND leuco >= 0 THEN 1 ELSE 0 END",
+        "CASE WHEN prot IS NOT NULL AND prot >= 0 THEN 1 ELSE 0 END",
+        "CASE WHEN glico IS NOT NULL AND glico >= 0 THEN 1 ELSE 0 END",
+        "CASE WHEN predominio_observado IS NOT NULL AND predominio_observado <> 'Empate/indefinido' THEN 1 ELSE 0 END",
+        "CASE WHEN aspecto_code IS NOT NULL AND aspecto_code <> '9' THEN 1 ELSE 0 END",
+    ])
+
+    score_selects: List[str] = []
+    for grupo, faixas in SINAN_LCR_ETIOLOGY_RANGES.items():
+        score_parts: List[str] = []
+        leuco_rng = faixas.get("leuco")
+        if leuco_rng:
+            lo, hi = leuco_rng
+            score_parts.append(f"CASE WHEN leuco IS NOT NULL AND leuco >= {lo} AND leuco <= {hi} THEN 1 ELSE 0 END")
+        prot_rng = faixas.get("prot")
+        if prot_rng:
+            lo, hi = prot_rng
+            if grupo == "Fúngica" and float(hi) >= 10000:
+                score_parts.append(f"CASE WHEN prot IS NOT NULL AND prot >= {lo} THEN 1 ELSE 0 END")
+            else:
+                score_parts.append(f"CASE WHEN prot IS NOT NULL AND prot >= {lo} AND prot <= {hi} THEN 1 ELSE 0 END")
+        if "glico_min" in faixas:
+            score_parts.append(f"CASE WHEN glico IS NOT NULL AND glico >= {faixas['glico_min']} THEN 1 ELSE 0 END")
+        elif "glico_max" in faixas:
+            score_parts.append(f"CASE WHEN glico IS NOT NULL AND glico < {faixas['glico_max']} THEN 1 ELSE 0 END")
+        score_parts.append(
+            f"CASE WHEN predominio_observado IS NOT NULL AND predominio_observado = {qstr(faixas['predominio'])} THEN 1 ELSE 0 END"
+        )
+        aspect_info = SINAN_LCR_EXPECTED_ASPECT.get(grupo)
+        if aspect_info:
+            codes = ", ".join(qstr(code) for code in sorted(aspect_info["compatible_codes"]))
+            score_parts.append(f"CASE WHEN aspecto_code IS NOT NULL AND aspecto_code IN ({codes}) THEN 1 ELSE 0 END")
+        score_sql = " + ".join(score_parts) if score_parts else "0"
+        score_selects.append(
+            f"""
+            SELECT row_id, grupo_caso, grupo_sinan, {qstr(grupo)} AS grupo_lcr,
+                   ({score_sql}) AS pontos,
+                   criterios_validos
+            FROM base
+            """
+        )
+
+    scored_union = "\nUNION ALL\n".join(score_selects)
+    groups_list = ", ".join(qstr(grupo) for grupo in SINAN_ETIOLOGY_GROUPS)
+    return f"""
+        WITH base_raw AS (
+            SELECT
+                ROW_NUMBER() OVER () AS row_id,
+                {case_status} AS grupo_caso,
+                {expected} AS grupo_sinan,
+                {leuco} AS leuco,
+                {prot} AS prot,
+                {glico} AS glico,
+                {predominio} AS predominio_observado,
+                {aspecto_code} AS aspecto_code
+            FROM {table.ref_sql}
+            {where_sql}
+        ), base AS (
+            SELECT *, ({valid_count}) AS criterios_validos
+            FROM base_raw
+        ), scored AS (
+            {scored_union}
+        ), ranked AS (
+            SELECT *, MAX(pontos) OVER (PARTITION BY row_id) AS pontos_melhor
+            FROM scored
+        ), best_rows AS (
+            SELECT * FROM ranked WHERE pontos = pontos_melhor
+        ), resolved AS (
+            SELECT
+                row_id,
+                ANY_VALUE(grupo_caso) AS grupo_caso,
+                ANY_VALUE(grupo_sinan) AS grupo_sinan,
+                MAX(criterios_validos) AS criterios_validos,
+                MAX(pontos_melhor) AS pontos_melhor,
+                COUNT(*) AS empates_melhor,
+                MIN(grupo_lcr) AS grupo_lcr_melhor,
+                CASE
+                    WHEN MAX(criterios_validos) = 0 THEN 'Sem dados suficientes'
+                    WHEN MAX(pontos_melhor) = 0 THEN 'Indeterminado/baixo suporte'
+                    WHEN COUNT(*) > 1 THEN 'Indeterminado/empate'
+                    ELSE MIN(grupo_lcr)
+                END AS classificacao_lcr,
+                CASE
+                    WHEN MAX(criterios_validos) > 0 THEN ROUND(100.0 * MAX(pontos_melhor) / MAX(criterios_validos), 1)
+                    ELSE NULL
+                END AS suporte_pct
+            FROM best_rows
+            GROUP BY row_id
+        ), resolved_labeled AS (
+            SELECT *,
+                   CASE
+                       WHEN grupo_sinan IN ({groups_list}) AND classificacao_lcr = grupo_sinan THEN 'Concordante com SINAN'
+                       WHEN classificacao_lcr IN ({groups_list}) AND grupo_sinan IN ({groups_list}) THEN 'Discordante do SINAN'
+                       WHEN grupo_sinan IN ({groups_list}) THEN 'Indeterminado pelo LCR'
+                       ELSE 'Sem grupo SINAN comparável'
+                   END AS situacao_vs_sinan
+            FROM resolved
+        )
+    """
+
+
+def query_sinan_lcr_independent_distribution(
+    table: LoadedTable,
+    exprs: Dict[str, Optional[str]],
+    where_sql: str,
+) -> pd.DataFrame:
+    """Distribuição da classificação provável pelo LCR, sem usar CON_DIAGES."""
+    with_sql = _sinan_lcr_independent_classification_with_sql(table, exprs, where_sql)
+    if not with_sql:
+        return pd.DataFrame()
+    case_order = {
+        "Casos confirmados": 1,
+        "Casos descartados": 2,
+        "Sem classificação / ignorados": 3,
+        "Casos avaliados": 4,
+    }
+    class_order = {grupo: idx for idx, grupo in enumerate(SINAN_ETIOLOGY_GROUPS, start=1)}
+    class_order.update({"Indeterminado/empate": 90, "Indeterminado/baixo suporte": 91, "Sem dados suficientes": 92})
+    case_order_sql = "CASE " + " ".join(f"WHEN grupo_caso = {qstr(k)} THEN {v}" for k, v in case_order.items()) + " ELSE 99 END"
+    class_order_sql = "CASE " + " ".join(f"WHEN classificacao_lcr = {qstr(k)} THEN {v}" for k, v in class_order.items()) + " ELSE 99 END"
+    sql = f"""
+        {with_sql}, agg AS (
+            SELECT grupo_caso,
+                   classificacao_lcr,
+                   COUNT(*) AS n,
+                   ROUND(AVG(suporte_pct), 1) AS suporte_medio_pct
+            FROM resolved_labeled
+            GROUP BY grupo_caso, classificacao_lcr
+        ), totals AS (
+            SELECT grupo_caso, SUM(n) AS denominador
+            FROM agg
+            GROUP BY grupo_caso
+        )
+        SELECT a.grupo_caso,
+               a.classificacao_lcr,
+               a.n,
+               t.denominador,
+               ROUND(100.0 * a.n / NULLIF(t.denominador, 0), 1) AS pct,
+               a.suporte_medio_pct,
+               {case_order_sql} AS ordem_caso,
+               {class_order_sql} AS ordem_lcr
+        FROM agg a
+        JOIN totals t USING (grupo_caso)
+        ORDER BY ordem_caso, ordem_lcr, a.classificacao_lcr
+    """
+    return run_query(table, sql)
+
+
+def query_sinan_lcr_independent_vs_sinan(
+    table: LoadedTable,
+    exprs: Dict[str, Optional[str]],
+    where_sql: str,
+) -> pd.DataFrame:
+    """Compara a classificação provável pelo LCR com a etiologia oficial do SINAN nos confirmados."""
+    with_sql = _sinan_lcr_independent_classification_with_sql(table, exprs, where_sql)
+    if not with_sql:
+        return pd.DataFrame()
+    groups_list = ", ".join(qstr(grupo) for grupo in SINAN_ETIOLOGY_GROUPS)
+    situation_order = {
+        "Concordante com SINAN": 1,
+        "Discordante do SINAN": 2,
+        "Indeterminado pelo LCR": 3,
+        "Sem grupo SINAN comparável": 4,
+    }
+    situation_order_sql = "CASE " + " ".join(f"WHEN situacao_vs_sinan = {qstr(k)} THEN {v}" for k, v in situation_order.items()) + " ELSE 99 END"
+    sql = f"""
+        {with_sql}, agg AS (
+            SELECT grupo_sinan AS grupo_etiologico_sinan,
+                   classificacao_lcr,
+                   situacao_vs_sinan,
+                   COUNT(*) AS n,
+                   ROUND(AVG(suporte_pct), 1) AS suporte_medio_pct
+            FROM resolved_labeled
+            WHERE grupo_caso = 'Casos confirmados'
+              AND grupo_sinan IN ({groups_list})
+            GROUP BY grupo_sinan, classificacao_lcr, situacao_vs_sinan
+        ), totals AS (
+            SELECT grupo_etiologico_sinan, SUM(n) AS denominador
+            FROM agg
+            GROUP BY grupo_etiologico_sinan
+        )
+        SELECT a.grupo_etiologico_sinan,
+               a.classificacao_lcr,
+               a.situacao_vs_sinan,
+               a.n,
+               t.denominador,
+               ROUND(100.0 * a.n / NULLIF(t.denominador, 0), 1) AS pct,
+               a.suporte_medio_pct,
+               {situation_order_sql} AS ordem_situacao
+        FROM agg a
+        JOIN totals t USING (grupo_etiologico_sinan)
+        ORDER BY a.grupo_etiologico_sinan, ordem_situacao, a.classificacao_lcr
+    """
+    return run_query(table, sql)
+
+
+def query_sinan_lcr_aspect_distribution(
+    table: LoadedTable,
+    exprs: Dict[str, Optional[str]],
+    where_sql: str,
+    stratification_sql: Optional[str] = None,
+) -> pd.DataFrame:
+    """Distribuição do campo Aspecto do Líquor conforme categorias oficiais
+    da ficha do SINAN: límpido, purulento, hemorrágico, turvo, xantocrômico,
+    outro e ignorado.
+    """
+    aspect_label = exprs.get("lab_aspect_label")
+    if not aspect_label:
+        return pd.DataFrame()
+    estrato_sql = category_label_expr(stratification_sql, "Sem estrato") if stratification_sql else qstr("Todos")
+    order_case = "CASE " + " ".join(
+        f"WHEN categoria = {qstr(label)} THEN {idx}"
+        for idx, label in enumerate(SINAN_LAB_ASPECT_ORDER, start=1)
+    ) + " ELSE 999 END"
+    sql = f"""
+        WITH base AS (
+            SELECT COALESCE({aspect_label}, 'Sem informação/ignorado') AS categoria,
+                   {estrato_sql} AS estrato
+            FROM {table.ref_sql}
+            {where_sql}
+        ), agg AS (
+            SELECT categoria, estrato, COUNT(*) AS n
+            FROM base
+            GROUP BY 1, 2
+        ), with_totals AS (
+            SELECT *, SUM(n) OVER (PARTITION BY estrato) AS denominador
+            FROM agg
+        )
+        SELECT categoria,
+               estrato,
+               n,
+               denominador,
+               CASE WHEN denominador > 0 THEN ROUND(100.0 * n / denominador, 2) ELSE NULL END AS pct,
+               {order_case} AS ordem
+        FROM with_totals
+        ORDER BY ordem, estrato
+    """
+    df = run_query(table, sql)
+    if df.empty:
+        return df
+    if not stratification_sql and "estrato" in df.columns:
+        df = df.drop(columns=["estrato"])
+    return df
+
 def query_sinan_discarded_meningitis_risk(
     table: LoadedTable, exprs: Dict[str, Optional[str]], where_sql: str
 ) -> pd.DataFrame:
@@ -6221,11 +6593,10 @@ def render_quimio_classification_tab(
     """
     st.markdown("### Classificação etiológica do líquor por faixas de referência")
     st.caption(
-        "Esta análise é exploratória e independente da classificação oficial do SINAN. Ela usa apenas os "
-        "parâmetros quimiocitológicos do LCR (leucócitos, proteínas, glicose e predomínio celular) comparados "
-        "a faixas de referência da literatura, para avaliar o quanto o perfil laboratorial de cada caso é "
-        "compatível com a etiologia registrada (confirmados) ou poderia sugerir meningite mesmo tendo sido "
-        "descartado (descartados)."
+        "Este bloco agora separa duas perguntas diferentes: (1) aderência do LCR à etiologia oficial registrada "
+        "no SINAN, restrita aos casos confirmados; e (2) classificação provável pelo LCR, feita sem usar CON_DIAGES, "
+        "para mostrar o que o padrão quimiocitológico e o aspecto do líquor sugeririam isoladamente. Essa segunda "
+        "análise é exploratória e não substitui cultura, PCR, bacterioscopia, antígenos, clínica ou epidemiologia."
     )
 
     expected = exprs.get("expected_etiology_group")
@@ -6244,6 +6615,8 @@ def render_quimio_classification_tab(
         missing.append("LAB_PROT")
     if not glico:
         missing.append("LAB_GLICO")
+    if not exprs.get("lab_aspect_code"):
+        missing.append("LAB_ASPECT")
     if missing:
         st.warning(
             "Para esta análise funcionar plenamente, preciso detectar: " + ", ".join(missing) +
@@ -6301,13 +6674,15 @@ def render_quimio_classification_tab(
         return out
 
     # -------------------------------------------------------------------
-    # Bloco A — Casos confirmados: comparação com a faixa esperada
+    # Análise 1 — Aderência do LCR à etiologia oficial do SINAN
     # -------------------------------------------------------------------
     st.divider()
-    st.markdown("#### Casos confirmados — aderência às faixas esperadas por grupo etiológico")
+    st.markdown("#### Análise 1 — Aderência do LCR à etiologia oficial do SINAN")
+    st.markdown("##### Casos confirmados — aderência às faixas esperadas por grupo etiológico")
     st.caption(
-        "Considera apenas casos com CLASSI_FIN = confirmado, punção lombar realizada e grupo etiológico "
-        "identificável a partir de CON_DIAGES (e CLA_ME_ETI para distinguir fungo dentro de 'outra etiologia'). "
+        "Esta análise usa a etiologia oficial registrada no SINAN como referência. Considera apenas casos com "
+        "CLASSI_FIN = confirmado, punção lombar realizada e grupo etiológico identificável a partir de CON_DIAGES "
+        "(e CLA_ME_ETI para distinguir fungo dentro de 'outra etiologia'). "
         "Meningococcemia isolada (CON_DIAGES = 01) é excluída por não representar, isoladamente, meningite "
         "confirmada por LCR. Os intervalos usados nestes gráficos são lidos diretamente de "
         "SINAN_LCR_ETIOLOGY_RANGES, a mesma estrutura exibida em 'Faixas de referência usadas e limitações reconhecidas'."
@@ -6316,6 +6691,8 @@ def render_quimio_classification_tab(
     confirmed_where = append_clause(base_where, f"{classi_code} = '1'")
     if exprs.get("puncao_code"):
         confirmed_where = append_clause(confirmed_where, f"{exprs['puncao_code']} = '1'")
+    if exprs.get("quimio_code"):
+        confirmed_where = append_clause(confirmed_where, f"{exprs['quimio_code']} = '1'")
 
     etio_counts = query_sinan_confirmed_etiology_counts(table, exprs, confirmed_where)
     if etio_counts.empty:
@@ -6436,13 +6813,151 @@ def render_quimio_classification_tab(
                 "a razão LCR/soro é mais adequada que a glicose absoluta isolada."
             )
 
+        df_aspecto = query_sinan_confirmed_aspect_vs_expected(table, exprs, confirmed_where)
+        if not df_aspecto.empty:
+            df_aspecto = add_text(df_aspecto)
+            fig_aspecto = px.bar(
+                df_aspecto,
+                x="grupo_etiologico",
+                y="n",
+                color="situacao",
+                text="texto",
+                barmode="stack",
+                title="Aspecto do líquor observado vs. esperado, por grupo etiológico confirmado",
+                labels={"grupo_etiologico": "Grupo etiológico", "n": "Casos", "situacao": "Situação", "aspecto_esperado": "Aspecto esperado"},
+                category_orders={"situacao": ["Compatível com o esperado", "Discordante do esperado", "Outro aspecto/atípico", "Ignorado/sem informação"]},
+                color_discrete_map={
+                    "Compatível com o esperado": "#2CA02C",
+                    "Discordante do esperado": "#D62728",
+                    "Outro aspecto/atípico": "#FF7F0E",
+                    "Ignorado/sem informação": "#7F7F7F",
+                },
+                hover_data={"texto": False, "pct": ":.1f", "denominador": True, "aspecto_esperado": True, "aspectos_observados": True},
+            )
+            fig_aspecto.update_traces(textposition="inside")
+            render_plotly_chart(fig_aspecto)
+            copyable_dataframe(
+                df_aspecto[["grupo_etiologico", "aspecto_esperado", "situacao", "aspectos_observados", "n", "denominador", "pct"]],
+                width="stretch",
+                hide_index=True,
+            )
+            download_button(df_aspecto, "sinan_confirmados_aspecto_liquor_vs_esperado.csv")
+            st.caption(
+                "Leitura operacional do aspecto: viral e fúngica costumam ser límpidas; bacteriana costuma ser turva ou purulenta; "
+                "tuberculosa pode ser límpida ou turva. Hemorrágico, xantocrômico e 'outro' foram mantidos como categoria atípica/não específica, "
+                "pois podem refletir coleta traumática, sangue, degradação de hemácias ou outras condições."
+            )
+        elif exprs.get("lab_aspect_code"):
+            st.info("Sem dados suficientes de aspecto do líquor para comparar com o padrão esperado por etiologia.")
+        else:
+            st.info("LAB_ASPECT não foi detectado; a comparação do aspecto do líquor não pode ser gerada.")
+
     # -------------------------------------------------------------------
-    # Bloco B — Casos descartados: risco de classificação equivocada
+    # Análise 2 — Classificação provável pelo LCR, sem usar CON_DIAGES
     # -------------------------------------------------------------------
     st.divider()
-    st.markdown("#### Casos descartados — quanto o perfil do LCR isoladamente sugeriria meningite")
+    st.markdown("#### Análise 2 — Classificação provável pelo LCR, independente do SINAN")
     st.caption(
-        "Considera casos com CLASSI_FIN = descartado e punção lombar realizada. Cada critério (pleocitose, "
+        "Nesta análise, CON_DIAGES e a etiologia oficial não entram no cálculo. O app atribui pontos para cada "
+        "etiologia quando os dados disponíveis do LCR combinam com seu padrão típico: leucócitos, proteínas, "
+        "glicose absoluta, predomínio celular e aspecto. A etiologia com maior pontuação é exibida como sugestão "
+        "do LCR; empates, ausência de dados e pontuação zero são tratados como indeterminados."
+    )
+
+    independent_where = base_where
+    if exprs.get("puncao_code"):
+        independent_where = append_clause(independent_where, f"{exprs['puncao_code']} = '1'")
+    if exprs.get("quimio_code"):
+        independent_where = append_clause(independent_where, f"{exprs['quimio_code']} = '1'")
+
+    n_independent_lcr = count_rows(table, independent_where)
+    if n_independent_lcr == 0:
+        st.info("Não há registros com punção lombar e exame quimiocitológico do LCR realizados nos filtros atuais.")
+    else:
+        st.caption(
+            f"Registros avaliados com punção lombar" +
+            (" e exame quimiocitológico" if exprs.get("quimio_code") else "") +
+            f" nos filtros atuais: {format_int_br(n_independent_lcr)}."
+        )
+        df_independent = query_sinan_lcr_independent_distribution(table, exprs, independent_where)
+        if df_independent.empty:
+            st.info("Sem dados suficientes para gerar a classificação provável pelo LCR.")
+        else:
+            df_independent = add_text(df_independent)
+            case_order = ["Casos confirmados", "Casos descartados", "Sem classificação / ignorados", "Casos avaliados"]
+            class_order = SINAN_ETIOLOGY_GROUPS + ["Indeterminado/empate", "Indeterminado/baixo suporte", "Sem dados suficientes"]
+            fig_independent = px.bar(
+                df_independent,
+                x="grupo_caso",
+                y="n",
+                color="classificacao_lcr",
+                text="texto",
+                barmode="stack",
+                title="Classificação provável pelo LCR — distribuição por definição de caso",
+                labels={"grupo_caso": "Definição de caso", "n": "Registros", "classificacao_lcr": "Classificação pelo LCR"},
+                category_orders={"grupo_caso": case_order, "classificacao_lcr": class_order},
+                hover_data={"texto": False, "pct": ":.1f", "denominador": True, "suporte_medio_pct": ":.1f"},
+            )
+            fig_independent.update_traces(textposition="inside")
+            render_plotly_chart(fig_independent)
+            copyable_dataframe(
+                df_independent[["grupo_caso", "classificacao_lcr", "n", "denominador", "pct", "suporte_medio_pct"]],
+                width="stretch",
+                hide_index=True,
+            )
+            download_button(df_independent, "sinan_classificacao_lcr_independente_distribuicao.csv")
+            st.caption(
+                "Interpretação: esta é uma classificação por compatibilidade laboratorial, não um diagnóstico. "
+                "Ela tende a ficar indeterminada quando poucos parâmetros estão preenchidos ou quando diferentes "
+                "etiologias compartilham o mesmo padrão de LCR."
+            )
+
+        if expected:
+            df_vs_sinan = query_sinan_lcr_independent_vs_sinan(table, exprs, independent_where)
+            if not df_vs_sinan.empty:
+                df_vs_sinan = add_text(df_vs_sinan)
+                fig_vs_sinan = px.bar(
+                    df_vs_sinan,
+                    x="grupo_etiologico_sinan",
+                    y="n",
+                    color="situacao_vs_sinan",
+                    text="texto",
+                    barmode="stack",
+                    title="Casos confirmados — classificação provável pelo LCR vs etiologia oficial do SINAN",
+                    labels={
+                        "grupo_etiologico_sinan": "Etiologia oficial no SINAN",
+                        "n": "Casos confirmados",
+                        "situacao_vs_sinan": "Comparação",
+                        "classificacao_lcr": "Classificação pelo LCR",
+                    },
+                    category_orders={
+                        "grupo_etiologico_sinan": SINAN_ETIOLOGY_GROUPS,
+                        "situacao_vs_sinan": ["Concordante com SINAN", "Discordante do SINAN", "Indeterminado pelo LCR", "Sem grupo SINAN comparável"],
+                    },
+                    hover_data={"texto": False, "classificacao_lcr": True, "pct": ":.1f", "denominador": True, "suporte_medio_pct": ":.1f"},
+                )
+                fig_vs_sinan.update_traces(textposition="inside")
+                render_plotly_chart(fig_vs_sinan)
+                copyable_dataframe(
+                    df_vs_sinan[["grupo_etiologico_sinan", "classificacao_lcr", "situacao_vs_sinan", "n", "denominador", "pct", "suporte_medio_pct"]],
+                    width="stretch",
+                    hide_index=True,
+                )
+                download_button(df_vs_sinan, "sinan_classificacao_lcr_independente_vs_sinan.csv")
+                st.caption(
+                    "Aqui a etiologia oficial do SINAN é usada apenas depois da classificação pelo LCR, para comparar "
+                    "concordância ou discordância. Diferente da Análise 1, ela não define previamente a faixa esperada."
+                )
+
+    # -------------------------------------------------------------------
+    # Análise 2 — Casos descartados: quanto o LCR isoladamente sugere meningite
+    # -------------------------------------------------------------------
+    st.divider()
+    st.markdown("##### Casos descartados — quanto o perfil do LCR isoladamente sugeriria meningite")
+    st.caption(
+        "Considera casos com CLASSI_FIN = descartado, punção lombar realizada"
+        + (" e exame quimiocitológico do LCR realizado" if exprs.get("quimio_code") else "")
+        + ". Cada critério (pleocitose, "
         "glicose reduzida, proteína elevada) é avaliado isoladamente — não combinado — para mostrar o efeito "
         "de cada marcador isolado, como a pleocitose costuma ser o sinal mais sensível, porém pouco específico."
     )
@@ -6454,6 +6969,8 @@ def render_quimio_classification_tab(
     discarded_where = append_clause(base_where, f"{classi_code} = '2'")
     if exprs.get("puncao_code"):
         discarded_where = append_clause(discarded_where, f"{exprs['puncao_code']} = '1'")
+    if exprs.get("quimio_code"):
+        discarded_where = append_clause(discarded_where, f"{exprs['quimio_code']} = '1'")
 
     n_discarded_lcr = count_rows(table, discarded_where)
     if n_discarded_lcr == 0:
@@ -7170,6 +7687,56 @@ def render_sinan_lcr_indicators(table: LoadedTable, exprs: Dict[str, Optional[st
     render_param_distribution("linfo", "Linfócitos", "Linfócitos (% dos leucócitos)")
     render_param_distribution("mono", "Monócitos", "Monócitos (% dos leucócitos)")
     render_param_distribution("eosi", "Eosinófilos", "Eosinófilos (% dos leucócitos)")
+
+    st.markdown("**Distribuição — aspecto do líquor (Ficha SINAN)**")
+    st.caption(
+        "Campo 48 da ficha de investigação: 1 — Límpido; 2 — Purulento; 3 — Hemorrágico; "
+        "4 — Turvo; 5 — Xantocrômico; 6 — Outro; 9 — Ignorado. O gráfico abaixo usa essas categorias oficiais, "
+        "mantendo ignorados/sem informação para avaliar também completude de preenchimento."
+    )
+    if exprs.get("lab_aspect_label"):
+        aspect_dist = query_sinan_lcr_aspect_distribution(table, exprs, graph_where, strat_sql)
+        if aspect_dist.empty:
+            st.info("Não há registros com aspecto do líquor preenchido no recorte atual.")
+        else:
+            if "ordem" in aspect_dist.columns:
+                aspect_dist = aspect_dist.sort_values(["ordem"] + (["estrato"] if "estrato" in aspect_dist.columns else [])).reset_index(drop=True)
+            aspect_dist = add_text(aspect_dist)
+            labels = {"categoria": "Aspecto do líquor", "n": "Registros", "pct": "%", "estrato": "Estrato"}
+            if strat_sql and "estrato" in aspect_dist.columns:
+                fig_aspect = px.bar(
+                    aspect_dist,
+                    x="categoria",
+                    y="n",
+                    color="estrato",
+                    text="texto",
+                    barmode="group",
+                    title=f"Distribuição do aspecto do líquor — {strat_choice}",
+                    labels=labels,
+                    hover_data={"texto": False, "pct": ":.2f", "denominador": True},
+                    category_orders={"categoria": SINAN_LAB_ASPECT_ORDER},
+                )
+            else:
+                fig_aspect = px.bar(
+                    aspect_dist,
+                    x="categoria",
+                    y="n",
+                    text="texto",
+                    title="Distribuição do aspecto do líquor",
+                    labels=labels,
+                    hover_data={"texto": False, "pct": ":.2f", "denominador": True},
+                    category_orders={"categoria": SINAN_LAB_ASPECT_ORDER},
+                )
+            fig_aspect.update_xaxes(tickangle=-30)
+            render_plotly_chart(fig_aspect)
+            if strat_sql and "estrato" in aspect_dist.columns:
+                render_interval_total(aspect_dist, value_col="n", by_col="estrato")
+            else:
+                render_interval_total(aspect_dist, value_col="n")
+            copyable_dataframe(aspect_dist, width="stretch", hide_index=True)
+            download_button(aspect_dist, "sinan_distribuicao_aspecto_liquor.csv")
+    else:
+        st.info("LAB_ASPECT não foi detectado; não é possível gerar a distribuição do aspecto do líquor.")
 
     st.markdown("**Resumo estatístico dos parâmetros quimiocitológicos do LCR**")
     st.caption(
