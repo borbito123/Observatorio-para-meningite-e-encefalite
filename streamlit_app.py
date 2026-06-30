@@ -1348,92 +1348,83 @@ SINAN_AUXILIARY_CID10_CANDIDATES = [
 
 SINAN_QUIMIO_INTERPRETATION_ROWS = [
     {
-        "Perfil/etiologia": "LCR normal",
-        "Leucócitos (céls/mm³)": "0–5 em crianças >6 meses/adultos; pode chegar a 30–32 em neonatos",
-        "Glicose": ">50% da glicose sanguínea; em adultos, frequentemente cerca de 2/3 da glicemia",
-        "Proteínas": "<40 mg/dL no MSD; adultos em geral 15–45 mg/dL, com variação entre laboratórios",
-        "Tipo celular principal": "Sem pleocitose; células mononucleares, principalmente linfócitos, com monócitos em menor proporção",
-        "Aspecto do líquor": "Límpido",
-        "Lactato": "1–3 mmol/L",
-        "Notas": "Ver diferenças por idade abaixo",
+        "Parâmetro": "Leucócitos (céls/mm³)",
+        "LCR normal": "0–5 em crianças >6 meses/adultos; em neonatos pode chegar a 30–32",
+        "Viral": "50–1.000",
+        "Bacteriana": "1.000–5.000 como faixa típica; extremos descritos podem variar de <100 a >10.000 (b)",
+        "Tuberculosa": "50–300",
+        "Fúngica/criptocócica": "20–500; pode ser <20 em imunossuprimidos, especialmente em AIDS (f)",
     },
     {
-        "Perfil/etiologia": "Viral",
-        "Leucócitos (céls/mm³)": "50–1.000",
-        "Glicose": "Usualmente normal; em geral >45% da glicose sanguínea",
-        "Proteínas": "Elevadas, em geral <200 mg/dL",
-        "Tipo celular principal": "Pleocitose com predomínio linfocitário; pode iniciar com neutrófilos nas primeiras 24–48h",
-        "Aspecto do líquor": "Límpido",
-        "Lactato": "—",
-        "Notas": "(a)",
+        "Parâmetro": "Glicose",
+        "LCR normal": ">50% da glicose sanguínea; em adultos, frequentemente cerca de 2/3 da glicemia",
+        "Viral": "Usualmente normal; em geral >45% da glicose sanguínea",
+        "Bacteriana": "Reduzida; em geral <40–50% da glicose sanguínea. Comparar sempre com glicemia sérica simultânea (d)",
+        "Tuberculosa": "Reduzida; em geral <45–50% da glicose sanguínea",
+        "Fúngica/criptocócica": "Reduzida; em geral <40–50% da glicose sanguínea",
     },
     {
-        "Perfil/etiologia": "Bacteriana",
-        "Leucócitos (céls/mm³)": "1.000–5.000 como faixa típica; extremos podem variar de <100 a >10.000",
-        "Glicose": "Reduzida; em geral <40–50% da glicose sanguínea. Ideal: razão LCR/soro com glicemia simultânea",
-        "Proteínas": "Elevadas, geralmente 100–500 mg/dL",
-        "Tipo celular principal": "Pleocitose com predomínio de neutrófilos, mas pode variar, inclusive após antibiótico",
-        "Aspecto do líquor": "Turvo ou purulento",
-        "Lactato": "—",
-        "Notas": "(b), (c), (d), (g)",
+        "Parâmetro": "Proteínas",
+        "LCR normal": "<40 mg/dL no MSD; em crianças >6 meses/adultos, geralmente 15–45 mg/dL, com variação entre laboratórios",
+        "Viral": "Elevadas, em geral <200 mg/dL",
+        "Bacteriana": "Elevadas, geralmente 100–500 mg/dL",
+        "Tuberculosa": "Elevadas, geralmente 50–300 mg/dL",
+        "Fúngica/criptocócica": "Elevadas, usualmente >45 mg/dL",
     },
     {
-        "Perfil/etiologia": "Tuberculosa",
-        "Leucócitos (céls/mm³)": "50–300",
-        "Glicose": "Reduzida; em geral <45–50% da glicose sanguínea",
-        "Proteínas": "Elevadas, geralmente 50–300 mg/dL",
-        "Tipo celular principal": "Pleocitose com predomínio linfocitário/mononuclear; pode haver componente neutrofílico",
-        "Aspecto do líquor": "Turvo, mas pode estar límpido",
-        "Lactato": "—",
-        "Notas": "(e)",
+        "Parâmetro": "Tipo celular principal",
+        "LCR normal": "Sem pleocitose; predomínio de células mononucleares, sobretudo linfócitos, com monócitos em menor proporção",
+        "Viral": "Pleocitose com predomínio linfocitário; pode iniciar com neutrófilos nas primeiras 24–48h (a)",
+        "Bacteriana": "Pleocitose com predomínio de neutrófilos; pode haver predomínio linfocitário em parcela dos casos e em Listeria (c), (g)",
+        "Tuberculosa": "Pleocitose com predomínio linfocitário/mononuclear; pode haver componente neutrofílico, inclusive no paradoxo terapêutico (e)",
+        "Fúngica/criptocócica": "Normalmente linfócitos/mononucleares",
     },
     {
-        "Perfil/etiologia": "Fúngica, com destaque para Cryptococcus",
-        "Leucócitos (céls/mm³)": "20–500; pode ser <20 em imunossuprimidos, especialmente AIDS",
-        "Glicose": "Reduzida; em geral <40–50% da glicose sanguínea",
-        "Proteínas": "Elevadas, usualmente >45 mg/dL",
-        "Tipo celular principal": "Normalmente linfócitos/mononucleares",
-        "Aspecto do líquor": "Frequentemente límpido",
-        "Lactato": "—",
-        "Notas": "(f)",
+        "Parâmetro": "Aspecto do líquor",
+        "LCR normal": "Límpido",
+        "Viral": "Límpido",
+        "Bacteriana": "Turvo ou purulento",
+        "Tuberculosa": "Pode estar turvo, mas também pode estar límpido",
+        "Fúngica/criptocócica": "Frequentemente límpido",
+    },
+    {
+        "Parâmetro": "Lactato",
+        "LCR normal": "1–3 mmol/L",
+        "Viral": "—",
+        "Bacteriana": "—",
+        "Tuberculosa": "—",
+        "Fúngica/criptocócica": "—",
     },
 ]
 
 SINAN_QUIMIO_NOTE_ROWS = [
     {
         "Índice": "(a)",
-        "Onde se aplica": "Viral — tipo celular",
-        "Nota": "O LCR pode ser neutrofílico no início da apresentação. Nas primeiras 24–48h, uma meningite viral pode mimetizar padrão bacteriano; a evolução, PCR/cultura e repetição do LCR podem esclarecer.",
+        "Texto": "Viral — tipo celular: o LCR pode ser neutrofílico no início da apresentação. Nas primeiras 24–48h, uma meningite viral pode mimetizar padrão bacteriano; evolução clínica, PCR/cultura e, quando necessário, LCR seriado ajudam a esclarecer.",
     },
     {
         "Índice": "(b)",
-        "Onde se aplica": "Bacteriana — leucócitos",
-        "Nota": "A faixa 1.000–5.000 céls/mm³ é a apresentação típica, não o limite biológico. O Mandell descreve variação aproximada de <100 a >10.000 céls/mm³.",
+        "Texto": "Bacteriana — leucócitos: a faixa 1.000–5.000 céls/mm³ descreve a apresentação típica, não um teto real. O Mandell descreve variação aproximada de <100 a >10.000 céls/mm³.",
     },
     {
         "Índice": "(c)",
-        "Onde se aplica": "Bacteriana — tipo celular",
-        "Nota": "Cerca de 10% dos pacientes com meningite bacteriana podem ter predomínio linfocitário no LCR. Isso não deve excluir etiologia bacteriana quando o contexto clínico é compatível.",
+        "Texto": "Bacteriana — tipo celular: cerca de 10% dos pacientes com meningite bacteriana podem ter predomínio linfocitário no LCR. Esse achado não exclui etiologia bacteriana quando o restante do quadro é compatível.",
     },
     {
         "Índice": "(d)",
-        "Onde se aplica": "Bacteriana — glicose",
-        "Nota": "A glicose do LCR deve ser comparada com glicemia sérica colhida no mesmo momento. A razão LCR/soro ≤0,4 é observada na maioria dos casos bacterianos e é mais informativa que a glicose absoluta isolada.",
+        "Texto": "Bacteriana — glicose: a glicose do LCR deve ser interpretada em relação à glicemia sérica colhida no mesmo momento. Razão LCR/soro ≤0,4 ocorre na maioria dos casos bacterianos e costuma ser mais informativa que a glicose absoluta isolada.",
     },
     {
         "Índice": "(e)",
-        "Onde se aplica": "Tuberculosa — tipo celular",
-        "Nota": "Pode ocorrer paradoxo terapêutico: durante o tratamento antituberculoso, um LCR inicialmente mononuclear pode tornar-se neutrofílico, sem que isso signifique necessariamente troca de etiologia.",
+        "Texto": "Tuberculosa — tipo celular: pode ocorrer paradoxo terapêutico, no qual um LCR inicialmente mononuclear se torna neutrofílico durante o tratamento antituberculoso, sem que isso indique necessariamente troca de etiologia.",
     },
     {
         "Índice": "(f)",
-        "Onde se aplica": "Criptocócica/fúngica — leucócitos",
-        "Nota": "Em pacientes com AIDS, mais de 75% dos casos criptocócicos podem ter <20 céls/mm³. Portanto, a faixa 20–500 não deve ser usada rigidamente em imunossuprimidos.",
+        "Texto": "Criptocócica/fúngica — leucócitos: em pacientes com AIDS, mais de 75% dos casos criptocócicos podem ter <20 céls/mm³. Portanto, a faixa 20–500 não deve ser aplicada rigidamente a imunossuprimidos.",
     },
     {
         "Índice": "(g)",
-        "Onde se aplica": "Listeriose e outras bacterianas — predomínio celular",
-        "Nota": "Listeria monocytogenes, classificada no SINAN em CLA_ME_BAC como 'outras bactérias', pode ter predomínio mononuclear/linfocitário em cerca de 25–30% dos casos; em pacientes previamente tratados, a proporção de padrão atípico pode ser ainda maior. Assim, no gráfico de predomínio compatível vs. discordante, parte da discordância pode refletir fisiopatologia conhecida, não erro de classificação do SINAN.",
+        "Texto": "Listeriose e outras bacterianas — predomínio celular: Listeria monocytogenes, registrada no SINAN dentro de CLA_ME_BAC como outras bactérias, pode cursar com predomínio mononuclear/linfocitário em cerca de 25–30% dos casos; em pacientes previamente tratados, a proporção de padrão atípico pode ser maior. Assim, no gráfico de predomínio compatível vs. discordante, parte da discordância pode refletir fisiopatologia conhecida, não erro de classificação do SINAN.",
     },
 ]
 
@@ -1442,19 +1433,16 @@ SINAN_LCR_AGE_DIFFERENCES_ROWS = [
         "Parâmetro": "Leucócitos",
         "Neonatos": "0–32 céls/mm³; pode haver pequena celularidade sem meningite",
         "Crianças >6 meses/adultos": "0–5 céls/mm³",
-        "Leitura prática": "Usar pontos de corte por idade. Um valor aceitável em neonato pode ser anormal em criança maior ou adulto.",
     },
     {
         "Parâmetro": "Proteínas",
         "Neonatos": "20–170 mg/dL",
         "Crianças >6 meses/adultos": "15–45 mg/dL",
-        "Leitura prática": "Proteína é fisiologicamente mais alta no início da vida e cai com a maturação da barreira sangue-LCR.",
     },
     {
         "Parâmetro": "Glicose",
         "Neonatos": "Geralmente ~80% da glicemia; faixa aproximada 34–119 mg/dL",
         "Crianças >6 meses/adultos": "Geralmente ~2/3 da glicemia; em geral 45–80 mg/dL",
-        "Leitura prática": "A interpretação correta depende de glicemia sérica simultânea; evitar concluir hipoglicorraquia apenas por valor absoluto.",
     },
 ]
 
@@ -5841,7 +5829,8 @@ def render_quimio_interpretation() -> None:
     copyable_dataframe(pd.DataFrame(SINAN_QUIMIO_INTERPRETATION_ROWS), width="stretch", hide_index=True)
 
     st.markdown("**Observações da tabela — exceções que devem ser lidas junto dos índices (a–g):**")
-    copyable_dataframe(pd.DataFrame(SINAN_QUIMIO_NOTE_ROWS), width="stretch", hide_index=True)
+    for row in SINAN_QUIMIO_NOTE_ROWS:
+        st.markdown(f"{row['Índice']} {row['Texto']}")
 
     st.markdown("**Diferenças entre neonatos e crianças/adultos nos achados do líquido cefalorraquidiano**")
     st.caption(
