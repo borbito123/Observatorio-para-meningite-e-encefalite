@@ -67,7 +67,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-06-30-v39-lcr-sinan-ajustes-puncao-estratos"
+APP_VERSION = "2026-06-30-v40-lcr-sinan-ajustes-distribuicoes-faixas"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos
@@ -1350,24 +1350,24 @@ SINAN_QUIMIO_INTERPRETATION_ROWS = [
     {
         "Parâmetro": "Leucócitos (céls/mm³)",
         "LCR normal": "0–5",
-        "Viral": "50–1.000; geralmente mononuclear/linfocitário",
-        "Bacteriana": "1.000–5.000; geralmente neutrofílico",
-        "Tuberculosa": "50–300; geralmente mononuclear",
-        "Fúngica/criptocócica": "20–500; geralmente mononuclear",
+        "Viral": "50–1.000 (a)",
+        "Bacteriana": "1.000–5.000 (b)",
+        "Tuberculosa": "50–300",
+        "Fúngica/criptocócica": "20–500 (f)",
     },
     {
         "Parâmetro": "Tipo celular predominante",
         "LCR normal": "Mononuclear/linfocitário",
-        "Viral": "Mononuclear/linfocitário; pode iniciar neutrofílico",
-        "Bacteriana": "Neutrófilos",
-        "Tuberculosa": "Mononuclear",
+        "Viral": "Mononuclear/linfocitário; pode iniciar neutrofílico (a)",
+        "Bacteriana": "Neutrofílico (c, g)",
+        "Tuberculosa": "Mononuclear (e)",
         "Fúngica/criptocócica": "Mononuclear",
     },
     {
         "Parâmetro": "Glicose",
         "LCR normal": ">50% da glicemia sérica",
         "Viral": "Geralmente normal; em geral >45 mg/dL",
-        "Bacteriana": "Reduzida; frequentemente <40 mg/dL ou razão LCR/soro ≤0,4",
+        "Bacteriana": "Reduzida; <40 mg/dL ou razão LCR/soro ≤0,4 (d)",
         "Tuberculosa": "Reduzida; em geral <45 mg/dL",
         "Fúngica/criptocócica": "Reduzida; em geral <40 mg/dL",
     },
@@ -1392,19 +1392,31 @@ SINAN_QUIMIO_INTERPRETATION_ROWS = [
 SINAN_QUIMIO_NOTE_ROWS = [
     {
         "Índice": "(a)",
-        "Texto": "As faixas são padrões típicos, não critérios diagnósticos isolados; fases iniciais, tratamento prévio e imunossupressão podem alterar o LCR.",
+        "Texto": "Na meningite viral, o LCR pode ser neutrofílico no início da apresentação, especialmente nas primeiras 24–48h. Por isso, viral recente pode se parecer com bacteriana quando se olha apenas o diferencial celular.",
     },
     {
         "Índice": "(b)",
-        "Texto": "Viral pode começar com neutrofilia nas primeiras 24–48h; bacteriana pode ser linfocitária em uma minoria dos casos.",
+        "Texto": "Na meningite bacteriana, 1.000–5.000 céls/mm³ é a faixa típica. O Mandell descreve extremos de <100 a >10.000 céls/mm³; portanto, o limite superior de 5.000 não deve ser tratado como teto diagnóstico.",
     },
     {
         "Índice": "(c)",
-        "Texto": "A glicose liquórica deve ser interpretada junto da glicose sérica colhida, idealmente, no mesmo momento da punção lombar.",
+        "Texto": "Cerca de 10% dos pacientes com meningite bacteriana podem apresentar predomínio linfocitário no LCR. Predomínio linfocitário, isoladamente, não exclui bactéria.",
     },
     {
         "Índice": "(d)",
-        "Texto": "Na criptococose associada à imunossupressão, a celularidade pode ser baixa apesar de infecção ativa.",
+        "Texto": "A glicose do LCR deve ser comparada com glicemia sérica colhida no mesmo momento da punção lombar. Na meningite bacteriana, a razão LCR/soro ≤0,4 ocorre na maioria dos casos e costuma ser mais informativa que a glicose absoluta isolada.",
+    },
+    {
+        "Índice": "(e)",
+        "Texto": "Na meningite tuberculosa, pode ocorrer paradoxo terapêutico: um LCR inicialmente mononuclear pode se tornar neutrofílico durante o tratamento antituberculoso, sem que isso indique necessariamente troca de etiologia.",
+    },
+    {
+        "Índice": "(f)",
+        "Texto": "Na meningite criptocócica associada à AIDS, mais de 75% dos pacientes podem ter <20 céls/mm³. Assim, aplicar rigidamente a faixa 20–500 em imunossuprimidos pode subestimar casos reais.",
+    },
+    {
+        "Índice": "(g)",
+        "Texto": "Listeriose fica operacionalmente dentro de 'outras bactérias' no SINAN e pode cursar com predomínio mononuclear/linfocitário em 25–30% dos casos; em pacientes previamente tratados, essa proporção pode ser ainda maior. No gráfico de predomínio compatível vs. discordante, parte da discordância pode refletir comportamento conhecido da doença, não erro de classificação.",
     },
 ]
 
@@ -1429,7 +1441,7 @@ SINAN_LCR_AGE_DIFFERENCES_ROWS = [
 SINAN_QUIMIO_REFERENCES = [
     {
         "Referência": "Bennett JE, Dolin R, Blaser MJ, eds. Mandell, Douglas, and Bennett's Principles and Practice of Infectious Diseases. Elsevier. Tabela 88.2.",
-        "Uso no painel": "Faixas típicas de leucócitos, glicose, proteína e predomínio celular por etiologia.",
+        "Uso no painel": "Faixas típicas de leucócitos, glicose, proteína e predomínio celular por etiologia, incluindo as notas de exceção (a–g).",
     },
     {
         "Referência": "MSD/Merck Manual Professional. Cerebrospinal Fluid Findings in Meningitis. https://www.msdmanuals.com/professional/multimedia/table/cerebrospinal-fluid-findings-in-meningitis",
@@ -1598,6 +1610,77 @@ SINAN_LCR_RANGES_SOURCE_NOTE = (
     "não devem ser usadas como corte diagnóstico isolado. A glicose deve ser interpretada preferencialmente "
     "pela razão LCR/soro, mas o SINAN geralmente só traz LAB_GLICO absoluto."
 )
+
+# Classes clínicas usadas nos gráficos de distribuição dos parâmetros do LCR.
+# A ideia é substituir bins automáticos por intervalos interpretáveis, alinhados às
+# faixas da tabela-resumo e às limitações descritas nas notas (a–g).
+SINAN_LCR_DISTRIBUTION_BIN_SPECS = {
+    "leuco": [
+        {"label": "<20", "condition": "valor < 20", "start": None, "end": 20, "leitura": "Abaixo da menor faixa típica infecciosa; atenção à criptococose em imunossuprimidos."},
+        {"label": "20–49", "condition": "valor >= 20 AND valor < 50", "start": 20, "end": 49, "leitura": "Faixa compatível com criptocócica/fúngica inicial ou baixa celularidade."},
+        {"label": "50–300", "condition": "valor >= 50 AND valor <= 300", "start": 50, "end": 300, "leitura": "Sobrepõe viral, tuberculosa e parte das fúngicas."},
+        {"label": "301–999", "condition": "valor > 300 AND valor < 1000", "start": 301, "end": 999, "leitura": "Faixa ainda compatível com viral; também pode ocorrer em bacteriana atípica/tratada."},
+        {"label": "1.000–5.000", "condition": "valor >= 1000 AND valor <= 5000", "start": 1000, "end": 5000, "leitura": "Faixa típica da meningite bacteriana no Mandell."},
+        {"label": "5.001–10.000", "condition": "valor > 5000 AND valor <= 10000", "start": 5001, "end": 10000, "leitura": "Acima da faixa bacteriana típica; ainda dentro dos extremos descritos para bacteriana."},
+        {"label": ">10.000", "condition": "valor > 10000", "start": 10000, "end": None, "leitura": "Extremo alto descrito em bacteriana; revisar plausibilidade e contexto clínico."},
+    ],
+    "prot": [
+        {"label": "<45", "condition": "valor < 45", "start": None, "end": 45, "leitura": "Normal/baixo para meningite; não exclui infecção em imunossuprimidos ou fases iniciais."},
+        {"label": "45–99", "condition": "valor >= 45 AND valor < 100", "start": 45, "end": 99, "leitura": "Elevação leve; compatível com viral, tuberculosa ou fúngica."},
+        {"label": "100–200", "condition": "valor >= 100 AND valor <= 200", "start": 100, "end": 200, "leitura": "Sobrepõe viral alta, bacteriana e tuberculosa."},
+        {"label": "201–300", "condition": "valor > 200 AND valor <= 300", "start": 201, "end": 300, "leitura": "Compatível com bacteriana/tuberculosa; acima do típico viral."},
+        {"label": "301–500", "condition": "valor > 300 AND valor <= 500", "start": 301, "end": 500, "leitura": "Faixa típica alta de bacteriana."},
+        {"label": ">500", "condition": "valor > 500", "start": 500, "end": None, "leitura": "Muito elevada; revisar contexto, bloqueio de fluxo/hemorragia/coleta traumática e plausibilidade."},
+    ],
+    "glico": [
+        {"label": "<40", "condition": "valor < 40", "start": None, "end": 40, "leitura": "Reduzida em termos absolutos; compatível com bacteriana, tuberculosa ou fúngica, mas deve ser comparada ao soro."},
+        {"label": "40–44", "condition": "valor >= 40 AND valor < 45", "start": 40, "end": 44, "leitura": "Zona limítrofe; a razão LCR/soro é mais adequada que o valor absoluto."},
+        {"label": "45–49", "condition": "valor >= 45 AND valor < 50", "start": 45, "end": 49, "leitura": "Geralmente preservada em termos absolutos, mas ainda depende da glicemia sérica."},
+        {"label": "≥50", "condition": "valor >= 50", "start": 50, "end": None, "leitura": "Preservada em termos absolutos; mais compatível com viral, sem excluir outras etiologias."},
+    ],
+    "neutro": [
+        {"label": "0", "condition": "valor = 0", "start": 0, "end": 0, "leitura": "Sem neutrófilos registrados."},
+        {"label": "1–24%", "condition": "valor > 0 AND valor < 25", "start": 1, "end": 24, "leitura": "Baixa participação neutrofílica."},
+        {"label": "25–49%", "condition": "valor >= 25 AND valor < 50", "start": 25, "end": 49, "leitura": "Componente neutrofílico sem predomínio."},
+        {"label": "50–74%", "condition": "valor >= 50 AND valor < 75", "start": 50, "end": 74, "leitura": "Predomínio neutrofílico moderado."},
+        {"label": "75–100%", "condition": "valor >= 75 AND valor <= 100", "start": 75, "end": 100, "leitura": "Predomínio neutrofílico forte."},
+        {"label": ">100%", "condition": "valor > 100", "start": 100, "end": None, "leitura": "Valor incompatível com percentual; provável problema de preenchimento/unidade."},
+    ],
+    "linfo": [
+        {"label": "0", "condition": "valor = 0", "start": 0, "end": 0, "leitura": "Sem linfócitos registrados."},
+        {"label": "1–24%", "condition": "valor > 0 AND valor < 25", "start": 1, "end": 24, "leitura": "Baixa participação linfocitária."},
+        {"label": "25–49%", "condition": "valor >= 25 AND valor < 50", "start": 25, "end": 49, "leitura": "Componente linfocitário sem predomínio."},
+        {"label": "50–74%", "condition": "valor >= 50 AND valor < 75", "start": 50, "end": 74, "leitura": "Predomínio linfocitário moderado."},
+        {"label": "75–100%", "condition": "valor >= 75 AND valor <= 100", "start": 75, "end": 100, "leitura": "Predomínio linfocitário forte."},
+        {"label": ">100%", "condition": "valor > 100", "start": 100, "end": None, "leitura": "Valor incompatível com percentual; provável problema de preenchimento/unidade."},
+    ],
+    "mono": [
+        {"label": "0", "condition": "valor = 0", "start": 0, "end": 0, "leitura": "Sem monócitos registrados."},
+        {"label": "1–24%", "condition": "valor > 0 AND valor < 25", "start": 1, "end": 24, "leitura": "Baixa participação monocitária."},
+        {"label": "25–49%", "condition": "valor >= 25 AND valor < 50", "start": 25, "end": 49, "leitura": "Componente monocitário relevante."},
+        {"label": "50–74%", "condition": "valor >= 50 AND valor < 75", "start": 50, "end": 74, "leitura": "Predomínio monocitário."},
+        {"label": "75–100%", "condition": "valor >= 75 AND valor <= 100", "start": 75, "end": 100, "leitura": "Predomínio monocitário forte."},
+        {"label": ">100%", "condition": "valor > 100", "start": 100, "end": None, "leitura": "Valor incompatível com percentual; provável problema de preenchimento/unidade."},
+    ],
+    "eosi": [
+        {"label": "0", "condition": "valor = 0", "start": 0, "end": 0, "leitura": "Sem eosinófilos registrados."},
+        {"label": "1–4%", "condition": "valor > 0 AND valor < 5", "start": 1, "end": 4, "leitura": "Pequena participação eosinofílica."},
+        {"label": "5–9%", "condition": "valor >= 5 AND valor < 10", "start": 5, "end": 9, "leitura": "Eosinófilos presentes; revisar contexto clínico."},
+        {"label": "10–49%", "condition": "valor >= 10 AND valor < 50", "start": 10, "end": 49, "leitura": "Eosinofilia liquórica; pode sugerir etiologias específicas conforme contexto."},
+        {"label": "50–100%", "condition": "valor >= 50 AND valor <= 100", "start": 50, "end": 100, "leitura": "Predomínio eosinofílico."},
+        {"label": ">100%", "condition": "valor > 100", "start": 100, "end": None, "leitura": "Valor incompatível com percentual; provável problema de preenchimento/unidade."},
+    ],
+}
+
+
+def sinan_lcr_distribution_bin_specs(param_key: str) -> List[Dict[str, object]]:
+    """Retorna classes clínicas de distribuição para o parâmetro do LCR."""
+    return list(SINAN_LCR_DISTRIBUTION_BIN_SPECS.get(param_key, []))
+
+
+def sinan_lcr_distribution_bin_order(param_key: str) -> List[str]:
+    return [str(spec["label"]) for spec in sinan_lcr_distribution_bin_specs(param_key)]
+
 
 # Mapeia CON_DIAGES (+ CLA_ME_ETI para refinar a categoria 08 "outra etiologia")
 # para um dos 4 grupos etiológicos usados na comparação por faixas de LCR.
@@ -4885,6 +4968,84 @@ def query_sinan_numeric_distribution_stratified(
     return df
 
 
+
+def query_sinan_numeric_distribution_stratified_by_reference_bins(
+    table: LoadedTable,
+    value_expr: str,
+    where_sql: str,
+    param_key: str,
+    stratification_sql: Optional[str] = None,
+) -> pd.DataFrame:
+    """Distribuição numérica usando classes clínicas fixas, não bins automáticos.
+
+    Os intervalos vêm de SINAN_LCR_DISTRIBUTION_BIN_SPECS e são alinhados às
+    faixas da tabela-resumo do LCR. Quando não houver especificação para o
+    parâmetro, a função recorre à distribuição automática anterior.
+    """
+    specs = sinan_lcr_distribution_bin_specs(param_key)
+    if not specs:
+        return query_sinan_numeric_distribution_stratified(table, value_expr, where_sql, stratification_sql)
+
+    def sql_literal_or_null(value: object) -> str:
+        if value is None:
+            return "NULL"
+        return repr(float(value))
+
+    label_case = "CASE " + " ".join(f"WHEN {spec['condition']} THEN {qstr(spec['label'])}" for spec in specs) + " ELSE NULL END"
+    order_case = "CASE " + " ".join(f"WHEN {spec['condition']} THEN {idx}" for idx, spec in enumerate(specs, start=1)) + " ELSE 999 END"
+    start_case = "CASE " + " ".join(f"WHEN {spec['condition']} THEN {sql_literal_or_null(spec.get('start'))}" for spec in specs) + " ELSE NULL END"
+    end_case = "CASE " + " ".join(f"WHEN {spec['condition']} THEN {sql_literal_or_null(spec.get('end'))}" for spec in specs) + " ELSE NULL END"
+    leitura_case = "CASE " + " ".join(f"WHEN {spec['condition']} THEN {qstr(spec.get('leitura', ''))}" for spec in specs) + " ELSE NULL END"
+
+    estrato_sql = category_label_expr(stratification_sql, "Sem estrato") if stratification_sql else qstr("Todos")
+
+    sql = f"""
+        WITH base AS (
+            SELECT {value_expr} AS valor,
+                   {estrato_sql} AS estrato
+            FROM {table.ref_sql}
+            {where_sql}
+        ), validos AS (
+            SELECT valor, estrato
+            FROM base
+            WHERE valor IS NOT NULL AND valor >= 0
+        ), binned AS (
+            SELECT estrato,
+                   {label_case} AS faixa,
+                   {order_case} AS ordem,
+                   {start_case} AS faixa_inicio,
+                   {end_case} AS faixa_fim,
+                   {leitura_case} AS leitura
+            FROM validos
+        ), agg AS (
+            SELECT estrato, faixa, ordem, faixa_inicio, faixa_fim, leitura, COUNT(*) AS n
+            FROM binned
+            WHERE faixa IS NOT NULL
+            GROUP BY 1, 2, 3, 4, 5, 6
+        ), with_totals AS (
+            SELECT *, SUM(n) OVER (PARTITION BY estrato) AS denominador
+            FROM agg
+        )
+        SELECT faixa_inicio,
+               faixa_fim,
+               faixa,
+               estrato,
+               n,
+               denominador,
+               CASE WHEN denominador > 0 THEN ROUND(100.0 * n / denominador, 2) ELSE NULL END AS pct,
+               ordem,
+               leitura
+        FROM with_totals
+        ORDER BY ordem, estrato
+    """
+    df = run_query(table, sql)
+    if df.empty:
+        return df
+    if not stratification_sql and "estrato" in df.columns:
+        df = df.drop(columns=["estrato"])
+    return df
+
+
 # =============================================================================
 # Classificação por faixas de LCR — comparação confirmados x faixa esperada
 # e rastreio de possível meningite entre descartados (ver constantes acima).
@@ -4926,12 +5087,19 @@ def query_sinan_confirmed_param_vs_range(
         if not rng:
             continue
         lo, hi = rng
-        case_rows.append(
-            f"WHEN grupo = {qstr(grupo)} THEN "
-            f"CASE WHEN valor < {lo} THEN 'Abaixo da faixa típica' "
-            f"WHEN valor > {hi} THEN 'Acima da faixa típica' "
-            f"ELSE 'Dentro da faixa típica' END"
-        )
+        if param == "prot" and grupo == "Fúngica" and float(hi) >= 10000:
+            case_rows.append(
+                f"WHEN grupo = {qstr(grupo)} THEN "
+                f"CASE WHEN valor < {lo} THEN 'Abaixo da faixa típica' "
+                f"ELSE 'Dentro da faixa típica' END"
+            )
+        else:
+            case_rows.append(
+                f"WHEN grupo = {qstr(grupo)} THEN "
+                f"CASE WHEN valor < {lo} THEN 'Abaixo da faixa típica' "
+                f"WHEN valor > {hi} THEN 'Acima da faixa típica' "
+                f"ELSE 'Dentro da faixa típica' END"
+            )
     if not case_rows:
         return pd.DataFrame()
     classificacao_sql = "CASE " + " ".join(case_rows) + " ELSE NULL END"
@@ -5015,7 +5183,7 @@ def query_sinan_confirmed_glucose_vs_expected(
 ) -> pd.DataFrame:
     """Compara a glicose absoluta do LCR (mg/dL — ver nota de limitação) com a
     direção esperada para o grupo etiológico: reduzida (<40) nas bacteriana/TB/
-    fúngica; usualmente preservada (>=40) na viral."""
+    fúngica; usualmente preservada (>=45) na viral."""
     expected = exprs.get("expected_etiology_group")
     glico = exprs.get("lab_glico")
     if not expected or not glico:
@@ -6101,7 +6269,7 @@ def render_quimio_classification_tab(
                 {
                     "Grupo etiológico": grupo,
                     "Leucócitos (céls/mm³)": f"{leuco_rng[0]:g}–{leuco_rng[1]:g}" if leuco_rng else "—",
-                    "Proteínas (mg/dL)": f"{prot_rng[0]:g}–{prot_rng[1]:g}" if prot_rng else "—",
+                    "Proteínas (mg/dL)": (f"≥{prot_rng[0]:g}" if prot_rng and grupo == "Fúngica" and float(prot_rng[1]) >= 10000 else (f"{prot_rng[0]:g}–{prot_rng[1]:g}" if prot_rng else "—")),
                     "Glicose": glico_desc,
                     "Predomínio celular esperado": faixas["predominio"],
                     "Aspecto habitual": faixas.get("aspecto", "—"),
@@ -6141,7 +6309,8 @@ def render_quimio_classification_tab(
         "Considera apenas casos com CLASSI_FIN = confirmado, punção lombar realizada e grupo etiológico "
         "identificável a partir de CON_DIAGES (e CLA_ME_ETI para distinguir fungo dentro de 'outra etiologia'). "
         "Meningococcemia isolada (CON_DIAGES = 01) é excluída por não representar, isoladamente, meningite "
-        "confirmada por LCR."
+        "confirmada por LCR. Os intervalos usados nestes gráficos são lidos diretamente de "
+        "SINAN_LCR_ETIOLOGY_RANGES, a mesma estrutura exibida em 'Faixas de referência usadas e limitações reconhecidas'."
     )
 
     confirmed_where = append_clause(base_where, f"{classi_code} = '1'")
@@ -6262,9 +6431,9 @@ def render_quimio_classification_tab(
             )
             download_button(df_glico, "sinan_confirmados_glicose_vs_esperado.csv")
             st.caption(
-                "Critério de corte (40 mg/dL) é aproximado pelas razões já descritas acima. Use com cautela, "
-                "sobretudo nos grupos tuberculosa/fúngica, em que a literatura-padrão (Mandell/MSD) só descreve "
-                "direção qualitativa ('reduzida'), sem ponto de corte numérico consensual."
+                "Critério de corte aproximado: viral é tratado como glicose preservada quando ≥45 mg/dL; "
+                "bacteriana, tuberculosa e fúngica são tratadas como reduzidas quando <40 mg/dL. Use com cautela: "
+                "a razão LCR/soro é mais adequada que a glicose absoluta isolada."
             )
 
     # -------------------------------------------------------------------
@@ -6837,10 +7006,15 @@ def render_sinan_lcr_indicators(table: LoadedTable, exprs: Dict[str, Optional[st
         if not df_puncao.empty:
             df_puncao = add_text(df_puncao)
             st.markdown("**Realização da Punção Laboratorial**")
+            st.caption(
+                "A estratificação por classificação final faz sentido como indicador de completude da investigação: "
+                "mostra se confirmados, descartados e registros sem classificação tiveram punção registrada. "
+                "Não deve ser lida como desempenho diagnóstico, porque a classificação final é posterior e pode depender do próprio LCR."
+            )
             fig_puncao = px.bar(
                 df_puncao,
                 x="grupo_classificacao",
-                y="n",
+                y="pct",
                 color="categoria",
                 text="texto",
                 barmode="stack",
@@ -6851,21 +7025,20 @@ def render_sinan_lcr_indicators(table: LoadedTable, exprs: Dict[str, Optional[st
                     "n": "Registros",
                     "pct": "% dentro do estrato",
                 },
-                hover_data={"texto": False, "pct": ":.2f", "denominador": True},
+                hover_data={"texto": False, "n": True, "pct": ":.2f", "denominador": True},
                 category_orders={
                     "grupo_classificacao": ["Casos totais", "Casos confirmados", "Casos descartados", "Sem classificação / ignorados"],
                     "categoria": ["Sim", "Não", "Ignorado", "Sem informação"],
                 },
             )
             fig_puncao.update_traces(textposition="inside")
+            fig_puncao.update_yaxes(range=[0, 100])
             render_plotly_chart(fig_puncao)
             render_interval_total(df_puncao, value_col="n", by_col="grupo_classificacao")
             copyable_dataframe(df_puncao, width="stretch", hide_index=True)
             download_button(df_puncao, "sinan_realizacao_puncao_laboratorial_por_classificacao.csv")
     else:
         st.info("LAB_PUNCAO não foi detectado; não é possível gerar o gráfico de realização da punção laboratorial.")
-
-    render_quimio_classification_tab(table, exprs, base_where)
 
     quimio_expr = exprs.get("quimio_label")
     if quimio_expr:
@@ -6899,9 +7072,14 @@ def render_sinan_lcr_indicators(table: LoadedTable, exprs: Dict[str, Optional[st
             "Para gerar o resumo do Exame Quimiocitológico do líquor (LCR), os campos laboratoriais do SINAN precisam existir "
             "e ser detectados automaticamente, como LAB_GLICO, LAB_LEUCO, LAB_NEUTRO e LAB_PROT."
         )
+        render_quimio_classification_tab(table, exprs, base_where)
         return
 
     st.markdown("**Distribuição dos parâmetros quimiocitológicos do LCR**")
+    st.caption(
+        "Os histogramas foram substituídos por classes clínicas fixas. As faixas do eixo x seguem os intervalos da tabela-resumo "
+        "e destacam zonas de sobreposição entre etiologias, em vez de usar bins automáticos que mudam conforme o recorte filtrado."
+    )
     age_strat = sinan_lcr_age_stratum_expr(exprs)
     interval_strat = sinan_lcr_symptom_puncture_interval_expr(exprs)
     strat_options = {"Sem estratificação": None}
@@ -6928,14 +7106,19 @@ def render_sinan_lcr_indicators(table: LoadedTable, exprs: Dict[str, Optional[st
         if not expr:
             st.info(f"Para gerar a distribuição de {titulo}, o campo correspondente precisa existir no SINAN e ser detectado automaticamente.")
             return
-        dist = query_sinan_numeric_distribution_stratified(table, expr, graph_where, strat_sql)
+        dist = query_sinan_numeric_distribution_stratified_by_reference_bins(table, expr, graph_where, key, strat_sql)
         if dist.empty:
             st.info(f"Não há valores numéricos válidos para {titulo} no recorte atual.")
             return
+        if "ordem" in dist.columns:
+            dist = dist.sort_values(["ordem"] + (["estrato"] if "estrato" in dist.columns else [])).reset_index(drop=True)
         dist = add_text(dist)
         st.markdown(f"**Distribuição — {titulo}**")
-        labels = {"faixa": eixo_x or titulo, "n": "Registros", "pct": "%", "estrato": "Estrato"}
+        labels = {"faixa": eixo_x or titulo, "n": "Registros", "pct": "%", "estrato": "Estrato", "leitura": "Leitura clínica da faixa"}
         hover_data = {"texto": False, "pct": ":.2f", "denominador": True, "faixa_inicio": ":.2f", "faixa_fim": ":.2f"}
+        if "leitura" in dist.columns:
+            hover_data["leitura"] = True
+        category_orders = {"faixa": sinan_lcr_distribution_bin_order(key)} if sinan_lcr_distribution_bin_order(key) else None
         if strat_sql and "estrato" in dist.columns:
             fig_dist = px.bar(
                 dist,
@@ -6947,6 +7130,7 @@ def render_sinan_lcr_indicators(table: LoadedTable, exprs: Dict[str, Optional[st
                 title=f"Distribuição de {titulo} — {strat_choice}",
                 labels=labels,
                 hover_data=hover_data,
+                category_orders=category_orders,
             )
         else:
             fig_dist = px.bar(
@@ -6957,6 +7141,7 @@ def render_sinan_lcr_indicators(table: LoadedTable, exprs: Dict[str, Optional[st
                 title=f"Distribuição de {titulo}",
                 labels=labels,
                 hover_data=hover_data,
+                category_orders=category_orders,
             )
         fig_dist.update_xaxes(tickangle=-30)
         render_plotly_chart(fig_dist)
@@ -6986,41 +7171,15 @@ def render_sinan_lcr_indicators(table: LoadedTable, exprs: Dict[str, Optional[st
     render_param_distribution("mono", "Monócitos", "Monócitos (% dos leucócitos)")
     render_param_distribution("eosi", "Eosinófilos", "Eosinófilos (% dos leucócitos)")
 
-    st.markdown("**Exame Quimiocitológico do líquor (LCR) — valores médios dos parâmetros**")
-    resumo_plot = quimio_summary[quimio_summary["n_valido"] > 0].copy()
-    if not resumo_plot.empty:
-        resumo_plot["texto"] = [
-            f"média {float(media):.1f}".replace(".", ",") if pd.notna(media) else "—"
-            for media in resumo_plot["media"]
-        ]
-        fig_quimio = px.bar(
-            resumo_plot,
-            x="parametro",
-            y="media",
-            text="texto",
-            title="Média dos parâmetros do exame quimiocitológico do líquor (LCR)",
-            labels={
-                "parametro": "Parâmetro",
-                "material_analisado": "Material analisado",
-                "media": "Média",
-                "n_valido": "Registros válidos",
-            },
-            hover_data={
-                "texto": False,
-                "material_analisado": True,
-                "n_valido": True,
-                "pct_preenchido": ":.2f",
-                "minimo": ":.2f",
-                "q1": ":.2f",
-                "mediana": ":.2f",
-                "q3": ":.2f",
-                "maximo": ":.2f",
-            },
-        )
-        render_plotly_chart(fig_quimio)
-        render_interval_total(resumo_plot, value_col="n_valido", by_col="parametro", value_label="registros válidos")
+    st.markdown("**Resumo estatístico dos parâmetros quimiocitológicos do LCR**")
+    st.caption(
+        "O gráfico de valores médios foi removido. A tabela abaixo fica apenas como apoio para auditoria de preenchimento, "
+        "mediana, quartis, mínimos e máximos; para interpretação visual, prefira as distribuições por faixas clínicas acima."
+    )
     copyable_dataframe(quimio_summary, width="stretch", hide_index=True)
     download_button(quimio_summary, "sinan_quimiocitologico_liquor_resumo_parametros.csv")
+
+    render_quimio_classification_tab(table, exprs, base_where)
 
 
 def query_sinan_overlap_summary(
