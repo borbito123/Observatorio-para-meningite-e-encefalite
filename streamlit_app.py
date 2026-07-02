@@ -67,7 +67,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-07-02-v43-lcr-cores-semanticas"
+APP_VERSION = "2026-07-02-v45-lcr-neonatos-ate-6m"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos
@@ -1423,17 +1423,17 @@ SINAN_QUIMIO_NOTE_ROWS = [
 SINAN_LCR_AGE_DIFFERENCES_ROWS = [
     {
         "Parâmetro": "Leucócitos",
-        "Neonatos": "0–32 céls/mm³; pode haver pequena celularidade sem meningite",
+        "Neonatos até seis meses de idade": "Estrato operacional ampliado no painel; valores de referência variam rapidamente nos primeiros meses e devem ser interpretados com idade exata/contexto clínico.",
         "Crianças >6 meses/adultos": "0–5 céls/mm³",
     },
     {
         "Parâmetro": "Proteínas",
-        "Neonatos": "20–170 mg/dL",
+        "Neonatos até seis meses de idade": "Estrato operacional ampliado no painel; proteínas do LCR tendem a ser mais altas no início da vida e devem ser interpretadas com idade exata/contexto clínico.",
         "Crianças >6 meses/adultos": "15–45 mg/dL",
     },
     {
         "Parâmetro": "Glicose",
-        "Neonatos": "Geralmente ~80% da glicemia; faixa aproximada 34–119 mg/dL",
+        "Neonatos até seis meses de idade": "Estrato operacional ampliado no painel; interpretar preferencialmente com glicemia sérica pareada e idade exata.",
         "Crianças >6 meses/adultos": "Geralmente ~2/3 da glicemia; em geral 45–80 mg/dL",
     },
 ]
@@ -1656,6 +1656,23 @@ SINAN_LCR_VS_SINAN_STATUS_COLOR_MAP = {
     "Sem grupo SINAN comparável": "#BDBDBD",
 }
 SINAN_LCR_SMALL_DENOMINATOR_WARNING_N = 20
+
+# Estratos etários operacionais para gráficos de distribuição do LCR.
+# Conforme ajuste solicitado, a estratificação etária volta a ser binária:
+# neonatos até seis meses de idade versus crianças/adultos (>6 meses).
+SINAN_LCR_NEONATAL_CUTOFF_YEARS = 6 / 12
+SINAN_LCR_AGE_STRATIFICATION_LABEL = "Neonatos até seis meses x crianças/adultos"
+SINAN_LCR_AGE_STRATIFICATION_WITH_INTERVAL_LABEL = "Neonatos até seis meses x crianças/adultos + tempo sintoma-punção"
+SINAN_LCR_AGE_STRATA_ORDER = [
+    "Neonatos até seis meses de idade",
+    "Crianças/adultos (>6 meses)",
+    "Idade sem informação",
+]
+SINAN_LCR_AGE_STRATIFICATION_NOTE = (
+    "Estratificação etária operacional: neonatos até seis meses de idade = indivíduos com idade menor ou igual a 6 meses completos; "
+    "crianças/adultos = >6 meses, isto é, a partir do mês seguinte ao sexto mês. "
+    "A opção 'Sem estratificação' mantém a distribuição geral, sem separar por idade."
+)
 
 # Faixas operacionais usadas nos algoritmos do painel. Leucócitos em células/mm³,
 # proteínas em mg/dL e glicose em mg/dL absoluto no LCR (proxy quando não há soro).
@@ -3789,6 +3806,39 @@ def build_age_sql(sel: ColumnSelection) -> Optional[str]:
     return f"COALESCE({datasus_age_expr(sel.age_col)}, {direct_age_expr(sel.age_col)})"
 
 
+def sinan_quimio_code_expr(sel: ColumnSelection) -> Optional[str]:
+    """Detecta realização do exame quimiocitológico do LCR.
+
+    Algumas bases não trazem um campo explícito LAB_LIQUOR. Quando esse campo
+    não existe, o painel infere realização do quimiocitológico pela presença de
+    pelo menos um parâmetro do LCR preenchido (LAB_HEMA, LAB_NEUTRO, LAB_GLICO,
+    LAB_LEUCO, LAB_EOSI, LAB_PROT, LAB_MONO, LAB_LINFO ou LAB_CLOR). Assim, o
+    gráfico deixa de falhar apenas porque o indicador nominal não foi detectado.
+    """
+    if sel.lab_liquor_col:
+        return clean_code_expr(sel.lab_liquor_col)
+    param_cols = [
+        sel.lab_hema_col,
+        sel.lab_neutro_col,
+        sel.lab_glico_col,
+        sel.lab_leuco_col,
+        sel.lab_eosi_col,
+        sel.lab_prot_col,
+        sel.lab_mono_col,
+        sel.lab_linfo_col,
+        sel.lab_clor_col,
+    ]
+    tests: List[str] = []
+    for col in param_cols:
+        if not col:
+            continue
+        value_expr = sinan_lcr_neutralize_sentinel_expr(numeric_expr(col))
+        tests.append(f"(({value_expr}) IS NOT NULL AND ({value_expr}) >= 0)")
+    if not tests:
+        return None
+    return "CASE WHEN " + " OR ".join(tests) + " THEN '1' ELSE '2' END"
+
+
 def build_expressions(source: str, sel: ColumnSelection) -> Dict[str, Optional[str]]:
     exprs: Dict[str, Optional[str]] = {
         "dt": date_expr(sel.date_col) if sel.date_col else None,
@@ -3858,8 +3908,9 @@ def build_expressions(source: str, sel: ColumnSelection) -> Dict[str, Optional[s
         )
         exprs["puncao_code"] = clean_code_expr(sel.lab_puncao_col) if sel.lab_puncao_col else None
         exprs["puncao_label"] = case_from_mapping(exprs["puncao_code"], YES_NO_IGN, "Sem informação") if exprs["puncao_code"] else None
-        exprs["quimio_code"] = clean_code_expr(sel.lab_liquor_col) if sel.lab_liquor_col else None
+        exprs["quimio_code"] = sinan_quimio_code_expr(sel)
         exprs["quimio_label"] = case_from_mapping(exprs["quimio_code"], YES_NO_IGN, "Sem informação") if exprs["quimio_code"] else None
+        exprs["quimio_inferred_from_params"] = "1" if exprs["quimio_code"] and not sel.lab_liquor_col else None
         exprs["lab_aspect_code"] = clean_code_expr(sel.lab_aspect_col) if sel.lab_aspect_col else None
         exprs["lab_aspect_label"] = case_from_mapping(exprs["lab_aspect_code"], SINAN_LAB_ASPECT, "Sem informação/ignorado") if exprs["lab_aspect_code"] else None
         exprs["lab_hema"] = numeric_expr(sel.lab_hema_col) if sel.lab_hema_col else None
@@ -5219,16 +5270,15 @@ def query_sinan_puncao_by_case_status(table: LoadedTable, exprs: Dict[str, Optio
 
 
 def sinan_lcr_age_stratum_expr(exprs: Dict[str, Optional[str]]) -> Optional[str]:
-    """Estrato neonatal vs. crianças/adultos para interpretação do LCR."""
+    """Estratos etários operacionais para interpretação do LCR."""
     age = exprs.get("age")
     if not age:
         return None
-    neonatal_cutoff_years = 28 / 365.25
     return f"""
         CASE
             WHEN {age} IS NULL THEN 'Idade sem informação'
-            WHEN {age} < {neonatal_cutoff_years!r} THEN 'Neonatos (<28 dias)'
-            ELSE 'Crianças/adultos (≥28 dias)'
+            WHEN {age} <= {SINAN_LCR_NEONATAL_CUTOFF_YEARS!r} THEN 'Neonatos até seis meses de idade'
+            ELSE 'Crianças/adultos (>6 meses)'
         END
     """
 
@@ -5998,7 +6048,10 @@ def query_sinan_lcr_aspect_distribution(
     return df
 
 def query_sinan_discarded_meningitis_risk(
-    table: LoadedTable, exprs: Dict[str, Optional[str]], where_sql: str
+    table: LoadedTable,
+    exprs: Dict[str, Optional[str]],
+    where_sql: str,
+    stratification_sql: Optional[str] = None,
 ) -> pd.DataFrame:
     """Para casos descartados com LCR coletado, calcula quantos seriam
     classificáveis como possível meningite considerando isoladamente:
@@ -6007,26 +6060,32 @@ def query_sinan_discarded_meningitis_risk(
     - proteína elevada (>=45 mg/dL, menor limiar entre as faixas usadas).
     Cada critério é avaliado de forma independente (não é uma combinação AND),
     propositalmente, para mostrar o efeito de cada marcador isolado, como pedido.
+    Pode ser estratificado por idade operacional (neonatos até 6 meses x crianças/adultos).
     """
     leuco, glico, prot = exprs.get("lab_leuco"), exprs.get("lab_glico"), exprs.get("lab_prot")
     rows = []
+    estrato_sql = category_label_expr(stratification_sql, "Sem estrato") if stratification_sql else qstr("Todos")
 
     def _flag_query(label: str, value_expr: Optional[str], threshold_sql: str) -> Optional[pd.DataFrame]:
         if not value_expr:
             return None
+        valor_limpo = sinan_lcr_neutralize_sentinel_expr(value_expr)
         sql = f"""
             WITH base AS (
-                SELECT {value_expr} AS valor
+                SELECT {valor_limpo} AS valor,
+                       {estrato_sql} AS estrato
                 FROM {table.ref_sql}
                 {where_sql}
             ), valid AS (
-                SELECT valor FROM base WHERE valor IS NOT NULL AND valor >= 0
+                SELECT valor, estrato FROM base WHERE valor IS NOT NULL AND valor >= 0
             )
             SELECT {qstr(label)} AS criterio,
+                   estrato,
                    COUNT(*) FILTER (WHERE {threshold_sql}) AS n_sugestivo,
                    COUNT(*) AS denominador,
                    ROUND(100.0 * COUNT(*) FILTER (WHERE {threshold_sql}) / NULLIF(COUNT(*), 0), 1) AS pct_sugestivo
             FROM valid
+            GROUP BY estrato
         """
         return run_query(table, sql)
 
@@ -6042,7 +6101,10 @@ def query_sinan_discarded_meningitis_risk(
 
     if not rows:
         return pd.DataFrame()
-    return pd.concat(rows, ignore_index=True)
+    out = pd.concat(rows, ignore_index=True)
+    if not stratification_sql and "estrato" in out.columns:
+        out = out.drop(columns=["estrato"])
+    return out
 
 
 def query_sinan_confirmed_etiology_counts(
@@ -7412,25 +7474,58 @@ def render_quimio_classification_tab(
         return
     st.caption(f"Casos descartados com punção lombar realizada nos filtros atuais: {format_int_br(n_discarded_lcr)}.")
 
-    df_risk = query_sinan_discarded_meningitis_risk(table, exprs, discarded_where)
+    discarded_age_strat = sinan_lcr_age_stratum_expr(exprs)
+    discarded_strat_options = {"Sem estratificação por idade": None}
+    if discarded_age_strat:
+        discarded_strat_options[SINAN_LCR_AGE_STRATIFICATION_LABEL] = discarded_age_strat
+    discarded_strat_choice = st.selectbox(
+        "Estratificar este gráfico por idade",
+        list(discarded_strat_options.keys()),
+        key="sinan_descartados_lcr_risco_stratificacao_idade",
+        help="Permite comparar o perfil dos casos descartados entre neonatos até seis meses de idade e crianças/adultos (>6 meses).",
+    )
+    discarded_strat_sql = discarded_strat_options[discarded_strat_choice]
+    if discarded_age_strat:
+        st.caption(SINAN_LCR_AGE_STRATIFICATION_NOTE)
+    else:
+        st.caption("Estratificação etária não disponível porque a coluna de idade não foi detectada.")
+
+    df_risk = query_sinan_discarded_meningitis_risk(table, exprs, discarded_where, discarded_strat_sql)
     if df_risk.empty:
         st.info("Sem dados numéricos suficientes (LAB_LEUCO/LAB_GLICO/LAB_PROT) para esta análise.")
     else:
         df_risk = df_risk.rename(columns={"n_sugestivo": "n", "pct_sugestivo": "pct"})
         df_risk = add_text(df_risk)
-        fig_risk = px.bar(
-            df_risk,
-            x="criterio",
-            y="n",
-            text="texto",
-            title="Casos descartados cujo LCR seria sugestivo de meningite, por critério isolado",
-            labels={"criterio": "Critério avaliado isoladamente", "n": "Casos descartados", "pct": "%"},
-            hover_data={"texto": False, "pct": ":.1f", "denominador": True},
-        )
+        labels_risk = {"criterio": "Critério avaliado isoladamente", "n": "Casos descartados", "pct": "%", "estrato": "Estrato etário"}
+        hover_risk = {"texto": False, "pct": ":.1f", "denominador": True}
+        if discarded_strat_sql and "estrato" in df_risk.columns:
+            fig_risk = px.bar(
+                df_risk,
+                x="criterio",
+                y="n",
+                color="estrato",
+                barmode="group",
+                text="texto",
+                title="Casos descartados cujo LCR seria sugestivo de meningite, por critério isolado — estratificado por idade",
+                labels=labels_risk,
+                hover_data=hover_risk,
+                category_orders={"estrato": SINAN_LCR_AGE_STRATA_ORDER},
+            )
+        else:
+            fig_risk = px.bar(
+                df_risk,
+                x="criterio",
+                y="n",
+                text="texto",
+                title="Casos descartados cujo LCR seria sugestivo de meningite, por critério isolado",
+                labels=labels_risk,
+                hover_data=hover_risk,
+            )
         fig_risk.update_traces(textposition="outside", cliponaxis=False)
         fig_risk.update_layout(xaxis_tickangle=-15)
         render_plotly_chart(fig_risk)
-        copyable_dataframe(df_risk[["criterio", "n", "denominador", "pct"]], width="stretch", hide_index=True)
+        display_cols = ["criterio"] + (["estrato"] if "estrato" in df_risk.columns else []) + ["n", "denominador", "pct"]
+        copyable_dataframe(df_risk[display_cols], width="stretch", hide_index=True)
         download_button(df_risk, "sinan_descartados_risco_isolado.csv")
         st.caption(
             "Pleocitose isolada (leucócitos ≥ 20 céls/mm³) é o critério mais sensível e menos específico: muitas "
@@ -8043,6 +8138,12 @@ def render_sinan_lcr_indicators(table: LoadedTable, exprs: Dict[str, Optional[st
         if not df_quimio.empty:
             df_quimio = add_text(df_quimio)
             st.markdown("**Exame Quimiocitológico do líquor (LCR)**")
+            if exprs.get("quimio_inferred_from_params"):
+                st.caption(
+                    "LAB_LIQUOR não foi encontrado no banco; a realização do exame quimiocitológico foi inferida pela presença "
+                    "de pelo menos um parâmetro do LCR preenchido (hemácias, neutrófilos, glicose, leucócitos, eosinófilos, "
+                    "proteínas, monócitos, linfócitos ou cloreto)."
+                )
             fig_quimio_lcr = px.bar(
                 df_quimio,
                 x="n",
@@ -8058,7 +8159,10 @@ def render_sinan_lcr_indicators(table: LoadedTable, exprs: Dict[str, Optional[st
             render_interval_total(df_quimio, value_col="n")
             copyable_dataframe(df_quimio, width="stretch", hide_index=True)
     else:
-        st.info("LAB_LIQUOR não foi detectado; não é possível gerar o gráfico de exame quimiocitológico do LCR.")
+        st.info(
+            "Não foi detectado LAB_LIQUOR nem parâmetros quimiocitológicos do LCR suficientes "
+            "para inferir a realização do exame."
+        )
 
     with st.expander("📌 Tabela-resumo: como os parâmetros do LCR costumam se comportar por etiologia", expanded=True):
         render_quimio_interpretation()
@@ -8105,20 +8209,22 @@ def render_sinan_lcr_indicators(table: LoadedTable, exprs: Dict[str, Optional[st
     interval_strat = sinan_lcr_symptom_puncture_interval_expr(exprs)
     strat_options = {"Sem estratificação": None}
     if age_strat:
-        strat_options["Neonatos x crianças/adultos"] = age_strat
+        strat_options[SINAN_LCR_AGE_STRATIFICATION_LABEL] = age_strat
     if interval_strat:
         strat_options["Tempo entre primeiros sintomas e punção lombar"] = interval_strat
     if age_strat and interval_strat:
-        strat_options["Neonatos x crianças/adultos + tempo sintoma-punção"] = combine_sinan_lcr_strata_sql([age_strat, interval_strat])
+        strat_options[SINAN_LCR_AGE_STRATIFICATION_WITH_INTERVAL_LABEL] = combine_sinan_lcr_strata_sql([age_strat, interval_strat])
     strat_choice = st.selectbox(
         "Estratificar gráficos de distribuição por",
         list(strat_options.keys()),
         key="sinan_lcr_distribution_stratification",
-        help="Permite comparar padrões do LCR por idade neonatal e/ou pelo intervalo entre início dos sintomas e punção lombar.",
+        help="Permite comparar padrões do LCR sem estratificação por idade, por neonatos até seis meses versus crianças/adultos (>6 meses), e/ou pelo intervalo entre início dos sintomas e punção lombar.",
     )
     strat_sql = strat_options[strat_choice]
+    if age_strat:
+        st.caption(SINAN_LCR_AGE_STRATIFICATION_NOTE)
     if not age_strat:
-        st.caption("Estratificação neonatal não disponível porque a coluna de idade não foi detectada.")
+        st.caption("Estratificação etária do LCR não disponível porque a coluna de idade não foi detectada.")
     if not interval_strat:
         st.caption("Estratificação por tempo sintoma-punção não disponível porque DT_SIN_PRI e/ou a data da punção não foram detectadas.")
 
@@ -8153,7 +8259,11 @@ def render_sinan_lcr_indicators(table: LoadedTable, exprs: Dict[str, Optional[st
         hover_data = {"texto": False, "pct": ":.2f", "denominador": True, "faixa_inicio": ":.2f", "faixa_fim": ":.2f"}
         if "leitura" in dist.columns:
             hover_data["leitura"] = True
-        category_orders = {"faixa": sinan_lcr_distribution_bin_order(key)} if sinan_lcr_distribution_bin_order(key) else None
+        category_orders = {"faixa": sinan_lcr_distribution_bin_order(key)} if sinan_lcr_distribution_bin_order(key) else {}
+        if strat_choice == SINAN_LCR_AGE_STRATIFICATION_LABEL:
+            category_orders["estrato"] = SINAN_LCR_AGE_STRATA_ORDER
+        if not category_orders:
+            category_orders = None
         if strat_sql and "estrato" in dist.columns:
             fig_dist = px.bar(
                 dist,
@@ -8247,7 +8357,10 @@ def render_sinan_lcr_indicators(table: LoadedTable, exprs: Dict[str, Optional[st
                     title=f"Distribuição do aspecto do líquor — {strat_choice}",
                     labels=labels,
                     hover_data={"texto": False, "pct": ":.2f", "denominador": True},
-                    category_orders={"categoria": SINAN_LAB_ASPECT_ORDER},
+                    category_orders={
+                        "categoria": SINAN_LAB_ASPECT_ORDER,
+                        **({"estrato": SINAN_LCR_AGE_STRATA_ORDER} if strat_choice == SINAN_LCR_AGE_STRATIFICATION_LABEL else {}),
+                    },
                 )
             else:
                 fig_aspect = px.bar(
