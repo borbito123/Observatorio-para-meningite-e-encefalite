@@ -67,7 +67,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-06-30-v42-lcr-duas-analises"
+APP_VERSION = "2026-07-02-v43-lcr-cores-semanticas"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos
@@ -1582,6 +1582,80 @@ SINAN_LCR_EXPECTED_ASPECT = {
 #   numeric(3), 0–100), não contagens absolutas. "Predomínio" é definido aqui como
 #   o maior percentual entre LAB_NEUTRO e LAB_LINFO para o mesmo registro.
 SINAN_ETIOLOGY_GROUPS = ["Viral", "Bacteriana", "Tuberculosa", "Fúngica"]
+SINAN_ETIOLOGY_COLOR_MAP = {
+    "Viral": "#1F77B4",
+    "Bacteriana": "#FF7F0E",
+    "Tuberculosa": "#2CA02C",
+    "Fúngica": "#9467BD",
+}
+SINAN_LCR_RANGE_POSITION_ORDER = [
+    "Abaixo da faixa típica",
+    "Dentro da faixa típica",
+    "Acima da faixa típica",
+]
+SINAN_LCR_RANGE_POSITION_COLOR_MAP = {
+    "Abaixo da faixa típica": "#1F77B4",
+    "Dentro da faixa típica": "#2CA02C",
+    "Acima da faixa típica": "#FF7F0E",
+}
+SINAN_LCR_PREDOMINIO_STATUS_ORDER = [
+    "Compatível com o esperado",
+    "Discordante do esperado",
+    "Empate/indefinido",
+]
+SINAN_LCR_PREDOMINIO_STATUS_COLOR_MAP = {
+    "Compatível com o esperado": "#2CA02C",
+    "Discordante do esperado": "#D62728",
+    "Empate/indefinido": "#7F7F7F",
+}
+SINAN_LCR_GLUCOSE_POSITION_ORDER = [
+    "Preservada (esperado)",
+    "Reduzida (esperado)",
+    "Reduzida (atípico p/ viral)",
+    "Preservada (atípico)",
+]
+SINAN_LCR_GLUCOSE_POSITION_COLOR_MAP = {
+    "Preservada (esperado)": "#2CA02C",
+    "Reduzida (esperado)": "#2CA02C",
+    "Reduzida (atípico p/ viral)": "#D62728",
+    "Preservada (atípico)": "#FF7F0E",
+}
+SINAN_LCR_ASPECT_STATUS_ORDER = [
+    "Compatível com o esperado",
+    "Discordante do esperado",
+    "Outro aspecto/atípico",
+    "Ignorado/sem informação",
+]
+SINAN_LCR_ASPECT_STATUS_COLOR_MAP = {
+    "Compatível com o esperado": "#2CA02C",
+    "Discordante do esperado": "#D62728",
+    "Outro aspecto/atípico": "#FF7F0E",
+    "Ignorado/sem informação": "#7F7F7F",
+}
+SINAN_LCR_INDEPENDENT_CLASS_ORDER = SINAN_ETIOLOGY_GROUPS + [
+    "Indeterminado/empate",
+    "Indeterminado/baixo suporte",
+    "Sem dados suficientes",
+]
+SINAN_LCR_INDEPENDENT_CLASS_COLOR_MAP = {
+    **SINAN_ETIOLOGY_COLOR_MAP,
+    "Indeterminado/empate": "#7F7F7F",
+    "Indeterminado/baixo suporte": "#BCBD22",
+    "Sem dados suficientes": "#BDBDBD",
+}
+SINAN_LCR_VS_SINAN_STATUS_ORDER = [
+    "Concordante com SINAN",
+    "Discordante do SINAN",
+    "Indeterminado pelo LCR",
+    "Sem grupo SINAN comparável",
+]
+SINAN_LCR_VS_SINAN_STATUS_COLOR_MAP = {
+    "Concordante com SINAN": "#2CA02C",
+    "Discordante do SINAN": "#D62728",
+    "Indeterminado pelo LCR": "#7F7F7F",
+    "Sem grupo SINAN comparável": "#BDBDBD",
+}
+SINAN_LCR_SMALL_DENOMINATOR_WARNING_N = 20
 
 # Faixas operacionais usadas nos algoritmos do painel. Leucócitos em células/mm³,
 # proteínas em mg/dL e glicose em mg/dL absoluto no LCR (proxy quando não há soro).
@@ -1701,6 +1775,69 @@ def sinan_lcr_distribution_bin_specs(param_key: str) -> List[Dict[str, object]]:
 
 def sinan_lcr_distribution_bin_order(param_key: str) -> List[str]:
     return [str(spec["label"]) for spec in sinan_lcr_distribution_bin_specs(param_key)]
+
+
+# =============================================================================
+# Códigos sentinela e tetos de plausibilidade — parâmetros quimiocitológicos do LCR
+# (correções 3 e 4 do plano de correção priorizado)
+# =============================================================================
+# Antes desta correção, o único filtro de plausibilidade aplicado a qualquer
+# parâmetro numérico do LCR era "valor >= 0". Códigos sentinela usados em bases
+# DATASUS/SINAN para "ignorado" em campos numéricos (tipicamente 999 / 9999 /
+# 99999) entravam como se fossem valores reais, distorcendo média, mediana e a
+# própria distribuição em faixas clínicas. Da mesma forma, não havia teto de
+# plausibilidade para os parâmetros absolutos (glicose, proteína, leucócitos,
+# hemácias, cloreto) — só os percentuais já tinham a faixa ">100%" para
+# sinalizar valor incompatível.
+#
+# *** OBSERVAÇÃO IMPORTANTE — NÃO VALIDADO CONTRA O DICIONÁRIO OFICIAL SINAN ***
+# Os códigos sentinela e os tetos de plausibilidade abaixo são uma heurística
+# razoável — códigos sentinela comuns em bases DATASUS e tetos clínicos
+# conservadores baseados em extremos descritos na literatura (ex.: Mandell) —
+# mas NÃO foram confirmados campo a campo junto ao dicionário de dados oficial
+# do SINAN NET para LAB_GLICO / LAB_LEUCO / LAB_PROT / LAB_HEMA / LAB_CLOR, e
+# esses códigos podem variar entre versões da ficha de investigação de
+# meningite. Antes de usar este painel para relatórios formais ou decisões,
+# confirme os códigos e tetos exatos junto ao dicionário de dados oficial do
+# SINAN e ajuste as constantes abaixo. Até essa confirmação, trate os valores
+# como provisórios/heurísticos, não como referência validada.
+SINAN_LCR_SENTINEL_CODES = {999, 9999, 99999}
+
+# Tetos de plausibilidade por parâmetro ABSOLUTO (não se aplica aos percentuais
+# neutro/linfo/mono/eosi, que já usam a faixa ">100%" de
+# SINAN_LCR_DISTRIBUTION_BIN_SPECS). Valores acima do teto NÃO são descartados
+# silenciosamente: são apenas sinalizados (ver n_acima_teto_plausibilidade em
+# query_sinan_quimio_summary), preservando o dado original para auditoria.
+SINAN_LCR_PLAUSIBLE_MAX = {
+    "leuco": 50000,   # células/mm³ — extremo superior descrito em bacteriana grave
+    "prot": 2000,     # mg/dL
+    "hema": 1000000,  # células/mm³ (punção traumática pode elevar bastante)
+    "glico": 500,     # mg/dL — hiperglicemia extrema / possível erro de unidade
+    "clor": 200,      # mEq/L — fora da faixa fisiologicamente plausível de LCR
+}
+
+
+def sinan_lcr_neutralize_sentinel_expr(value_expr: str) -> str:
+    """Neutraliza (converte para NULL) códigos sentinela conhecidos de "ignorado"
+    (ex.: 999/9999/99999) antes que entrem nas estatísticas ou nos bins de
+    distribuição do LCR.
+
+    ATENÇÃO: ver observação em SINAN_LCR_SENTINEL_CODES — os códigos usados aqui
+    são uma heurística comum em bases DATASUS, ainda NÃO confirmada campo a
+    campo contra o dicionário de dados oficial do SINAN NET. Revisar antes de
+    uso em relatórios formais.
+    """
+    codes = ", ".join(str(c) for c in sorted(SINAN_LCR_SENTINEL_CODES))
+    return f"CASE WHEN ({value_expr}) IN ({codes}) THEN NULL ELSE ({value_expr}) END"
+
+
+def sinan_lcr_plausible_max(param_key: str) -> Optional[float]:
+    """Teto de plausibilidade do parâmetro, se definido para essa chave.
+
+    ATENÇÃO: ver observação em SINAN_LCR_PLAUSIBLE_MAX — tetos provisórios, não
+    validados clinicamente/contra o dicionário oficial do SINAN.
+    """
+    return SINAN_LCR_PLAUSIBLE_MAX.get(param_key)
 
 
 # Mapeia CON_DIAGES (+ CLA_ME_ETI para refinar a categoria 08 "outra etiologia")
@@ -3594,6 +3731,7 @@ def default_selections(source: str, columns: Sequence[str]) -> ColumnSelection:
     education_candidates = {
         "SINAN": ["CS_ESCOL_N", "ESCOLARIDADE", "ESCOLARI", "CS_ESCOL", "ESCOL_N"],
         "SIM": ["ESC2010", "ESC", "ESCOLARIDADE", "ESCOLARI", "ESCFALAGR1"],
+        "CIHA": ["ESCOLARIDADE", "ESCOLARI", "ESC2010", "ESC", "INSTRUCAO", "GRAU_INSTRUCAO", "NIVEL_INSTRUCAO"],
     }.get(source, [])
     sel.education_col = choose_candidate(columns, education_candidates)
     if source == "SINAN":
@@ -4018,21 +4156,60 @@ def query_sinan_category_outcomes(
     return run_query(table, sql)
 
 
+def _education_labels_are_fixed(source: str) -> bool:
+    """Indica se a fonte possui lista fechada de categorias de escolaridade."""
+    return source in {"SINAN", "SIM"}
+
+
+def _age_stratum_label_sql(age_alias: str = "idade") -> str:
+    """Rótulo de faixa etária quinquenal a partir de uma coluna/alias em anos."""
+    return f"""
+    CASE
+        WHEN {age_alias} BETWEEN 0 AND 130 THEN
+            CAST(CAST(FLOOR({age_alias} / 5) * 5 AS INTEGER) AS VARCHAR)
+            || '–' ||
+            CAST(CAST(FLOOR({age_alias} / 5) * 5 + 4 AS INTEGER) AS VARCHAR)
+        ELSE 'Idade sem informação/inválida'
+    END
+    """
+
+
+def _age_stratum_order_sql(age_alias: str = "idade") -> str:
+    """Ordem numérica da faixa etária quinquenal; valores sem idade ficam no final."""
+    return f"""
+    CASE
+        WHEN {age_alias} BETWEEN 0 AND 130 THEN CAST(FLOOR({age_alias} / 5) * 5 AS INTEGER)
+        ELSE 9999
+    END
+    """
+
+
 def query_education_distribution_all_categories(
     table: LoadedTable,
     source: str,
     education_sql: str,
     where_sql: str,
 ) -> pd.DataFrame:
-    labels = education_category_labels(source, education_sql, include_missing=True)
-    cats_cte = values_cte_from_labels(labels, "categoria", "ordem_categoria")
+    fixed_labels = _education_labels_are_fixed(source)
+    if fixed_labels:
+        labels = education_category_labels(source, education_sql, include_missing=True)
+        categorias_cte = values_cte_from_labels(labels, "categoria", "ordem_categoria")
+    else:
+        categorias_cte = """
+            SELECT categoria, ROW_NUMBER() OVER (ORDER BY n DESC, categoria) AS ordem_categoria
+            FROM (
+                SELECT categoria, COUNT(*) AS n
+                FROM base
+                GROUP BY 1
+            ) categorias_dinamicas
+        """
     sql = f"""
-        WITH categorias AS (
-            {cats_cte}
-        ), base AS (
+        WITH base AS (
             SELECT COALESCE({education_sql}, 'Sem informação/ignorado') AS categoria
             FROM {table.ref_sql}
             {where_sql}
+        ), categorias AS (
+            {categorias_cte}
         ), counts AS (
             SELECT categoria, COUNT(*) AS n
             FROM base
@@ -4055,6 +4232,178 @@ def query_education_distribution_all_categories(
         ORDER BY categorias.ordem_categoria
     """
     return run_query(table, sql)
+
+
+def query_education_distribution_by_age(
+    table: LoadedTable,
+    source: str,
+    education_sql: str,
+    age_sql: str,
+    where_sql: str,
+) -> pd.DataFrame:
+    """Distribuição de escolaridade por faixa etária quinquenal.
+
+    Para SINAN e SIM, preserva as categorias operacionais fechadas de escolaridade.
+    Para CIHA, usa as categorias existentes no campo detectado, pois não há lista
+    padronizada no app equivalente às tabelas de SINAN/SIM.
+    """
+    fixed_labels = _education_labels_are_fixed(source)
+    if fixed_labels:
+        labels = education_category_labels(source, education_sql, include_missing=True)
+        categorias_cte = values_cte_from_labels(labels, "categoria", "ordem_categoria")
+    else:
+        categorias_cte = """
+            SELECT categoria, ROW_NUMBER() OVER (ORDER BY n DESC, categoria) AS ordem_categoria
+            FROM (
+                SELECT categoria, COUNT(*) AS n
+                FROM base
+                GROUP BY 1
+            ) categorias_dinamicas
+        """
+    faixa_label = _age_stratum_label_sql("idade")
+    faixa_order = _age_stratum_order_sql("idade")
+    sql = f"""
+        WITH raw AS (
+            SELECT
+                COALESCE({education_sql}, 'Sem informação/ignorado') AS categoria,
+                {age_sql} AS idade
+            FROM {table.ref_sql}
+            {where_sql}
+        ), base AS (
+            SELECT
+                categoria,
+                {faixa_label} AS faixa_etaria,
+                {faixa_order} AS faixa_ini
+            FROM raw
+        ), categorias AS (
+            {categorias_cte}
+        ), faixas AS (
+            SELECT faixa_etaria, faixa_ini
+            FROM base
+            GROUP BY 1, 2
+        ), grid AS (
+            SELECT c.categoria, c.ordem_categoria, f.faixa_etaria, f.faixa_ini
+            FROM categorias c
+            CROSS JOIN faixas f
+        ), counts AS (
+            SELECT categoria, faixa_etaria, faixa_ini, COUNT(*) AS n
+            FROM base
+            GROUP BY 1, 2, 3
+        ), totals AS (
+            SELECT faixa_etaria, faixa_ini, COUNT(*) AS denominador
+            FROM base
+            GROUP BY 1, 2
+        )
+        SELECT
+            grid.categoria,
+            grid.faixa_etaria,
+            grid.faixa_ini,
+            COALESCE(counts.n, 0) AS n,
+            COALESCE(totals.denominador, 0) AS denominador,
+            CASE WHEN COALESCE(totals.denominador, 0) > 0
+                 THEN ROUND(100.0 * COALESCE(counts.n, 0) / totals.denominador, 2)
+                 ELSE NULL END AS pct,
+            grid.ordem_categoria
+        FROM grid
+        LEFT JOIN counts
+          ON counts.categoria = grid.categoria
+         AND counts.faixa_etaria = grid.faixa_etaria
+         AND counts.faixa_ini = grid.faixa_ini
+        LEFT JOIN totals
+          ON totals.faixa_etaria = grid.faixa_etaria
+         AND totals.faixa_ini = grid.faixa_ini
+        ORDER BY grid.faixa_ini, grid.ordem_categoria
+    """
+    return run_query(table, sql)
+
+
+def query_sinan_education_outcomes_by_age(
+    table: LoadedTable,
+    education_sql: str,
+    classi_sql: str,
+    age_sql: str,
+    where_sql: str,
+) -> pd.DataFrame:
+    """Escolaridade do SINAN por grupo de classificação e faixa etária quinquenal."""
+    escolaridade_labels = education_category_labels("SINAN", include_missing=True)
+    cats_cte = values_cte_from_labels(escolaridade_labels, "escolaridade", "ordem_escolaridade")
+    group_values = ", ".join(
+        f"({qstr(label)}, {idx})"
+        for idx, label in enumerate(["Casos confirmados", "Casos descartados"], start=1)
+    )
+    faixa_label = _age_stratum_label_sql("idade")
+    faixa_order = _age_stratum_order_sql("idade")
+    sql = f"""
+        WITH raw AS (
+            SELECT
+                COALESCE({education_sql}, 'Sem informação/ignorado') AS escolaridade,
+                {classi_sql} AS classi,
+                {age_sql} AS idade
+            FROM {table.ref_sql}
+            {where_sql}
+        ), base AS (
+            SELECT
+                escolaridade,
+                classi,
+                {faixa_label} AS faixa_etaria,
+                {faixa_order} AS faixa_ini
+            FROM raw
+        ), categorias AS (
+            {cats_cte}
+        ), grupos_ref AS (
+            SELECT * FROM (VALUES {group_values}) AS t(grupo, ordem_grupo)
+        ), faixas AS (
+            SELECT faixa_etaria, faixa_ini
+            FROM base
+            GROUP BY 1, 2
+        ), grid AS (
+            SELECT g.grupo, g.ordem_grupo, f.faixa_etaria, f.faixa_ini, c.escolaridade, c.ordem_escolaridade
+            FROM grupos_ref g
+            CROSS JOIN faixas f
+            CROSS JOIN categorias c
+        ), grupos AS (
+            SELECT 'Casos confirmados' AS grupo, faixa_etaria, faixa_ini, escolaridade
+            FROM base
+            WHERE classi = '1'
+            UNION ALL
+            SELECT 'Casos descartados' AS grupo, faixa_etaria, faixa_ini, escolaridade
+            FROM base
+            WHERE classi = '2'
+        ), counts AS (
+            SELECT grupo, faixa_etaria, faixa_ini, escolaridade, COUNT(*) AS n
+            FROM grupos
+            GROUP BY 1, 2, 3, 4
+        ), totals AS (
+            SELECT grupo, faixa_etaria, faixa_ini, COUNT(*) AS denominador
+            FROM grupos
+            GROUP BY 1, 2, 3
+        )
+        SELECT
+            grid.grupo,
+            grid.faixa_etaria,
+            grid.faixa_ini,
+            grid.escolaridade,
+            COALESCE(counts.n, 0) AS n,
+            COALESCE(totals.denominador, 0) AS denominador,
+            CASE WHEN COALESCE(totals.denominador, 0) > 0
+                 THEN ROUND(100.0 * COALESCE(counts.n, 0) / totals.denominador, 2)
+                 ELSE NULL END AS pct,
+            grid.ordem_escolaridade,
+            grid.ordem_grupo
+        FROM grid
+        LEFT JOIN counts
+          ON counts.grupo = grid.grupo
+         AND counts.faixa_etaria = grid.faixa_etaria
+         AND counts.faixa_ini = grid.faixa_ini
+         AND counts.escolaridade = grid.escolaridade
+        LEFT JOIN totals
+          ON totals.grupo = grid.grupo
+         AND totals.faixa_etaria = grid.faixa_etaria
+         AND totals.faixa_ini = grid.faixa_ini
+        ORDER BY grid.faixa_ini, grid.ordem_escolaridade, grid.ordem_grupo
+    """
+    return run_query(table, sql)
+
 
 def query_yearly_category(table: LoadedTable, dt_sql: str, category_sql: str, where_sql: str) -> pd.DataFrame:
     cat_sql = category_label_expr(category_sql)
@@ -4632,15 +4981,55 @@ def sinan_quimio_param_exprs(exprs: Dict[str, Optional[str]]) -> List[Tuple[str,
     return params
 
 
+def sinan_lcr_eligible_where(exprs: Dict[str, Optional[str]], base_where: str) -> str:
+    """Restringe a base a quem teve punção lombar e exame quimiocitológico do LCR
+    realizados (correção 2 do plano priorizado — depende da mesma cláusula de
+    elegibilidade já usada corretamente na "Análise 2 — Classificação provável
+    pelo LCR", ver `independent_where` mais abaixo neste arquivo).
+
+    Usada para calcular a COMPLETUDE de preenchimento de cada parâmetro entre
+    quem foi de fato puncionado — e não sobre o recorte geral de filtros da
+    página (graph_where), que mistura "não indicado clinicamente" com "campo mal
+    preenchido no SINAN".
+    """
+    where_sql = base_where
+    if exprs.get("puncao_code"):
+        where_sql = append_clause(where_sql, f"{exprs['puncao_code']} = '1'")
+    if exprs.get("quimio_code"):
+        where_sql = append_clause(where_sql, f"{exprs['quimio_code']} = '1'")
+    return where_sql
+
+
 def query_sinan_quimio_summary(table: LoadedTable, exprs: Dict[str, Optional[str]], where_sql: str) -> pd.DataFrame:
+    """Resumo estatístico dos parâmetros quimiocitológicos do LCR.
+
+    IMPORTANTE (correção 2): `where_sql` deve ser a base já restrita a quem teve
+    punção lombar e exame quimiocitológico realizados — construída com
+    `sinan_lcr_eligible_where` — para que `pct_preenchido` reflita completude de
+    registro entre os elegíveis, e não uma mistura com quem nunca teve indicação
+    de puncionar.
+
+    IMPORTANTE (correções 3 e 4): cada valor passa por
+    `sinan_lcr_neutralize_sentinel_expr` antes de entrar nas estatísticas (para
+    não deixar códigos sentinela de "ignorado" contaminarem média/mediana/bins),
+    e valores acima do teto de plausibilidade do parâmetro são contados em
+    `n_acima_teto_plausibilidade` — sinalizados, não descartados. Ver a
+    observação em SINAN_LCR_SENTINEL_CODES/SINAN_LCR_PLAUSIBLE_MAX: esses
+    códigos e tetos ainda não foram confirmados contra o dicionário oficial do
+    SINAN e devem ser tratados como provisórios.
+    """
     params = sinan_quimio_param_exprs(exprs)
     if not params:
         return pd.DataFrame()
     unions = []
     for key, label, value_expr in params:
+        valor_limpo = sinan_lcr_neutralize_sentinel_expr(value_expr)
+        teto = sinan_lcr_plausible_max(key)
+        teto_sql = "CAST(NULL AS DOUBLE)" if teto is None else repr(float(teto))
         unions.append(
             f"""
-            SELECT {qstr(key)} AS parametro_id, {qstr(SINAN_QUIMIO_MATERIAL)} AS material_analisado, {qstr(label)} AS parametro, {value_expr} AS valor
+            SELECT {qstr(key)} AS parametro_id, {qstr(SINAN_QUIMIO_MATERIAL)} AS material_analisado, {qstr(label)} AS parametro,
+                   {valor_limpo} AS valor, {teto_sql} AS teto_plausibilidade
             FROM {table.ref_sql}
             {where_sql}
             """
@@ -4655,6 +5044,7 @@ def query_sinan_quimio_summary(table: LoadedTable, exprs: Dict[str, Optional[str
                COUNT(*) AS registros_avaliados,
                COUNT(*) FILTER (WHERE valor IS NOT NULL AND valor >= 0) AS n_valido,
                COUNT(*) FILTER (WHERE valor IS NULL OR valor < 0) AS n_sem_valor,
+               COUNT(*) FILTER (WHERE valor IS NOT NULL AND teto_plausibilidade IS NOT NULL AND valor > teto_plausibilidade) AS n_acima_teto_plausibilidade,
                ROUND(100.0 * COUNT(*) FILTER (WHERE valor IS NOT NULL AND valor >= 0) / NULLIF(COUNT(*), 0), 2) AS pct_preenchido,
                MIN(valor) FILTER (WHERE valor IS NOT NULL AND valor >= 0) AS minimo,
                quantile_cont(valor, 0.25) FILTER (WHERE valor IS NOT NULL AND valor >= 0) AS q1,
@@ -5006,6 +5396,12 @@ def query_sinan_numeric_distribution_stratified_by_reference_bins(
     specs = sinan_lcr_distribution_bin_specs(param_key)
     if not specs:
         return query_sinan_numeric_distribution_stratified(table, value_expr, where_sql, stratification_sql)
+
+    # Correção 3: neutraliza códigos sentinela de "ignorado" (ex.: 999/9999/99999)
+    # antes de classificar o valor nas faixas clínicas fixas, para que eles não
+    # sejam contados como dado real em nenhum bin. Ver observação sobre a
+    # natureza provisória desses códigos em SINAN_LCR_SENTINEL_CODES.
+    value_expr = sinan_lcr_neutralize_sentinel_expr(value_expr)
 
     def sql_literal_or_null(value: object) -> str:
         if value is None:
@@ -6673,6 +7069,34 @@ def render_quimio_classification_tab(
         out["texto"] = [f"{br_int(n)} ({br_pct(p)})" for n, p in zip(out[n_col], out[pct_col])]
         return out
 
+    def improve_lcr_stacked_bar_readability(fig: go.Figure) -> go.Figure:
+        """Normaliza barras empilhadas para comparar proporções e evita texto ilegível em segmentos pequenos."""
+        if fig is None:
+            return fig
+        fig.update_traces(textposition="auto", cliponaxis=False)
+        fig.update_layout(barnorm="percent", uniformtext_minsize=9, uniformtext_mode="hide")
+        fig.update_yaxes(title_text="Percentual dentro do grupo (%)", ticksuffix="%")
+        return fig
+
+    def warn_small_denominators(df: pd.DataFrame, group_col: str, denom_col: str = "denominador") -> None:
+        """Sinaliza quando percentuais foram calculados sobre denominadores pequenos."""
+        if df.empty or group_col not in df.columns or denom_col not in df.columns:
+            return
+        denom = df[[group_col, denom_col]].dropna().drop_duplicates().copy()
+        denom[denom_col] = pd.to_numeric(denom[denom_col], errors="coerce")
+        small = denom[(denom[denom_col] > 0) & (denom[denom_col] < SINAN_LCR_SMALL_DENOMINATOR_WARNING_N)]
+        if small.empty:
+            return
+        small = small.sort_values([denom_col, group_col])
+        examples = "; ".join(
+            f"{row[group_col]}: N={format_int_br(int(row[denom_col]))}"
+            for _, row in small.iterrows()
+        )
+        st.caption(
+            f"Atenção: percentuais com denominador pequeno podem ser instáveis "
+            f"(<{SINAN_LCR_SMALL_DENOMINATOR_WARNING_N} registros/casos): {examples}."
+        )
+
     # -------------------------------------------------------------------
     # Análise 1 — Aderência do LCR à etiologia oficial do SINAN
     # -------------------------------------------------------------------
@@ -6714,9 +7138,10 @@ def render_quimio_classification_tab(
             title="Casos confirmados por grupo etiológico (com LCR)",
             labels={"grupo_etiologico": "Grupo etiológico", "n": "Casos"},
             color="grupo_etiologico",
-            color_discrete_sequence=APP_COLOR_SEQUENCE,
+            category_orders={"grupo_etiologico": SINAN_ETIOLOGY_GROUPS},
+            color_discrete_map=SINAN_ETIOLOGY_COLOR_MAP,
         )
-        render_plotly_chart(fig_counts)
+        render_plotly_chart(preserve_trace_colors(fig_counts))
 
         param_labels = {"leuco": "Leucócitos", "prot": "Proteínas"}
         for param, label in param_labels.items():
@@ -6734,15 +7159,15 @@ def render_quimio_classification_tab(
                 barmode="stack",
                 title=f"{label}: posição em relação à faixa esperada, por grupo etiológico confirmado",
                 labels={"grupo_etiologico": "Grupo etiológico", "n": "Casos", "posicao": "Posição"},
-                category_orders={"posicao": ["Abaixo da faixa típica", "Dentro da faixa típica", "Acima da faixa típica"]},
-                color_discrete_map={
-                    "Abaixo da faixa típica": "#1F77B4",
-                    "Dentro da faixa típica": "#2CA02C",
-                    "Acima da faixa típica": "#FF7F0E",
+                category_orders={
+                    "grupo_etiologico": SINAN_ETIOLOGY_GROUPS,
+                    "posicao": SINAN_LCR_RANGE_POSITION_ORDER,
                 },
+                color_discrete_map=SINAN_LCR_RANGE_POSITION_COLOR_MAP,
             )
-            fig.update_traces(textposition="inside")
-            render_plotly_chart(fig)
+            improve_lcr_stacked_bar_readability(fig)
+            render_plotly_chart(preserve_trace_colors(fig))
+            warn_small_denominators(df_param, "grupo_etiologico")
             copyable_dataframe(
                 df_param[["grupo_etiologico", "posicao", "n", "denominador", "pct"]],
                 width="stretch",
@@ -6763,15 +7188,15 @@ def render_quimio_classification_tab(
                     barmode="stack",
                     title="Predomínio celular (neutrófilos x linfócitos) observado vs. esperado",
                     labels={"grupo_etiologico": "Grupo etiológico", "n": "Casos", "situacao": "Situação"},
-                    category_orders={"situacao": ["Compatível com o esperado", "Discordante do esperado", "Empate/indefinido"]},
-                    color_discrete_map={
-                        "Compatível com o esperado": "#2CA02C",
-                        "Discordante do esperado": "#D62728",
-                        "Empate/indefinido": "#7F7F7F",
+                    category_orders={
+                        "grupo_etiologico": SINAN_ETIOLOGY_GROUPS,
+                        "situacao": SINAN_LCR_PREDOMINIO_STATUS_ORDER,
                     },
+                    color_discrete_map=SINAN_LCR_PREDOMINIO_STATUS_COLOR_MAP,
                 )
-                fig_pred.update_traces(textposition="inside")
-                render_plotly_chart(fig_pred)
+                improve_lcr_stacked_bar_readability(fig_pred)
+                render_plotly_chart(preserve_trace_colors(fig_pred))
+                warn_small_denominators(df_pred, "grupo_etiologico")
                 copyable_dataframe(
                     df_pred[["grupo_etiologico", "situacao", "n", "denominador", "pct"]],
                     width="stretch",
@@ -6798,9 +7223,15 @@ def render_quimio_classification_tab(
                 barmode="stack",
                 title="Glicose absoluta no LCR: reduzida x preservada, por grupo etiológico confirmado",
                 labels={"grupo_etiologico": "Grupo etiológico", "n": "Casos", "posicao": "Posição"},
+                category_orders={
+                    "grupo_etiologico": SINAN_ETIOLOGY_GROUPS,
+                    "posicao": SINAN_LCR_GLUCOSE_POSITION_ORDER,
+                },
+                color_discrete_map=SINAN_LCR_GLUCOSE_POSITION_COLOR_MAP,
             )
-            fig_glico.update_traces(textposition="inside")
-            render_plotly_chart(fig_glico)
+            improve_lcr_stacked_bar_readability(fig_glico)
+            render_plotly_chart(preserve_trace_colors(fig_glico))
+            warn_small_denominators(df_glico, "grupo_etiologico")
             copyable_dataframe(
                 df_glico[["grupo_etiologico", "posicao", "n", "denominador", "pct"]],
                 width="stretch",
@@ -6825,17 +7256,16 @@ def render_quimio_classification_tab(
                 barmode="stack",
                 title="Aspecto do líquor observado vs. esperado, por grupo etiológico confirmado",
                 labels={"grupo_etiologico": "Grupo etiológico", "n": "Casos", "situacao": "Situação", "aspecto_esperado": "Aspecto esperado"},
-                category_orders={"situacao": ["Compatível com o esperado", "Discordante do esperado", "Outro aspecto/atípico", "Ignorado/sem informação"]},
-                color_discrete_map={
-                    "Compatível com o esperado": "#2CA02C",
-                    "Discordante do esperado": "#D62728",
-                    "Outro aspecto/atípico": "#FF7F0E",
-                    "Ignorado/sem informação": "#7F7F7F",
+                category_orders={
+                    "grupo_etiologico": SINAN_ETIOLOGY_GROUPS,
+                    "situacao": SINAN_LCR_ASPECT_STATUS_ORDER,
                 },
+                color_discrete_map=SINAN_LCR_ASPECT_STATUS_COLOR_MAP,
                 hover_data={"texto": False, "pct": ":.1f", "denominador": True, "aspecto_esperado": True, "aspectos_observados": True},
             )
-            fig_aspecto.update_traces(textposition="inside")
-            render_plotly_chart(fig_aspecto)
+            improve_lcr_stacked_bar_readability(fig_aspecto)
+            render_plotly_chart(preserve_trace_colors(fig_aspecto))
+            warn_small_denominators(df_aspecto, "grupo_etiologico")
             copyable_dataframe(
                 df_aspecto[["grupo_etiologico", "aspecto_esperado", "situacao", "aspectos_observados", "n", "denominador", "pct"]],
                 width="stretch",
@@ -6885,7 +7315,7 @@ def render_quimio_classification_tab(
         else:
             df_independent = add_text(df_independent)
             case_order = ["Casos confirmados", "Casos descartados", "Sem classificação / ignorados", "Casos avaliados"]
-            class_order = SINAN_ETIOLOGY_GROUPS + ["Indeterminado/empate", "Indeterminado/baixo suporte", "Sem dados suficientes"]
+            class_order = SINAN_LCR_INDEPENDENT_CLASS_ORDER
             fig_independent = px.bar(
                 df_independent,
                 x="grupo_caso",
@@ -6896,10 +7326,12 @@ def render_quimio_classification_tab(
                 title="Classificação provável pelo LCR — distribuição por definição de caso",
                 labels={"grupo_caso": "Definição de caso", "n": "Registros", "classificacao_lcr": "Classificação pelo LCR"},
                 category_orders={"grupo_caso": case_order, "classificacao_lcr": class_order},
+                color_discrete_map=SINAN_LCR_INDEPENDENT_CLASS_COLOR_MAP,
                 hover_data={"texto": False, "pct": ":.1f", "denominador": True, "suporte_medio_pct": ":.1f"},
             )
-            fig_independent.update_traces(textposition="inside")
-            render_plotly_chart(fig_independent)
+            improve_lcr_stacked_bar_readability(fig_independent)
+            render_plotly_chart(preserve_trace_colors(fig_independent))
+            warn_small_denominators(df_independent, "grupo_caso")
             copyable_dataframe(
                 df_independent[["grupo_caso", "classificacao_lcr", "n", "denominador", "pct", "suporte_medio_pct"]],
                 width="stretch",
@@ -6932,12 +7364,14 @@ def render_quimio_classification_tab(
                     },
                     category_orders={
                         "grupo_etiologico_sinan": SINAN_ETIOLOGY_GROUPS,
-                        "situacao_vs_sinan": ["Concordante com SINAN", "Discordante do SINAN", "Indeterminado pelo LCR", "Sem grupo SINAN comparável"],
+                        "situacao_vs_sinan": SINAN_LCR_VS_SINAN_STATUS_ORDER,
                     },
+                    color_discrete_map=SINAN_LCR_VS_SINAN_STATUS_COLOR_MAP,
                     hover_data={"texto": False, "classificacao_lcr": True, "pct": ":.1f", "denominador": True, "suporte_medio_pct": ":.1f"},
                 )
-                fig_vs_sinan.update_traces(textposition="inside")
-                render_plotly_chart(fig_vs_sinan)
+                improve_lcr_stacked_bar_readability(fig_vs_sinan)
+                render_plotly_chart(preserve_trace_colors(fig_vs_sinan))
+                warn_small_denominators(df_vs_sinan, "grupo_etiologico_sinan")
                 copyable_dataframe(
                     df_vs_sinan[["grupo_etiologico_sinan", "classificacao_lcr", "situacao_vs_sinan", "n", "denominador", "pct", "suporte_medio_pct"]],
                     width="stretch",
@@ -7494,6 +7928,52 @@ def render_temporal_tab(table: LoadedTable, source: str, graph_where: str, exprs
 
 
 
+# Limiar mínimo de célula para os gráficos estratificados do LCR (correção 5).
+# Abaixo deste n, a barra é exibida com opacidade reduzida em vez de ser tratada
+# como um padrão robusto — célula com n=1 ou n=2 pode virar uma barra de 100%
+# dentro do estrato e induzir leitura equivocada. Valor ajustável pelo usuário
+# na interface (ver `st.number_input` em render_sinan_lcr_indicators).
+SINAN_LCR_MIN_CELL_SIZE_DEFAULT = 5
+
+
+def sinan_lcr_apply_small_cell_opacity(
+    fig: go.Figure,
+    df: pd.DataFrame,
+    min_cell: int,
+    x_col: str = "faixa",
+    color_col: Optional[str] = None,
+) -> bool:
+    """Reduz a opacidade das barras cuja célula (n) fica abaixo de `min_cell`.
+
+    Funciona tanto para gráficos simples quanto para gráficos agrupados por
+    `color_col` (ex.: estrato), casando cada traço do Plotly com a linha
+    correspondente de `df` pelo valor de `x_col` (e de `color_col`, quando
+    aplicável). Retorna True se algum traço foi marcado como amostra pequena,
+    para permitir exibir um aviso condicional na interface.
+    """
+    if df.empty or "n" not in df.columns or x_col not in df.columns:
+        return False
+    has_small_cell = False
+    for trace in fig.data:
+        if color_col and color_col in df.columns:
+            subset = df[df[color_col] == trace.name]
+        else:
+            subset = df
+        if subset.empty:
+            continue
+        lookup = subset.drop_duplicates(subset=[x_col]).set_index(x_col)["n"]
+        opacities = []
+        for x_val in trace.x:
+            n_val = lookup.get(x_val)
+            if n_val is not None and n_val < min_cell:
+                opacities.append(0.35)
+                has_small_cell = True
+            else:
+                opacities.append(1.0)
+        trace.marker.opacity = opacities
+    return has_small_cell
+
+
 def render_sinan_lcr_indicators(table: LoadedTable, exprs: Dict[str, Optional[str]], base_where: str, graph_where: str) -> None:
     """Renderiza punção e parâmetros do LCR no bloco de principais indicadores."""
     def br_int(value: object) -> str:
@@ -7583,7 +8063,14 @@ def render_sinan_lcr_indicators(table: LoadedTable, exprs: Dict[str, Optional[st
     with st.expander("📌 Tabela-resumo: como os parâmetros do LCR costumam se comportar por etiologia", expanded=True):
         render_quimio_interpretation()
 
-    quimio_summary = query_sinan_quimio_summary(table, exprs, graph_where)
+    # Correção 2 (depende da cláusula de elegibilidade também usada na Análise 2):
+    # o resumo estatístico e sua "% preenchido" passam a usar como base apenas
+    # quem teve punção lombar e exame quimiocitológico realizados — não mais o
+    # recorte geral de filtros da página (graph_where), que misturava "sem
+    # indicação clínica de puncionar" com "campo mal preenchido no SINAN".
+    lcr_eligible_where = sinan_lcr_eligible_where(exprs, graph_where)
+    n_eligible_lcr = count_rows(table, lcr_eligible_where)
+    quimio_summary = query_sinan_quimio_summary(table, exprs, lcr_eligible_where)
     if quimio_summary.empty:
         st.info(
             "Para gerar o resumo do Exame Quimiocitológico do líquor (LCR), os campos laboratoriais do SINAN precisam existir "
@@ -7592,10 +8079,27 @@ def render_sinan_lcr_indicators(table: LoadedTable, exprs: Dict[str, Optional[st
         render_quimio_classification_tab(table, exprs, base_where)
         return
 
+    st.caption(
+        f"Completude calculada sobre os {format_int_br(n_eligible_lcr)} registros do recorte atual com punção lombar "
+        "**e** exame quimiocitológico do LCR realizados — não sobre o total de casos filtrados na página. "
+        "Isso separa dois indicadores que antes apareciam misturados: a **cobertura da punção** sobre o total de "
+        "casos (gráfico 'Realização da Punção Laboratorial', acima) e a **completude de preenchimento** de cada "
+        "parâmetro entre quem já foi puncionado (tabela abaixo). Uma completude baixa aqui reflete falha de "
+        "registro, não falta de indicação clínica para puncionar."
+    )
+
     st.markdown("**Distribuição dos parâmetros quimiocitológicos do LCR**")
     st.caption(
         "Os histogramas foram substituídos por classes clínicas fixas. As faixas do eixo x seguem os intervalos da tabela-resumo "
         "e destacam zonas de sobreposição entre etiologias, em vez de usar bins automáticos que mudam conforme o recorte filtrado."
+    )
+    st.caption(
+        "⚠️ Antes de entrar nas estatísticas e nas faixas clínicas, os valores passam por uma neutralização de "
+        "códigos sentinela de 'ignorado' (999/9999/99999) e, para os parâmetros absolutos, são comparados a um "
+        "teto de plausibilidade clínica (sinalizado em 'n_acima_teto_plausibilidade' na tabela-resumo, sem "
+        "descarte). **Esses códigos e tetos ainda não foram confirmados junto ao dicionário de dados oficial do "
+        "SINAN NET e podem variar entre versões da ficha de investigação — tratar como provisórios até essa "
+        "confirmação.**"
     )
     age_strat = sinan_lcr_age_stratum_expr(exprs)
     interval_strat = sinan_lcr_symptom_puncture_interval_expr(exprs)
@@ -7617,6 +8121,20 @@ def render_sinan_lcr_indicators(table: LoadedTable, exprs: Dict[str, Optional[st
         st.caption("Estratificação neonatal não disponível porque a coluna de idade não foi detectada.")
     if not interval_strat:
         st.caption("Estratificação por tempo sintoma-punção não disponível porque DT_SIN_PRI e/ou a data da punção não foram detectadas.")
+
+    # Correção 5: limiar mínimo de célula, ajustável pelo usuário. Cruzar as
+    # faixas clínicas com estratos gera subgrupos pequenos (n=1, n=2) que, sem
+    # aviso, podem virar uma barra de 100% e ser lida como padrão robusto.
+    min_cell_size = st.number_input(
+        "Alertar (opacidade reduzida) células estratificadas com menos de N registros",
+        min_value=1,
+        max_value=50,
+        value=SINAN_LCR_MIN_CELL_SIZE_DEFAULT,
+        step=1,
+        key="sinan_lcr_min_cell_size",
+        help="Só se aplica quando há estratificação ativa: células com n abaixo deste valor não são amostra "
+        "suficiente para leitura robusta e aparecem com opacidade reduzida nos gráficos abaixo.",
+    )
 
     def render_param_distribution(key: str, titulo: str, eixo_x: Optional[str] = None) -> None:
         expr = exprs.get(f"lab_{key}")
@@ -7661,7 +8179,22 @@ def render_sinan_lcr_indicators(table: LoadedTable, exprs: Dict[str, Optional[st
                 category_orders=category_orders,
             )
         fig_dist.update_xaxes(tickangle=-30)
+        # Correção 5: opacidade reduzida para células (faixa, ou faixa x estrato
+        # quando estratificado) com amostra abaixo do limiar definido pelo
+        # usuário, evitando que um n=1 ou n=2 seja lido como padrão robusto —
+        # mais crítico quando há estratificação, que multiplica o número de
+        # subgrupos e reduz o n de cada um.
+        is_stratified = bool(strat_sql and "estrato" in dist.columns)
+        has_small_cell = sinan_lcr_apply_small_cell_opacity(
+            fig_dist, dist, int(min_cell_size), x_col="faixa", color_col="estrato" if is_stratified else None,
+        )
         render_plotly_chart(fig_dist)
+        if has_small_cell:
+            st.caption(
+                f"⚠️ Barras com opacidade reduzida representam células com menos de {int(min_cell_size)} registros"
+                + (" no cruzamento faixa × estrato" if is_stratified else "")
+                + "; leitura pouco robusta, evite interpretar como padrão."
+            )
         if strat_sql and "estrato" in dist.columns:
             render_interval_total(dist, value_col="n", by_col="estrato")
         else:
@@ -7728,7 +8261,21 @@ def render_sinan_lcr_indicators(table: LoadedTable, exprs: Dict[str, Optional[st
                     category_orders={"categoria": SINAN_LAB_ASPECT_ORDER},
                 )
             fig_aspect.update_xaxes(tickangle=-30)
+            # Correção 5: mesmo aviso de célula pequena aplicado ao gráfico de
+            # aspecto do líquor, que o diagnóstico apontou como igualmente
+            # exposto a barras de 100% com n=1 ou n=2 quando estratificado.
+            is_stratified_aspect = bool(strat_sql and "estrato" in aspect_dist.columns)
+            has_small_cell_aspect = sinan_lcr_apply_small_cell_opacity(
+                fig_aspect, aspect_dist, int(min_cell_size), x_col="categoria",
+                color_col="estrato" if is_stratified_aspect else None,
+            )
             render_plotly_chart(fig_aspect)
+            if has_small_cell_aspect:
+                st.caption(
+                    f"⚠️ Barras com opacidade reduzida representam células com menos de {int(min_cell_size)} registros"
+                    + (" no cruzamento categoria × estrato" if is_stratified_aspect else "")
+                    + "; leitura pouco robusta, evite interpretar como padrão."
+                )
             if strat_sql and "estrato" in aspect_dist.columns:
                 render_interval_total(aspect_dist, value_col="n", by_col="estrato")
             else:
@@ -7741,7 +8288,12 @@ def render_sinan_lcr_indicators(table: LoadedTable, exprs: Dict[str, Optional[st
     st.markdown("**Resumo estatístico dos parâmetros quimiocitológicos do LCR**")
     st.caption(
         "O gráfico de valores médios foi removido. A tabela abaixo fica apenas como apoio para auditoria de preenchimento, "
-        "mediana, quartis, mínimos e máximos; para interpretação visual, prefira as distribuições por faixas clínicas acima."
+        "mediana, quartis, mínimos e máximos; para interpretação visual, prefira as distribuições por faixas clínicas acima. "
+        "'registros_avaliados' e 'pct_preenchido' agora usam como base apenas quem teve punção lombar e exame "
+        "quimiocitológico realizados (ver observação acima). A coluna 'n_acima_teto_plausibilidade' sinaliza — sem "
+        "descartar — valores acima de um teto clínico provisório por parâmetro; **os códigos sentinela e os tetos "
+        "de plausibilidade usados aqui ainda não foram confirmados junto ao dicionário de dados oficial do SINAN "
+        "e devem ser tratados como estimativas, não como valores validados.**"
     )
     copyable_dataframe(quimio_summary, width="stretch", hide_index=True)
     download_button(quimio_summary, "sinan_quimiocitologico_liquor_resumo_parametros.csv")
@@ -8394,6 +8946,12 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, grap
             render_plotly_chart(fig)
             render_interval_total(sim_cid_long, value_col="n", by_col="definicao")
 
+        sim_fertile_denominator_note = (
+            "Denominador obrigatório: estes gráficos de Gravidez e Puerpério do SIM são restritos a mulheres em idade fértil, "
+            "tradicionalmente 10 a 49 anos, usando as variáveis padronizadas `sex` e `age` geradas na ColumnSelection. "
+            "Assim, registros de homens, de mulheres fora de 10–49 anos ou com sexo/idade ausentes ou inválidos não entram no numerador nem no denominador."
+        )
+
         def render_sim_cycle_chart(
             category_sql: Optional[str],
             field_label: str,
@@ -8407,10 +8965,10 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, grap
                 return
             df = query_yearly_category(table, exprs["dt"], category_sql, where_sql)
             if df.empty:
-                st.info(f"Sem dados para {markdown_title.lower()} com esta definição de meningite.")
+                st.info(f"Sem dados para {markdown_title.lower()} com esta definição de meningite e com o denominador restrito a mulheres de 10 a 49 anos.")
                 return
             st.markdown(f"**{markdown_title}**")
-            st.caption(caption)
+            st.caption(f"{caption} {sim_fertile_denominator_note}")
             df = add_text_column(df)
             fig_cycle = px.bar(
                 df,
@@ -8418,8 +8976,8 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, grap
                 y="n",
                 color="categoria",
                 text="texto",
-                title=figure_title,
-                labels={"ano": "Ano", "n": "Óbitos", "categoria": field_label, "pct": "% no ano"},
+                title=figure_title + " — mulheres 10–49 anos",
+                labels={"ano": "Ano", "n": "Óbitos em mulheres 10–49 anos", "categoria": field_label, "pct": "% no ano"},
                 hover_data={"texto": False, "pct": ":.2f", "total_ano": True},
                 color_discrete_sequence=APP_COLOR_SEQUENCE,
             )
@@ -8432,8 +8990,18 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, grap
 
         cid_any = exprs.get("cid")
         causabas = exprs.get("causabas_cid")
-        mention_where = append_clause(base_where, f"{cid_any} IS NOT NULL") if cid_any else None
-        primary_cause_where = append_clause(base_where, f"{causabas} IS NOT NULL") if causabas else None
+        sim_sex = exprs.get("sex")
+        sim_age = exprs.get("age")
+        fertile_women_clause = f"({sim_sex}) = 'Feminino' AND ({sim_age}) BETWEEN 10 AND 49" if (sim_sex and sim_age) else None
+        mention_where_base = append_clause(base_where, f"{cid_any} IS NOT NULL") if cid_any else None
+        primary_cause_where_base = append_clause(base_where, f"{causabas} IS NOT NULL") if causabas else None
+        mention_where = append_clause(mention_where_base, fertile_women_clause) if (mention_where_base and fertile_women_clause) else None
+        primary_cause_where = append_clause(primary_cause_where_base, fertile_women_clause) if (primary_cause_where_base and fertile_women_clause) else None
+        if not fertile_women_clause:
+            st.warning(
+                "Os gráficos de Gravidez e Puerpério do SIM exigem denominador restrito a mulheres em idade fértil (10 a 49 anos). "
+                "Configure/detecte as colunas de sexo e idade para que o app gere `sex` e `age` na ColumnSelection."
+            )
 
         if exprs.get("dt") and exprs.get("obitograv_label"):
             if mention_where:
@@ -8447,7 +9015,10 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, grap
                     "sim_obito_gravidez_obitograv_mencao_meningite.csv",
                 )
             else:
-                st.info("Para gerar o gráfico de gravidez por menção de meningite, é necessário detectar algum campo CID no SIM.")
+                if not cid_any:
+                    st.info("Para gerar o gráfico de gravidez por menção de meningite, é necessário detectar algum campo CID no SIM.")
+                elif not fertile_women_clause:
+                    st.info("Para gerar o gráfico de gravidez por menção de meningite, é necessário restringir o denominador a mulheres de 10 a 49 anos usando `sex` e `age`.")
             if primary_cause_where:
                 render_sim_cycle_chart(
                     exprs["obitograv_label"],
@@ -8459,7 +9030,10 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, grap
                     "sim_obito_gravidez_obitograv_causa_basica_meningite.csv",
                 )
             else:
-                st.info("Para gerar o gráfico de gravidez por causa primária/básica, o campo CAUSABAS precisa existir no SIM e ser detectado automaticamente.")
+                if not causabas:
+                    st.info("Para gerar o gráfico de gravidez por causa primária/básica, o campo CAUSABAS precisa existir no SIM e ser detectado automaticamente.")
+                elif not fertile_women_clause:
+                    st.info("Para gerar o gráfico de gravidez por causa primária/básica, é necessário restringir o denominador a mulheres de 10 a 49 anos usando `sex` e `age`.")
         else:
             st.info("Para o gráfico de óbito na gravidez, o campo OBITOGRAV precisa existir no SIM e ser detectado automaticamente.")
 
@@ -8475,7 +9049,10 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, grap
                     "sim_obito_puerperio_obitopuerp_mencao_meningite.csv",
                 )
             else:
-                st.info("Para gerar o gráfico de puerpério por menção de meningite, é necessário detectar algum campo CID no SIM.")
+                if not cid_any:
+                    st.info("Para gerar o gráfico de puerpério por menção de meningite, é necessário detectar algum campo CID no SIM.")
+                elif not fertile_women_clause:
+                    st.info("Para gerar o gráfico de puerpério por menção de meningite, é necessário restringir o denominador a mulheres de 10 a 49 anos usando `sex` e `age`.")
             if primary_cause_where:
                 render_sim_cycle_chart(
                     exprs["obitopuerp_label"],
@@ -8487,7 +9064,10 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, grap
                     "sim_obito_puerperio_obitopuerp_causa_basica_meningite.csv",
                 )
             else:
-                st.info("Para gerar o gráfico de puerpério por causa primária/básica, o campo CAUSABAS precisa existir no SIM e ser detectado automaticamente.")
+                if not causabas:
+                    st.info("Para gerar o gráfico de puerpério por causa primária/básica, o campo CAUSABAS precisa existir no SIM e ser detectado automaticamente.")
+                elif not fertile_women_clause:
+                    st.info("Para gerar o gráfico de puerpério por causa primária/básica, é necessário restringir o denominador a mulheres de 10 a 49 anos usando `sex` e `age`.")
         else:
             st.info("Para o gráfico de óbito no puerpério, o campo OBITOPUERP precisa existir no SIM e ser detectado automaticamente.")
         return
@@ -9001,6 +9581,30 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
         filename = f"{source.lower()}_idade_{suffix}.csv" if suffix else f"{source.lower()}_idade.csv"
         download_button(age_df, filename)
 
+    def _education_age_stratification_note() -> None:
+        if age:
+            st.caption(
+                "Observação metodológica: a estratificação por faixa etária pode ser interessante porque a meningite é mais comum em crianças e idosos. "
+                "Sem estratificar, a distribuição de escolaridade pode refletir a composição etária dos casos/óbitos/atendimentos, criando um viés de escolaridade que não necessariamente representa a realidade epidemiológica da doença."
+            )
+        else:
+            st.caption(
+                "Observação metodológica: a estratificação por faixa etária seria desejável, porque a meningite é mais comum em crianças e idosos e isso pode criar viés na leitura de escolaridade. "
+                "Para habilitá-la, configure uma coluna de idade para gerar a variável `age` na seleção de colunas."
+            )
+
+    def _available_age_bands(df: pd.DataFrame) -> List[str]:
+        if df.empty or not {"faixa_etaria", "faixa_ini", "denominador"}.issubset(df.columns):
+            return []
+        bands = (
+            df[["faixa_etaria", "faixa_ini", "denominador"]]
+            .drop_duplicates()
+            .assign(denominador_num=lambda d: pd.to_numeric(d["denominador"], errors="coerce").fillna(0))
+            .query("denominador_num > 0")
+            .sort_values(["faixa_ini", "faixa_etaria"])
+        )
+        return bands["faixa_etaria"].astype(str).tolist()
+
     def render_sinan_education_chart() -> None:
         if not education:
             st.info("Para gerar o gráfico de escolaridade no SINAN, o campo CS_ESCOL_N/ESCOLARIDADE precisa existir e ser detectado automaticamente.")
@@ -9008,7 +9612,73 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
         if not exprs.get("classi_code"):
             st.info("Para gerar a escolaridade por confirmados e descartados no SINAN, o campo CLASSI_FIN precisa existir e ser detectado automaticamente.")
             return
+        _education_age_stratification_note()
         schooling_where = base_where if base_where is not None else graph_where
+        stratify_by_age = False
+        if age:
+            stratify_by_age = st.checkbox(
+                "Estratificar gráfico de escolaridade por faixa etária quinquenal (idade em anos)",
+                value=False,
+                key="sinan_education_age_stratify",
+            )
+
+        if stratify_by_age:
+            edu_df = query_sinan_education_outcomes_by_age(
+                table,
+                education,
+                exprs["classi_code"],
+                age,
+                schooling_where,
+            )
+            if edu_df.empty or pd.to_numeric(edu_df.get("denominador"), errors="coerce").fillna(0).max() <= 0:
+                st.info("Sem casos confirmados ou descartados para calcular a escolaridade por faixa etária com os filtros atuais.")
+                return
+            age_band_options = _available_age_bands(edu_df)
+            if not age_band_options:
+                st.info("Não há faixas etárias válidas para estratificar a escolaridade com os filtros atuais.")
+                return
+            selected_age_band = st.selectbox(
+                "Faixa etária usada no gráfico de escolaridade do SINAN",
+                age_band_options,
+                key="sinan_education_age_band",
+            )
+            plot_df = edu_df[edu_df["faixa_etaria"].astype(str).eq(str(selected_age_band))].copy()
+            plot_df = add_text(plot_df)
+            grupo_order = ["Casos confirmados", "Casos descartados"]
+            categoria_order = education_category_labels("SINAN", education, include_missing=True)
+            plot_df = plot_df.sort_values(["ordem_escolaridade", "ordem_grupo", "grupo"]).reset_index(drop=True)
+            fig_edu = px.bar(
+                plot_df,
+                x="n",
+                y="escolaridade",
+                color="grupo",
+                orientation="h",
+                barmode="group",
+                text="texto",
+                title=f"Escolaridade — casos confirmados e descartados — faixa etária {selected_age_band}",
+                labels={
+                    "escolaridade": "Escolaridade",
+                    "n": "Registros",
+                    "grupo": "Grupo",
+                    "pct": "% no grupo e faixa etária",
+                    "denominador": "Total do grupo na faixa etária",
+                    "faixa_etaria": "Faixa etária",
+                },
+                hover_data={"texto": False, "pct": ":.2f", "denominador": True, "faixa_etaria": True},
+                category_orders={"escolaridade": categoria_order, "grupo": grupo_order},
+            )
+            fig_edu.update_layout(yaxis={"categoryorder": "array", "categoryarray": categoria_order[::-1]})
+            st.caption(
+                "Com a estratificação ativada, os percentuais usam como denominador apenas os registros da faixa etária selecionada, separados por grupo de classificação do SINAN. "
+                "A tabela/exportação abaixo mantém todas as faixas etárias para auditoria."
+            )
+            render_plotly_chart(fig_edu)
+            render_interval_total(plot_df, value_col="n", by_col="grupo")
+            edu_out = edu_df.drop(columns=["ordem_escolaridade", "ordem_grupo"], errors="ignore")
+            copyable_dataframe(edu_out, width="stretch", hide_index=True)
+            download_button(edu_out, "sinan_escolaridade_confirmados_descartados_por_faixa_etaria.csv")
+            return
+
         edu_df = query_sinan_education_outcomes(
             table,
             education,
@@ -9049,16 +9719,87 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
         copyable_dataframe(edu_out, width="stretch", hide_index=True)
         download_button(edu_out, "sinan_escolaridade_confirmados_descartados.csv")
 
-    def render_sim_education_chart() -> None:
+    def render_non_sinan_education_chart() -> None:
+        source_label = "SIM" if source == "SIM" else "CIHA"
+        record_label = "Óbitos" if source == "SIM" else "Atendimentos/registros"
         if not education:
-            st.info("Para gerar o gráfico de escolaridade no SIM, o campo ESC2010/ESC precisa existir e ser detectado automaticamente.")
+            if source == "SIM":
+                st.info("Para gerar o gráfico de escolaridade no SIM, o campo ESC2010/ESC precisa existir e ser detectado automaticamente.")
+            else:
+                st.info("Para gerar o gráfico de escolaridade na CIHA, um campo de escolaridade/instrução precisa existir e ser detectado automaticamente.")
             return
-        edu_df = query_education_distribution_all_categories(table, "SIM", education, graph_where)
+        _education_age_stratification_note()
+        stratify_by_age = False
+        if age:
+            stratify_by_age = st.checkbox(
+                "Estratificar gráfico de escolaridade por faixa etária quinquenal (idade em anos)",
+                value=False,
+                key=f"{source.lower()}_education_age_stratify",
+            )
+
+        if stratify_by_age:
+            edu_df = query_education_distribution_by_age(table, source, education, age, graph_where)
+            if edu_df.empty or pd.to_numeric(edu_df.get("denominador"), errors="coerce").fillna(0).max() <= 0:
+                st.info(f"Sem dados de escolaridade no {source_label} por faixa etária com os filtros atuais.")
+                return
+            age_band_options = _available_age_bands(edu_df)
+            if not age_band_options:
+                st.info("Não há faixas etárias válidas para estratificar a escolaridade com os filtros atuais.")
+                return
+            selected_age_band = st.selectbox(
+                f"Faixa etária usada no gráfico de escolaridade do {source_label}",
+                age_band_options,
+                key=f"{source.lower()}_education_age_band",
+            )
+            plot_df = edu_df[edu_df["faixa_etaria"].astype(str).eq(str(selected_age_band))].copy()
+            plot_df = add_text(plot_df)
+            if _education_labels_are_fixed(source):
+                categoria_order = education_category_labels(source, education, include_missing=True)
+            else:
+                categoria_order = plot_df.sort_values("ordem_categoria")["categoria"].drop_duplicates().tolist()
+            plot_df = plot_df.sort_values("ordem_categoria").reset_index(drop=True)
+            fig_edu = px.bar(
+                plot_df,
+                x="n",
+                y="categoria",
+                orientation="h",
+                text="texto",
+                title=f"Distribuição por escolaridade — faixa etária {selected_age_band}",
+                labels={
+                    "categoria": "Escolaridade",
+                    "n": record_label,
+                    "pct": "% da faixa etária",
+                    "denominador": "Total na faixa etária",
+                    "faixa_etaria": "Faixa etária",
+                },
+                hover_data={"texto": False, "pct": ":.2f", "denominador": True, "faixa_etaria": True},
+                category_orders={"categoria": categoria_order},
+                color_discrete_sequence=[PLOTLY_DEFAULT_BLUE],
+            )
+            disable_death_red(fig_edu)
+            preserve_trace_colors(fig_edu)
+            fig_edu.update_traces(marker_color=PLOTLY_DEFAULT_BLUE)
+            fig_edu.update_layout(yaxis={"categoryorder": "array", "categoryarray": categoria_order[::-1]})
+            st.caption(
+                "Com a estratificação ativada, os percentuais usam como denominador apenas os registros da faixa etária selecionada. "
+                "A tabela/exportação abaixo mantém todas as faixas etárias para auditoria."
+            )
+            render_plotly_chart(fig_edu)
+            render_interval_total(plot_df, value_col="n")
+            edu_out = edu_df.drop(columns=["ordem_categoria"], errors="ignore")
+            copyable_dataframe(edu_out, width="stretch", hide_index=True)
+            download_button(edu_out, f"{source.lower()}_escolaridade_por_faixa_etaria.csv")
+            return
+
+        edu_df = query_education_distribution_all_categories(table, source, education, graph_where)
         if edu_df.empty or pd.to_numeric(edu_df.get("denominador"), errors="coerce").fillna(0).max() <= 0:
-            st.info("Sem dados de escolaridade no SIM com os filtros atuais.")
+            st.info(f"Sem dados de escolaridade no {source_label} com os filtros atuais.")
             return
         edu_df = add_text(edu_df)
-        categoria_order = education_category_labels("SIM", education, include_missing=True)
+        if _education_labels_are_fixed(source):
+            categoria_order = education_category_labels(source, education, include_missing=True)
+        else:
+            categoria_order = edu_df.sort_values("ordem_categoria")["categoria"].drop_duplicates().tolist()
         edu_df = edu_df.sort_values("ordem_categoria").reset_index(drop=True)
         fig_edu = px.bar(
             edu_df,
@@ -9067,7 +9808,7 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
             orientation="h",
             text="texto",
             title="Distribuição por escolaridade",
-            labels={"categoria": "Escolaridade", "n": "Óbitos", "pct": "% do total filtrado", "denominador": "Total filtrado"},
+            labels={"categoria": "Escolaridade", "n": record_label, "pct": "% do total filtrado", "denominador": "Total filtrado"},
             hover_data={"texto": False, "pct": ":.2f", "denominador": True},
             category_orders={"categoria": categoria_order},
             color_discrete_sequence=[PLOTLY_DEFAULT_BLUE],
@@ -9076,12 +9817,18 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
         preserve_trace_colors(fig_edu)
         fig_edu.update_traces(marker_color=PLOTLY_DEFAULT_BLUE)
         fig_edu.update_layout(yaxis={"categoryorder": "array", "categoryarray": categoria_order[::-1]})
-        st.caption("O gráfico exibe todas as categorias operacionais de escolaridade detectadas para o campo do SIM; os percentuais usam o total de registros filtrados como denominador.")
+        st.caption(f"O gráfico exibe a distribuição de escolaridade do {source_label}; os percentuais usam o total de registros filtrados como denominador.")
         render_plotly_chart(fig_edu)
         render_interval_total(edu_df, value_col="n")
         edu_out = edu_df.drop(columns=["ordem_categoria"], errors="ignore")
         copyable_dataframe(edu_out, width="stretch", hide_index=True)
-        download_button(edu_out, "sim_escolaridade.csv")
+        download_button(edu_out, f"{source.lower()}_escolaridade.csv")
+
+    def render_sim_education_chart() -> None:
+        render_non_sinan_education_chart()
+
+    def render_ciha_education_chart() -> None:
+        render_non_sinan_education_chart()
 
     def render_simple_category_chart(label: str, expr: str, top_n: int = 25) -> None:
         df = query_category(table, expr, graph_where, top_n=top_n)
@@ -9235,9 +9982,12 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
         if age:
             render_age_distribution_chart(graph_where, None)
 
-        if source == "SIM":
+        if source in {"SIM", "CIHA"}:
             st.markdown("### Escolaridade")
-            render_sim_education_chart()
+            if source == "SIM":
+                render_sim_education_chart()
+            else:
+                render_ciha_education_chart()
 
         render_municipality_charts()
 
