@@ -67,7 +67,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-07-02-v45-lcr-neonatos-ate-6m"
+APP_VERSION = "2026-07-02-v49-conclusao-criterio"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos
@@ -90,6 +90,13 @@ DUCKDB_TEMP_SUBDIR = "meningite_duckdb_tmp"
 DEATH_RED = "#D62728"
 LETHALITY_RED = DEATH_RED
 LETHALITY_LABEL = "Letalidade — óbitos por meningite / confirmados"
+LETHALITY_KNOWN_EVOL_LABEL = "Letalidade — óbitos por meningite / confirmados com evolução conhecida"
+DARK_GRAY = "#4D4D4D"
+COVID_CONTEXT_NOTE = (
+    "Anotação de contexto 2020-2021: pandemia de COVID-19, reorganização assistencial, "
+    "alteração da circulação de agentes respiratórios e possibilidade de subnotificação. "
+    "A faixa é contextual e não atribui causalidade às variações observadas."
+)
 PLOTLY_DEFAULT_BLUE = "#636EFA"
 APP_COLOR_SEQUENCE = (
     "#1F77B4",  # azul
@@ -1343,7 +1350,7 @@ SINAN_G01_DETAIL_REGEX = (
 SINAN_AUXILIARY_CID10_CANDIDATES = [
     "CLA_ME_BAC", "CLA_ME_ASS", "CLA_ME_ETI", "DS_OBSERVACAO", "OBSERVACAO", "OBSERVACOES",
     "OUTROS_SINTOMAS", "OUTRO_SINTOMA", "OUTR_SINT", "SIN_OUT", "SINTOMAS", "SINAIS",
-    "DIAGNOSTICO", "DIAG_FINAL", "CLASSIFICACAO", "EVOLUCAO", "CID", "ID_AGRAVO",
+    "DIAGNOSTICO", "DIAG_FINAL", "CLASSIFICACAO", "EVOLUCAO", "CID",
 ]
 
 SINAN_QUIMIO_INTERPRETATION_ROWS = [
@@ -1795,74 +1802,256 @@ def sinan_lcr_distribution_bin_order(param_key: str) -> List[str]:
 
 
 # =============================================================================
-# Códigos sentinela e tetos de plausibilidade — parâmetros quimiocitológicos do LCR
-# (correções 3 e 4 do plano de correção priorizado)
+# Metadados, códigos sentinela, tetos e auditoria — parâmetros quimiocitológicos do LCR
 # =============================================================================
-# Antes desta correção, o único filtro de plausibilidade aplicado a qualquer
-# parâmetro numérico do LCR era "valor >= 0". Códigos sentinela usados em bases
-# DATASUS/SINAN para "ignorado" em campos numéricos (tipicamente 999 / 9999 /
-# 99999) entravam como se fossem valores reais, distorcendo média, mediana e a
-# própria distribuição em faixas clínicas. Da mesma forma, não havia teto de
-# plausibilidade para os parâmetros absolutos (glicose, proteína, leucócitos,
-# hemácias, cloreto) — só os percentuais já tinham a faixa ">100%" para
-# sinalizar valor incompatível.
+# A revisão crítica v45 recomendou separar explicitamente três fenômenos que antes
+# podiam ser misturados: valor ausente/sentinela, valor acima do teto de
+# plausibilidade e valor no teto operacional/sistêmico. O cadastro abaixo é a
+# fonte única para unidade, tipo, faixa operacional, regra de sentinela, teto
+# plausível, teto de sistema/truncamento e uso permitido de cada LAB_*.
 #
-# *** OBSERVAÇÃO IMPORTANTE — NÃO VALIDADO CONTRA O DICIONÁRIO OFICIAL SINAN ***
-# Os códigos sentinela e os tetos de plausibilidade abaixo são uma heurística
-# razoável — códigos sentinela comuns em bases DATASUS e tetos clínicos
-# conservadores baseados em extremos descritos na literatura (ex.: Mandell) —
-# mas NÃO foram confirmados campo a campo junto ao dicionário de dados oficial
-# do SINAN NET para LAB_GLICO / LAB_LEUCO / LAB_PROT / LAB_HEMA / LAB_CLOR, e
-# esses códigos podem variar entre versões da ficha de investigação de
-# meningite. Antes de usar este painel para relatórios formais ou decisões,
-# confirme os códigos e tetos exatos junto ao dicionário de dados oficial do
-# SINAN e ajuste as constantes abaixo. Até essa confirmação, trate os valores
-# como provisórios/heurísticos, não como referência validada.
+# ATENÇÃO: os códigos sentinela e tetos permanecem uma camada defensiva
+# operacional; devem ser validados contra o dicionário oficial do SINAN da versão
+# em uso antes de relatórios formais.
 SINAN_LCR_SENTINEL_CODES = {999, 9999, 99999}
 
-# Tetos de plausibilidade por parâmetro ABSOLUTO (não se aplica aos percentuais
-# neutro/linfo/mono/eosi, que já usam a faixa ">100%" de
-# SINAN_LCR_DISTRIBUTION_BIN_SPECS). Valores acima do teto NÃO são descartados
-# silenciosamente: são apenas sinalizados (ver n_acima_teto_plausibilidade em
-# query_sinan_quimio_summary), preservando o dado original para auditoria.
+# Mantido por compatibilidade com trechos antigos e com a tabela-resumo.
 SINAN_LCR_PLAUSIBLE_MAX = {
-    "leuco": 50000,   # células/mm³ — extremo superior descrito em bacteriana grave
-    "prot": 2000,     # mg/dL
-    "hema": 1000000,  # células/mm³ (punção traumática pode elevar bastante)
-    "glico": 500,     # mg/dL — hiperglicemia extrema / possível erro de unidade
-    "clor": 200,      # mEq/L — fora da faixa fisiologicamente plausível de LCR
+    "leuco": 50000,
+    "prot": 2000,
+    "hema": 1000000,
+    "glico": 500,
+    "clor": 200,
+    "neutro": 100,
+    "linfo": 100,
+    "mono": 100,
+    "eosi": 100,
 }
 
 
-def sinan_lcr_neutralize_sentinel_expr(value_expr: str) -> str:
-    """Neutraliza (converte para NULL) códigos sentinela conhecidos de "ignorado"
-    (ex.: 999/9999/99999) antes que entrem nas estatísticas ou nos bins de
-    distribuição do LCR.
+@dataclass(frozen=True)
+class SinanLcrParameterMetadata:
+    key: str
+    unidade: str
+    tipo_valor: str
+    faixa_operacional: str
+    regra_sentinela: str
+    sentinel_codes: Tuple[int, ...]
+    teto_plausivel: Optional[float]
+    teto_sistema: Tuple[float, ...]
+    comportamento_truncamento: str
+    uso_permitido: str
 
-    ATENÇÃO: ver observação em SINAN_LCR_SENTINEL_CODES — os códigos usados aqui
-    são uma heurística comum em bases DATASUS, ainda NÃO confirmada campo a
-    campo contra o dicionário de dados oficial do SINAN NET. Revisar antes de
-    uso em relatórios formais.
-    """
+
+SINAN_LCR_PARAM_METADATA: Dict[str, SinanLcrParameterMetadata] = {
+    "hema": SinanLcrParameterMetadata(
+        key="hema",
+        unidade="céls/mm³",
+        tipo_valor="contagem absoluta",
+        faixa_operacional=">=0; extremos devem ser auditados",
+        regra_sentinela="999/9999/99999 tratados como ausente/sentinela operacional",
+        sentinel_codes=tuple(sorted(SINAN_LCR_SENTINEL_CODES)),
+        teto_plausivel=SINAN_LCR_PLAUSIBLE_MAX["hema"],
+        teto_sistema=(99999,),
+        comportamento_truncamento="LAB_HEMA pode atingir 99999; sinalizar como possível teto/codificação, sem descarte silencioso.",
+        uso_permitido="auditoria e contexto; não entra como critério etiológico principal",
+    ),
+    "neutro": SinanLcrParameterMetadata(
+        key="neutro",
+        unidade="% dos leucócitos",
+        tipo_valor="percentual diferencial",
+        faixa_operacional="0-100",
+        regra_sentinela="999/9999/99999 tratados como ausente/sentinela operacional",
+        sentinel_codes=tuple(sorted(SINAN_LCR_SENTINEL_CODES)),
+        teto_plausivel=100,
+        teto_sistema=(100,),
+        comportamento_truncamento="Valores >100 são incompatíveis com percentual e ficam sinalizados.",
+        uso_permitido="distribuição e predomínio celular quando 0-100",
+    ),
+    "glico": SinanLcrParameterMetadata(
+        key="glico",
+        unidade="mg/dL",
+        tipo_valor="concentração absoluta",
+        faixa_operacional=">=0; interpretar com glicemia sérica quando disponível",
+        regra_sentinela="999/9999/99999 tratados como ausente/sentinela operacional",
+        sentinel_codes=tuple(sorted(SINAN_LCR_SENTINEL_CODES)),
+        teto_plausivel=SINAN_LCR_PLAUSIBLE_MAX["glico"],
+        teto_sistema=(99,),
+        comportamento_truncamento="Dicionário operacional indicou máximo 99; sinalizar possível truncamento/teto.",
+        uso_permitido="distribuição, tabela-resumo e classificação exploratória após limpeza de sentinelas",
+    ),
+    "leuco": SinanLcrParameterMetadata(
+        key="leuco",
+        unidade="céls/mm³",
+        tipo_valor="contagem absoluta",
+        faixa_operacional=">=0; faixas clínicas fixas no gráfico",
+        regra_sentinela="999/9999/99999 tratados como ausente/sentinela operacional",
+        sentinel_codes=tuple(sorted(SINAN_LCR_SENTINEL_CODES)),
+        teto_plausivel=SINAN_LCR_PLAUSIBLE_MAX["leuco"],
+        teto_sistema=(9999,),
+        comportamento_truncamento="Valores no teto 9999 e acima do teto plausível são sinalizados, não suavizados.",
+        uso_permitido="distribuição, tabela-resumo e classificação exploratória após limpeza de sentinelas",
+    ),
+    "eosi": SinanLcrParameterMetadata(
+        key="eosi",
+        unidade="% dos leucócitos",
+        tipo_valor="percentual diferencial",
+        faixa_operacional="0-100",
+        regra_sentinela="999/9999/99999 tratados como ausente/sentinela operacional",
+        sentinel_codes=tuple(sorted(SINAN_LCR_SENTINEL_CODES)),
+        teto_plausivel=100,
+        teto_sistema=(100,),
+        comportamento_truncamento="Valores >100 são incompatíveis com percentual e ficam sinalizados.",
+        uso_permitido="distribuição; baixa completude deve ser explicitada",
+    ),
+    "prot": SinanLcrParameterMetadata(
+        key="prot",
+        unidade="mg/dL",
+        tipo_valor="concentração absoluta",
+        faixa_operacional=">=0; faixas clínicas fixas no gráfico",
+        regra_sentinela="999/9999/99999 tratados como ausente/sentinela operacional",
+        sentinel_codes=tuple(sorted(SINAN_LCR_SENTINEL_CODES)),
+        teto_plausivel=SINAN_LCR_PLAUSIBLE_MAX["prot"],
+        teto_sistema=(999,),
+        comportamento_truncamento="Valores no teto 999 e acima do teto plausível são sinalizados, não descartados.",
+        uso_permitido="distribuição, tabela-resumo e classificação exploratória após limpeza de sentinelas",
+    ),
+    "mono": SinanLcrParameterMetadata(
+        key="mono",
+        unidade="% dos leucócitos, quando 0-100; unidade ambígua se >100",
+        tipo_valor="percentual diferencial com ambiguidade operacional",
+        faixa_operacional="0-100 para interpretação percentual; >100 apenas como auditoria",
+        regra_sentinela="999/9999/99999 tratados como ausente/sentinela operacional",
+        sentinel_codes=tuple(sorted(SINAN_LCR_SENTINEL_CODES)),
+        teto_plausivel=100,
+        teto_sistema=(100, 994),
+        comportamento_truncamento="LAB_MONO teve máximo operacional 994; não assumir percentual puro sem sinalizar >100.",
+        uso_permitido="distribuição com flag de auditoria; não usar >100 como composição percentual",
+    ),
+    "linfo": SinanLcrParameterMetadata(
+        key="linfo",
+        unidade="% dos leucócitos",
+        tipo_valor="percentual diferencial",
+        faixa_operacional="0-100",
+        regra_sentinela="999/9999/99999 tratados como ausente/sentinela operacional",
+        sentinel_codes=tuple(sorted(SINAN_LCR_SENTINEL_CODES)),
+        teto_plausivel=100,
+        teto_sistema=(100,),
+        comportamento_truncamento="Valores >100 são incompatíveis com percentual e ficam sinalizados.",
+        uso_permitido="distribuição e predomínio celular quando 0-100",
+    ),
+    "clor": SinanLcrParameterMetadata(
+        key="clor",
+        unidade="mEq/L",
+        tipo_valor="concentração absoluta",
+        faixa_operacional=">=0; interpretar com cautela pela alta ausência",
+        regra_sentinela="999/9999/99999 tratados como ausente/sentinela operacional",
+        sentinel_codes=tuple(sorted(SINAN_LCR_SENTINEL_CODES)),
+        teto_plausivel=SINAN_LCR_PLAUSIBLE_MAX["clor"],
+        teto_sistema=(99,),
+        comportamento_truncamento="Dicionário operacional mostrou inconsistência entre máximo 99 e top valores 120-122; sinalizar e auditar.",
+        uso_permitido="auditoria/completude; uso clínico limitado pela alta ausência",
+    ),
+}
+
+
+def sinan_lcr_param_metadata(param_key: str) -> Optional[SinanLcrParameterMetadata]:
+    return SINAN_LCR_PARAM_METADATA.get(param_key)
+
+
+def _sql_numeric_tuple(values: Sequence[float | int]) -> str:
+    return ", ".join(str(int(v)) if float(v).is_integer() else repr(float(v)) for v in values)
+
+
+def sinan_lcr_neutralize_sentinel_expr(value_expr: str) -> str:
+    """Compatibilidade: neutraliza sentinelas gerais quando o parâmetro não é conhecido."""
     codes = ", ".join(str(c) for c in sorted(SINAN_LCR_SENTINEL_CODES))
     return f"CASE WHEN ({value_expr}) IN ({codes}) THEN NULL ELSE ({value_expr}) END"
 
 
-def sinan_lcr_plausible_max(param_key: str) -> Optional[float]:
-    """Teto de plausibilidade do parâmetro, se definido para essa chave.
-
-    ATENÇÃO: ver observação em SINAN_LCR_PLAUSIBLE_MAX — tetos provisórios, não
-    validados clinicamente/contra o dicionário oficial do SINAN.
+def sinan_lcr_clean_value_expr(value_expr: str, param_key: Optional[str] = None) -> str:
+    """Valor limpo para uso analítico: preserva o bruto fora desta expressão,
+    mas converte sentinelas configuradas para NULL.
     """
-    return SINAN_LCR_PLAUSIBLE_MAX.get(param_key)
+    meta = sinan_lcr_param_metadata(param_key or "")
+    codes = meta.sentinel_codes if meta else tuple(sorted(SINAN_LCR_SENTINEL_CODES))
+    codes_sql = _sql_numeric_tuple(codes)
+    return f"CASE WHEN ({value_expr}) IN ({codes_sql}) THEN NULL ELSE ({value_expr}) END"
+
+
+def sinan_lcr_analysis_value_expr(value_expr: str, param_key: Optional[str] = None, *, enforce_percent_range: bool = False) -> str:
+    clean = sinan_lcr_clean_value_expr(value_expr, param_key)
+    meta = sinan_lcr_param_metadata(param_key or "")
+    if enforce_percent_range and meta and "percentual" in meta.tipo_valor:
+        return f"CASE WHEN ({clean}) IS NULL OR ({clean}) < 0 OR ({clean}) > 100 THEN NULL ELSE ({clean}) END"
+    return clean
+
+
+def sinan_lcr_numeric_audit_exprs(value_expr: str, param_key: str) -> Dict[str, str]:
+    """Expressões SQL padronizadas para valor bruto, valor limpo e flags de auditoria."""
+    meta = sinan_lcr_param_metadata(param_key)
+    bruto = f"({value_expr})"
+    limpo = sinan_lcr_clean_value_expr(value_expr, param_key)
+    codes = meta.sentinel_codes if meta else tuple(sorted(SINAN_LCR_SENTINEL_CODES))
+    sent_sql = _sql_numeric_tuple(codes)
+    flag_sentinela = f"CASE WHEN {bruto} IN ({sent_sql}) THEN TRUE ELSE FALSE END"
+    if meta and meta.teto_plausivel is not None:
+        flag_acima = f"CASE WHEN ({limpo}) IS NOT NULL AND ({limpo}) > {repr(float(meta.teto_plausivel))} THEN TRUE ELSE FALSE END"
+    else:
+        flag_acima = "FALSE"
+    if meta and meta.teto_sistema:
+        teto_sql = _sql_numeric_tuple(meta.teto_sistema)
+        flag_teto = f"CASE WHEN {bruto} IN ({teto_sql}) THEN TRUE ELSE FALSE END"
+    else:
+        flag_teto = "FALSE"
+    if meta and "percentual" in meta.tipo_valor:
+        flag_percentual = f"CASE WHEN ({limpo}) IS NOT NULL AND (({limpo}) < 0 OR ({limpo}) > 100) THEN TRUE ELSE FALSE END"
+    else:
+        flag_percentual = "FALSE"
+    return {
+        "valor_bruto": bruto,
+        "valor_limpo": limpo,
+        "flag_sentinela": flag_sentinela,
+        "flag_acima_teto_plausivel": flag_acima,
+        "flag_teto_sistema": flag_teto,
+        "flag_percentual_invalido": flag_percentual,
+    }
+
+
+def sinan_lcr_metadata_dataframe(param_keys: Optional[Sequence[str]] = None) -> pd.DataFrame:
+    keys = list(param_keys) if param_keys else list(SINAN_LCR_PARAM_METADATA.keys())
+    rows = []
+    for key in keys:
+        meta = sinan_lcr_param_metadata(key)
+        if not meta:
+            continue
+        rows.append({
+            "parametro_id": key,
+            "parametro": str(SINAN_QUIMIO_PARAMS.get(key, {}).get("label", key)),
+            "unidade": meta.unidade,
+            "tipo_valor": meta.tipo_valor,
+            "faixa_operacional": meta.faixa_operacional,
+            "regra_sentinela": meta.regra_sentinela,
+            "teto_plausivel": meta.teto_plausivel,
+            "teto_sistema": ", ".join(str(int(v)) if float(v).is_integer() else str(v) for v in meta.teto_sistema) if meta.teto_sistema else "",
+            "comportamento_truncamento": meta.comportamento_truncamento,
+            "uso_permitido": meta.uso_permitido,
+        })
+    return pd.DataFrame(rows)
+
+
+def sinan_lcr_plausible_max(param_key: str) -> Optional[float]:
+    meta = sinan_lcr_param_metadata(param_key)
+    return meta.teto_plausivel if meta else SINAN_LCR_PLAUSIBLE_MAX.get(param_key)
 
 
 # Mapeia CON_DIAGES (+ CLA_ME_ETI para refinar a categoria 08 "outra etiologia")
 # para um dos 4 grupos etiológicos usados na comparação por faixas de LCR.
 # 01 (meningococcemia isolada) é deixado fora por não representar, isoladamente,
-# meningite confirmada por LCR. 05/06/09/10 (demais bacterianas) entram em
-# "Bacteriana". 07 (asséptica) é tratado operacionalmente como "Viral", seguindo
-# a mesma convenção já usada na conversão CID-10 deste app.
+# meningite confirmada por LCR. 06 (meningite não especificada) também fica fora
+# das faixas esperadas do LCR: na conversão CID ela vai para G03 e não deve ser
+# avaliada contra o padrão bacteriano. 05/09/10 entram como bacterianas; 07 segue
+# como viral operacional apenas no bloco exploratório legado.
 SINAN_CLA_ME_ETI_FUNGAL_CODES = {"42", "43", "44", "64"}  # outros fungos, Cryptococcus, Candida, Aspergillus
 
 
@@ -1873,7 +2062,7 @@ def sinan_expected_etiology_group_expr(con_code_sql: str, cla_me_eti_code_sql: O
         CASE
             WHEN {con_code_sql} = '04' THEN 'Tuberculosa'
             WHEN {con_code_sql} = '07' THEN 'Viral'
-            WHEN {con_code_sql} IN ('02', '03', '05', '06', '09', '10') THEN 'Bacteriana'
+            WHEN {con_code_sql} IN ('02', '03', '05', '09', '10') THEN 'Bacteriana'
             WHEN {con_code_sql} = '08' AND {eti_expr} IN ({fungal_codes}) THEN 'Fúngica'
             WHEN {con_code_sql} = '08' THEN 'Outra etiologia (não fúngica)'
             ELSE NULL
@@ -2658,6 +2847,38 @@ def sinan_g01_base_disease_expr(bacteria_code_sql: Optional[str] = None, aux_tex
 
 def age_band_expr(age_sql: str, width: int = 5) -> str:
     return f"FLOOR(({age_sql}) / {width}) * {width}"
+
+
+# Granularidade etária primária das pirâmides/distribuições demográficas (NU_IDADE_N
+# e derivadas): o bloco quinquenal 0–4 anos mistura crianças com perfis de imunização
+# muito distintos entre si — a janela da Pentavalente/Meningo C atua fortemente no
+# primeiro ano de vida, e a do Pneumo 10/reforços segue nos anos seguintes até os 4
+# anos. Agregar tudo em "0–4" esconde esse contraste. As funções abaixo abrem uma
+# faixa "< 1 ano" e uma faixa "1–4 anos" explícitas e mantêm as faixas quinquenais
+# normais (5–9, 10–14, ...) para as demais idades.
+def _age_pyramid_band_label_sql(age_alias: str = "idade") -> str:
+    return f"""
+    CASE
+        WHEN {age_alias} < 0 OR {age_alias} > 130 THEN NULL
+        WHEN {age_alias} < 1 THEN '< 1 ano'
+        WHEN {age_alias} < 5 THEN '1–4 anos'
+        ELSE
+            CAST(CAST(FLOOR({age_alias} / 5) * 5 AS INTEGER) AS VARCHAR)
+            || '–' ||
+            CAST(CAST(FLOOR({age_alias} / 5) * 5 + 4 AS INTEGER) AS VARCHAR)
+    END
+    """
+
+
+def _age_pyramid_band_order_sql(age_alias: str = "idade") -> str:
+    return f"""
+    CASE
+        WHEN {age_alias} < 0 OR {age_alias} > 130 THEN NULL
+        WHEN {age_alias} < 1 THEN 0
+        WHEN {age_alias} < 5 THEN 1
+        ELSE CAST(FLOOR({age_alias} / 5) * 5 AS INTEGER)
+    END
+    """
 
 
 def choose_candidate(columns: Sequence[str], candidates: Sequence[str]) -> Optional[str]:
@@ -3829,10 +4050,10 @@ def sinan_quimio_code_expr(sel: ColumnSelection) -> Optional[str]:
         sel.lab_clor_col,
     ]
     tests: List[str] = []
-    for col in param_cols:
+    for param_key, col in zip(["hema", "neutro", "glico", "leuco", "eosi", "prot", "mono", "linfo", "clor"], param_cols):
         if not col:
             continue
-        value_expr = sinan_lcr_neutralize_sentinel_expr(numeric_expr(col))
+        value_expr = sinan_lcr_clean_value_expr(numeric_expr(col), param_key)
         tests.append(f"(({value_expr}) IS NOT NULL AND ({value_expr}) >= 0)")
     if not tests:
         return None
@@ -3984,14 +4205,16 @@ def query_timeseries(table: LoadedTable, dt_sql: str, where_sql: str, freq: str,
     return run_query(table, sql)
 
 
-def query_heatmap(table: LoadedTable, dt_sql: str, where_sql: str) -> pd.DataFrame:
+def query_heatmap(table: LoadedTable, dt_sql: str, where_sql: str, freq: str = "month") -> pd.DataFrame:
+    period_expr = "EXTRACT(WEEK FROM dt)" if freq == "week" else "EXTRACT(MONTH FROM dt)"
+    period_alias = "semana" if freq == "week" else "mes"
     sql = f"""
         WITH base AS (
             SELECT {dt_sql} AS dt
             FROM {table.ref_sql}
             {where_sql}
         )
-        SELECT EXTRACT(YEAR FROM dt) AS ano, EXTRACT(MONTH FROM dt) AS mes, COUNT(*) AS n
+        SELECT EXTRACT(YEAR FROM dt) AS ano, {period_expr} AS {period_alias}, COUNT(*) AS n
         FROM base
         WHERE dt IS NOT NULL
         GROUP BY 1, 2
@@ -4014,6 +4237,72 @@ def query_category(table: LoadedTable, category_sql: str, where_sql: str, top_n:
     if not df.empty:
         df["pct"] = (df["n"] / df["n"].sum() * 100).round(2)
     return df
+
+
+def query_field_coverage(table: LoadedTable, field_sql: str, where_sql: str) -> pd.DataFrame:
+    """Total, preenchidos, ausentes e cobertura para subtítulos de gráficos."""
+    sql = f"""
+        WITH base AS (
+            SELECT {field_sql} AS valor
+            FROM {table.ref_sql}
+            {where_sql}
+        )
+        SELECT COUNT(*) AS n_total,
+               COUNT(*) FILTER (WHERE valor IS NOT NULL) AS n_preenchido,
+               COUNT(*) FILTER (WHERE valor IS NULL) AS n_ausente,
+               {pct_expr("COUNT(*) FILTER (WHERE valor IS NOT NULL)", "COUNT(*)")} AS pct_cobertura
+        FROM base
+    """
+    return run_query(table, sql)
+
+
+def coverage_subtitle_from_df(df: pd.DataFrame) -> str:
+    if df.empty:
+        return "N total=0; preenchido=0; ausente=0; cobertura=—"
+    row = df.iloc[0]
+    total = int(row.get("n_total", 0) or 0)
+    filled = int(row.get("n_preenchido", 0) or 0)
+    missing = int(row.get("n_ausente", 0) or 0)
+    pct = row.get("pct_cobertura")
+    pct_text = "—" if pd.isna(pct) else f"{float(pct):.2f}%".replace(".", ",")
+    return f"N preenchido={format_int_br(filled)}; N ausente={format_int_br(missing)}; cobertura={pct_text}; N total={format_int_br(total)}"
+
+
+def query_field_presence(
+    table: LoadedTable,
+    field_sql: str,
+    where_sql: str,
+    present_label: str = "Sim — informado",
+    absent_label: str = "Não — ausente/sem informação",
+) -> pd.DataFrame:
+    """Distribuição binária de presença/preenchimento de um campo no recorte informado."""
+    sql = f"""
+        WITH base AS (
+            SELECT {field_sql} AS valor
+            FROM {table.ref_sql}
+            {where_sql}
+        ), agg AS (
+            SELECT COUNT(*) AS denominador,
+                   COUNT(*) FILTER (WHERE valor IS NOT NULL) AS n_preenchido,
+                   COUNT(*) FILTER (WHERE valor IS NULL) AS n_ausente
+            FROM base
+        )
+        SELECT {qstr(present_label)} AS categoria,
+               n_preenchido AS n,
+               denominador,
+               CASE WHEN denominador > 0 THEN ROUND(100.0 * n_preenchido / denominador, 2) ELSE NULL END AS pct,
+               1 AS ordem
+        FROM agg
+        UNION ALL
+        SELECT {qstr(absent_label)} AS categoria,
+               n_ausente AS n,
+               denominador,
+               CASE WHEN denominador > 0 THEN ROUND(100.0 * n_ausente / denominador, 2) ELSE NULL END AS pct,
+               2 AS ordem
+        FROM agg
+        ORDER BY ordem
+    """
+    return run_query(table, sql)
 
 
 def query_category_top_with_outros(table: LoadedTable, category_sql: str, where_sql: str, top_n: int = 15, outros_label: str = "Outros municípios") -> pd.DataFrame:
@@ -4505,6 +4794,8 @@ def collapse_sinan_evolucao_ignorado(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def query_age_dist(table: LoadedTable, age_sql: str, where_sql: str, sex_sql: Optional[str] = None) -> pd.DataFrame:
+    faixa_label = _age_pyramid_band_label_sql("idade")
+    faixa_order = _age_pyramid_band_order_sql("idade")
     if sex_sql:
         sql = f"""
             WITH base AS (
@@ -4512,11 +4803,11 @@ def query_age_dist(table: LoadedTable, age_sql: str, where_sql: str, sex_sql: Op
                 FROM {table.ref_sql}
                 {where_sql}
             )
-            SELECT sexo, FLOOR(idade / 5) * 5 AS faixa_ini, COUNT(*) AS n
+            SELECT sexo, {faixa_label} AS faixa, {faixa_order} AS faixa_ini, COUNT(*) AS n
             FROM base
             WHERE idade BETWEEN 0 AND 130 AND sexo IN ('Masculino', 'Feminino')
-            GROUP BY 1, 2
-            ORDER BY 2, 1
+            GROUP BY 1, 2, 3
+            ORDER BY 3, 1
         """
     else:
         sql = f"""
@@ -4525,11 +4816,11 @@ def query_age_dist(table: LoadedTable, age_sql: str, where_sql: str, sex_sql: Op
                 FROM {table.ref_sql}
                 {where_sql}
             )
-            SELECT FLOOR(idade / 5) * 5 AS faixa_ini, COUNT(*) AS n
+            SELECT {faixa_label} AS faixa, {faixa_order} AS faixa_ini, COUNT(*) AS n
             FROM base
             WHERE idade BETWEEN 0 AND 130
-            GROUP BY 1
-            ORDER BY 1
+            GROUP BY 1, 2
+            ORDER BY 2
         """
     return run_query(table, sql)
 
@@ -5074,13 +5365,30 @@ def query_sinan_quimio_summary(table: LoadedTable, exprs: Dict[str, Optional[str
         return pd.DataFrame()
     unions = []
     for key, label, value_expr in params:
-        valor_limpo = sinan_lcr_neutralize_sentinel_expr(value_expr)
+        meta = sinan_lcr_param_metadata(key)
+        audit = sinan_lcr_numeric_audit_exprs(value_expr, key)
         teto = sinan_lcr_plausible_max(key)
         teto_sql = "CAST(NULL AS DOUBLE)" if teto is None else repr(float(teto))
+        teto_sistema_sql = qstr(", ".join(str(int(v)) if float(v).is_integer() else str(v) for v in (meta.teto_sistema if meta else ())))
         unions.append(
             f"""
-            SELECT {qstr(key)} AS parametro_id, {qstr(SINAN_QUIMIO_MATERIAL)} AS material_analisado, {qstr(label)} AS parametro,
-                   {valor_limpo} AS valor, {teto_sql} AS teto_plausibilidade
+            SELECT {qstr(key)} AS parametro_id,
+                   {qstr(SINAN_QUIMIO_MATERIAL)} AS material_analisado,
+                   {qstr(label)} AS parametro,
+                   {qstr(meta.unidade if meta else '')} AS unidade,
+                   {qstr(meta.tipo_valor if meta else '')} AS tipo_valor,
+                   {qstr(meta.faixa_operacional if meta else '')} AS faixa_operacional,
+                   {qstr(meta.regra_sentinela if meta else '')} AS regra_sentinela,
+                   {teto_sql} AS teto_plausibilidade,
+                   {teto_sistema_sql} AS teto_sistema,
+                   {qstr(meta.comportamento_truncamento if meta else '')} AS comportamento_truncamento,
+                   {qstr(meta.uso_permitido if meta else '')} AS uso_permitido,
+                   {audit['valor_bruto']} AS valor_bruto,
+                   {audit['valor_limpo']} AS valor,
+                   {audit['flag_sentinela']} AS flag_sentinela,
+                   {audit['flag_acima_teto_plausivel']} AS flag_acima_teto_plausivel,
+                   {audit['flag_teto_sistema']} AS flag_teto_sistema,
+                   {audit['flag_percentual_invalido']} AS flag_percentual_invalido
             FROM {table.ref_sql}
             {where_sql}
             """
@@ -5092,10 +5400,21 @@ def query_sinan_quimio_summary(table: LoadedTable, exprs: Dict[str, Optional[str
         SELECT parametro_id,
                material_analisado,
                parametro,
+               unidade,
+               tipo_valor,
+               faixa_operacional,
+               regra_sentinela,
+               teto_plausibilidade,
+               teto_sistema,
+               comportamento_truncamento,
+               uso_permitido,
                COUNT(*) AS registros_avaliados,
                COUNT(*) FILTER (WHERE valor IS NOT NULL AND valor >= 0) AS n_valido,
                COUNT(*) FILTER (WHERE valor IS NULL OR valor < 0) AS n_sem_valor,
-               COUNT(*) FILTER (WHERE valor IS NOT NULL AND teto_plausibilidade IS NOT NULL AND valor > teto_plausibilidade) AS n_acima_teto_plausibilidade,
+               COUNT(*) FILTER (WHERE flag_sentinela) AS n_sentinela,
+               COUNT(*) FILTER (WHERE flag_teto_sistema) AS n_no_teto_sistema,
+               COUNT(*) FILTER (WHERE flag_percentual_invalido) AS n_percentual_invalido,
+               COUNT(*) FILTER (WHERE flag_acima_teto_plausivel) AS n_acima_teto_plausibilidade,
                ROUND(100.0 * COUNT(*) FILTER (WHERE valor IS NOT NULL AND valor >= 0) / NULLIF(COUNT(*), 0), 2) AS pct_preenchido,
                MIN(valor) FILTER (WHERE valor IS NOT NULL AND valor >= 0) AS minimo,
                quantile_cont(valor, 0.25) FILTER (WHERE valor IS NOT NULL AND valor >= 0) AS q1,
@@ -5104,7 +5423,7 @@ def query_sinan_quimio_summary(table: LoadedTable, exprs: Dict[str, Optional[str
                quantile_cont(valor, 0.75) FILTER (WHERE valor IS NOT NULL AND valor >= 0) AS q3,
                MAX(valor) FILTER (WHERE valor IS NOT NULL AND valor >= 0) AS maximo
         FROM valores
-        GROUP BY 1, 2, 3
+        GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11
         ORDER BY CASE parametro_id
             WHEN 'hema' THEN 1
             WHEN 'neutro' THEN 2
@@ -5116,6 +5435,61 @@ def query_sinan_quimio_summary(table: LoadedTable, exprs: Dict[str, Optional[str
             WHEN 'linfo' THEN 8
             WHEN 'clor' THEN 9
             ELSE 99 END
+    """
+    return run_query(table, sql)
+
+
+def query_sinan_lcr_numeric_audit_long(
+    table: LoadedTable,
+    exprs: Dict[str, Optional[str]],
+    where_sql: str,
+    limit: int = DEFAULT_DOWNLOAD_ROW_LIMIT,
+) -> pd.DataFrame:
+    """Tabela longa de auditoria: valor bruto, valor limpo e flags por parâmetro.
+
+    Esta saída preserva a rastreabilidade dos valores usados no LCR sem carregar
+    automaticamente uma tabela enorme. O limite protege o navegador e pode ser
+    ajustado na interface.
+    """
+    params = sinan_quimio_param_exprs(exprs)
+    if not params:
+        return pd.DataFrame()
+    unions = []
+    for ordem, (key, label, value_expr) in enumerate(params, start=1):
+        meta = sinan_lcr_param_metadata(key)
+        audit = sinan_lcr_numeric_audit_exprs(value_expr, key)
+        unions.append(
+            f"""
+            SELECT {int(ordem)} AS ordem_parametro,
+                   ROW_NUMBER() OVER () AS row_id_auditoria,
+                   {qstr(key)} AS parametro_id,
+                   {qstr(label)} AS parametro,
+                   {qstr(meta.unidade if meta else '')} AS unidade,
+                   {audit['valor_bruto']} AS valor_bruto,
+                   {audit['valor_limpo']} AS valor_limpo,
+                   {audit['flag_sentinela']} AS flag_sentinela,
+                   {audit['flag_teto_sistema']} AS flag_teto_sistema,
+                   {audit['flag_acima_teto_plausivel']} AS flag_acima_teto_plausivel,
+                   {audit['flag_percentual_invalido']} AS flag_percentual_invalido,
+                   {qstr(meta.comportamento_truncamento if meta else '')} AS comportamento_truncamento,
+                   {qstr(meta.uso_permitido if meta else '')} AS uso_permitido
+            FROM {table.ref_sql}
+            {where_sql}
+            """
+        )
+    sql = f"""
+        WITH long AS (
+            {' UNION ALL '.join(unions)}
+        )
+        SELECT *
+        FROM long
+        WHERE valor_bruto IS NOT NULL
+           OR flag_sentinela
+           OR flag_teto_sistema
+           OR flag_acima_teto_plausivel
+           OR flag_percentual_invalido
+        ORDER BY row_id_auditoria, ordem_parametro
+        LIMIT {int(max(1, limit))}
     """
     return run_query(table, sql)
 
@@ -5266,7 +5640,79 @@ def query_sinan_puncao_by_case_status(table: LoadedTable, exprs: Dict[str, Optio
                  END,
                  a.categoria
     """
+
     return run_query(table, sql)
+
+
+def query_sinan_quimio_by_case_status(table: LoadedTable, exprs: Dict[str, Optional[str]], where_sql: str) -> pd.DataFrame:
+    """Distribui a realizacao do exame quimiocitologico do LCR por total, confirmados e descartados.
+
+    O estrato "Casos totais" e intencionalmente sobreposto aos demais: ele contem
+    todos os registros do recorte ativo, enquanto "Casos confirmados" e "Casos
+    descartados" sao subconjuntos definidos por CLASSI_FIN. Isso permite comparar
+    a cobertura geral do procedimento com os dois principais desfechos da
+    classificacao final sem esconder a leitura global do banco.
+    """
+    quimio = exprs.get("quimio_label")
+    if not quimio:
+        return pd.DataFrame()
+    quimio_sql = category_label_expr(quimio, "Sem informa\u00e7\u00e3o")
+    classi_code = exprs.get("classi_code")
+    if classi_code:
+        grupo_sql = sinan_case_classification_group_expr(classi_code)
+        expanded_sql = """
+            SELECT 'Casos totais' AS grupo_classificacao, categoria FROM base
+            UNION ALL
+            SELECT grupo_classificacao, categoria
+            FROM base
+            WHERE grupo_classificacao IN ('Casos confirmados', 'Casos descartados')
+        """
+    else:
+        grupo_sql = qstr("Sem classifica\u00e7\u00e3o / ignorados")
+        expanded_sql = """
+            SELECT 'Casos totais' AS grupo_classificacao, categoria FROM base
+        """
+    sql = f"""
+        WITH base AS (
+            SELECT {quimio_sql} AS categoria,
+                   {grupo_sql} AS grupo_classificacao
+            FROM {table.ref_sql}
+            {where_sql}
+        ), expanded AS (
+            {expanded_sql}
+        ), agg AS (
+            SELECT grupo_classificacao, categoria, COUNT(*) AS n
+            FROM expanded
+            GROUP BY 1, 2
+        ), totals AS (
+            SELECT grupo_classificacao, SUM(n) AS denominador
+            FROM agg
+            GROUP BY 1
+        )
+        SELECT a.grupo_classificacao,
+               a.categoria,
+               a.n,
+               t.denominador,
+               ROUND(100.0 * a.n / NULLIF(t.denominador, 0), 2) AS pct
+        FROM agg a
+        JOIN totals t USING (grupo_classificacao)
+        ORDER BY CASE a.grupo_classificacao
+                    WHEN 'Casos totais' THEN 1
+                    WHEN 'Casos confirmados' THEN 2
+                    WHEN 'Casos descartados' THEN 3
+                    ELSE 4
+                 END,
+                 CASE a.categoria
+                    WHEN 'Sim' THEN 1
+                    WHEN 'N\u00e3o' THEN 2
+                    WHEN 'Ignorado' THEN 3
+                    WHEN 'Sem informa\u00e7\u00e3o' THEN 4
+                    ELSE 5
+                 END,
+                 a.categoria
+    """
+    return run_query(table, sql)
+
 
 
 def sinan_lcr_age_stratum_expr(exprs: Dict[str, Optional[str]]) -> Optional[str]:
@@ -5451,7 +5897,7 @@ def query_sinan_numeric_distribution_stratified_by_reference_bins(
     # antes de classificar o valor nas faixas clínicas fixas, para que eles não
     # sejam contados como dado real em nenhum bin. Ver observação sobre a
     # natureza provisória desses códigos em SINAN_LCR_SENTINEL_CODES.
-    value_expr = sinan_lcr_neutralize_sentinel_expr(value_expr)
+    value_expr = sinan_lcr_clean_value_expr(value_expr, param_key)
 
     def sql_literal_or_null(value: object) -> str:
         if value is None:
@@ -5508,6 +5954,13 @@ def query_sinan_numeric_distribution_stratified_by_reference_bins(
     df = run_query(table, sql)
     if df.empty:
         return df
+    meta = sinan_lcr_param_metadata(param_key)
+    if meta:
+        df["unidade"] = meta.unidade
+        df["tipo_valor"] = meta.tipo_valor
+        df["faixa_operacional"] = meta.faixa_operacional
+        df["uso_permitido"] = meta.uso_permitido
+        df["comportamento_truncamento"] = meta.comportamento_truncamento
     if not stratification_sql and "estrato" in df.columns:
         df = df.drop(columns=["estrato"])
     return df
@@ -5519,15 +5972,21 @@ def query_sinan_numeric_distribution_stratified_by_reference_bins(
 # =============================================================================
 
 def _lcr_predominio_expr(exprs: Dict[str, Optional[str]]) -> Optional[str]:
-    """Predomínio celular (Neutrófilos x Linfócitos), ambos em % do total de leucócitos."""
+    """Predomínio celular (Neutrófilos x Linfócitos), ambos em % do total de leucócitos.
+
+    Usa o wrapper de LCR para neutralizar sentinelas e descartar, apenas para o
+    cálculo de predomínio, valores percentuais fora de 0-100.
+    """
     neutro, linfo = exprs.get("lab_neutro"), exprs.get("lab_linfo")
     if not neutro or not linfo:
         return None
+    neutro_limpo = sinan_lcr_analysis_value_expr(neutro, "neutro", enforce_percent_range=True)
+    linfo_limpo = sinan_lcr_analysis_value_expr(linfo, "linfo", enforce_percent_range=True)
     return f"""
         CASE
-            WHEN {neutro} IS NULL OR {neutro} < 0 OR {linfo} IS NULL OR {linfo} < 0 THEN NULL
-            WHEN {neutro} > {linfo} THEN 'Neutrófilos'
-            WHEN {linfo} > {neutro} THEN 'Linfócitos'
+            WHEN ({neutro_limpo}) IS NULL OR ({linfo_limpo}) IS NULL THEN NULL
+            WHEN ({neutro_limpo}) > ({linfo_limpo}) THEN 'Neutrófilos'
+            WHEN ({linfo_limpo}) > ({neutro_limpo}) THEN 'Linfócitos'
             ELSE 'Empate/indefinido'
         END
     """
@@ -5547,6 +6006,7 @@ def query_sinan_confirmed_param_vs_range(
     value_expr = exprs.get(f"lab_{param}")
     if not expected or not value_expr:
         return pd.DataFrame()
+    value_expr = sinan_lcr_clean_value_expr(value_expr, param)
 
     case_rows = []
     for grupo, faixas in SINAN_LCR_ETIOLOGY_RANGES.items():
@@ -5655,6 +6115,7 @@ def query_sinan_confirmed_glucose_vs_expected(
     glico = exprs.get("lab_glico")
     if not expected or not glico:
         return pd.DataFrame()
+    glico = sinan_lcr_clean_value_expr(glico, "glico")
 
     case_rows = []
     for grupo, faixas in SINAN_LCR_ETIOLOGY_RANGES.items():
@@ -5784,9 +6245,9 @@ def _sinan_lcr_independent_classification_with_sql(
     empate, ausência de dados ou pontuação zero são tratados como
     indeterminados.
     """
-    leuco = exprs.get("lab_leuco") or "NULL"
-    prot = exprs.get("lab_prot") or "NULL"
-    glico = exprs.get("lab_glico") or "NULL"
+    leuco = sinan_lcr_clean_value_expr(exprs["lab_leuco"], "leuco") if exprs.get("lab_leuco") else "NULL"
+    prot = sinan_lcr_clean_value_expr(exprs["lab_prot"], "prot") if exprs.get("lab_prot") else "NULL"
+    glico = sinan_lcr_clean_value_expr(exprs["lab_glico"], "glico") if exprs.get("lab_glico") else "NULL"
     predominio = _lcr_predominio_expr(exprs) or "NULL"
     aspecto_code = exprs.get("lab_aspect_code") or "NULL"
     expected = exprs.get("expected_etiology_group") or "NULL"
@@ -6315,6 +6776,13 @@ def query_sinan_hospitalization_internment(
     """
     return run_query(table, sql)
 
+# Correção "Denominador Não Específico para Quimioprofilaxia":
+# O indicador agora exibe duas visões quando CON_DIAGES está disponível:
+# (1) todos os registros do recorte, para auditoria histórica; e
+# (2) elegíveis operacionais para quimioprofilaxia de contatos
+#     (CON_DIAGES 02/03/09: formas meningocócicas e Haemophilus influenzae).
+# Assim, o usuário enxerga o efeito do denominador amplo sem confundir cobertura
+# de intervenção com casos em que a variável não deveria ser preenchida.
 def query_sinan_communicants_prophylaxis(
     table: LoadedTable,
     exprs: Dict[str, Optional[str]],
@@ -6326,37 +6794,57 @@ def query_sinan_communicants_prophylaxis(
     if not (dt and (communicants_col or prophylaxis_col)):
         return pd.DataFrame()
 
+    con_code = exprs.get("con_code")
     communicants = numeric_expr(communicants_col) if communicants_col else "CAST(NULL AS DOUBLE)"
     prophylaxis = case_from_mapping(clean_code_expr(prophylaxis_col), YES_NO_IGN, "Sem informação") if prophylaxis_col else qstr("Sem informação")
+    con_select = con_code if con_code else "CAST(NULL AS VARCHAR)"
+    recorte_case = """
+        CASE
+            WHEN con_code IN ('02', '03', '09') THEN 'Elegíveis operacionais (CON_DIAGES 02/03/09)'
+            ELSE NULL
+        END
+    """ if con_code else "CAST(NULL AS VARCHAR)"
     sql = f"""
         WITH base AS (
             SELECT EXTRACT(YEAR FROM {dt}) AS ano,
+                   {con_select} AS con_code,
                    {communicants} AS comunicantes,
                    {prophylaxis} AS quimioprofilaxia
             FROM {table.ref_sql}
             {where_sql}
+        ), recortes AS (
+            SELECT 'Todos os registros do recorte' AS recorte_quimioprofilaxia,
+                   ano, comunicantes, quimioprofilaxia
+            FROM base
+            UNION ALL
+            SELECT {recorte_case} AS recorte_quimioprofilaxia,
+                   ano, comunicantes, quimioprofilaxia
+            FROM base
+            WHERE con_code IN ('02', '03', '09')
         ), agg AS (
-            SELECT ano,
+            SELECT recorte_quimioprofilaxia,
+                   ano,
                    quimioprofilaxia,
                    COUNT(*) AS registros,
                    COUNT(*) FILTER (WHERE comunicantes IS NOT NULL AND comunicantes >= 0) AS registros_com_comunicantes,
                    SUM(CASE WHEN comunicantes IS NOT NULL AND comunicantes >= 0 THEN comunicantes ELSE 0 END) AS comunicantes_total,
                    ROUND(AVG(comunicantes) FILTER (WHERE comunicantes IS NOT NULL AND comunicantes >= 0), 2) AS media_comunicantes
-            FROM base
+            FROM recortes
             WHERE ano IS NOT NULL
+              AND recorte_quimioprofilaxia IS NOT NULL
               AND (comunicantes IS NOT NULL OR quimioprofilaxia <> 'Sem informação')
-            GROUP BY 1, 2
+            GROUP BY 1, 2, 3
         ), with_totals AS (
             SELECT *,
-                   SUM(registros) OVER (PARTITION BY ano) AS total_registros_ano,
-                   SUM(comunicantes_total) OVER (PARTITION BY ano) AS total_comunicantes_ano
+                   SUM(registros) OVER (PARTITION BY recorte_quimioprofilaxia, ano) AS total_registros_ano,
+                   SUM(comunicantes_total) OVER (PARTITION BY recorte_quimioprofilaxia, ano) AS total_comunicantes_ano
             FROM agg
         )
         SELECT *,
                {pct_expr('registros', 'total_registros_ano')} AS pct_registros_ano,
                {pct_expr('comunicantes_total', 'total_comunicantes_ano')} AS pct_comunicantes_ano
         FROM with_totals
-        ORDER BY ano, quimioprofilaxia
+        ORDER BY recorte_quimioprofilaxia, ano, quimioprofilaxia
     """
     return run_query(table, sql)
 
@@ -7965,6 +8453,25 @@ def render_kpis(table: LoadedTable, source: str, base_where: str, graph_where: s
         k5.metric("Tipo CID-10", "detectado" if exprs.get("cid") else "não detectado")
 
 
+def add_covid_context_annotation(fig: go.Figure, enabled: bool = True) -> go.Figure:
+    if not enabled or fig is None:
+        return fig
+    try:
+        fig.add_vrect(
+            x0="2020-01-01",
+            x1="2021-12-31",
+            fillcolor="LightGray",
+            opacity=0.20,
+            layer="below",
+            line_width=0,
+            annotation_text="2020-2021: contexto COVID-19",
+            annotation_position="top left",
+        )
+    except Exception:
+        pass
+    return fig
+
+
 def render_temporal_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dict[str, Optional[str]]) -> None:
     dt = exprs.get("dt")
     if not dt:
@@ -7988,38 +8495,69 @@ def render_temporal_tab(table: LoadedTable, source: str, graph_where: str, exprs
         cat_options["Sexo"] = exprs["sex"]
     with c2:
         cat_label = st.selectbox("Estratificar por", list(cat_options.keys()), key=f"ts_cat_{source}")
+    show_covid_context = st.checkbox(
+        "Mostrar anotação de contexto COVID-19 (2020-2021)",
+        value=True,
+        key=f"show_covid_context_{source}",
+        help="A anotação é contextual e não atribui causalidade às variações da série.",
+    )
     ts = query_timeseries(table, dt, graph_where, freq, cat_options[cat_label])
     if ts.empty:
         st.info("Sem dados para a série temporal com os filtros atuais.")
     elif cat_options[cat_label]:
         fig = px.line(ts, x="periodo", y="n", color="categoria", markers=True, title="Série temporal estratificada", labels={"periodo": "Período", "n": "Registros", "categoria": cat_label})
+        add_covid_context_annotation(fig, show_covid_context)
         render_plotly_chart(fig)
+        if show_covid_context:
+            st.caption(COVID_CONTEXT_NOTE)
         render_interval_total(ts, value_col="n", by_col="categoria")
         download_button(ts, f"{source.lower()}_serie_temporal_estratificada.csv")
     else:
         fig = px.line(ts, x="periodo", y="n", markers=True, title="Série temporal", labels={"periodo": "Período", "n": "Registros"})
+        add_covid_context_annotation(fig, show_covid_context)
         render_plotly_chart(fig)
+        if show_covid_context:
+            st.caption(COVID_CONTEXT_NOTE)
         render_interval_total(ts, value_col="n")
         download_button(ts, f"{source.lower()}_serie_temporal.csv")
 
-    heat = query_heatmap(table, dt, graph_where)
+    st.markdown("**Sazonalidade**")
+    heat_freq_label = st.selectbox(
+        "Granularidade da sazonalidade",
+        ["Mês", "Semana"],
+        index=0,
+        key=f"heatmap_freq_{source}",
+    )
+    heat_freq = {"Mês": "month", "Semana": "week"}[heat_freq_label]
+    heat = query_heatmap(table, dt, graph_where, heat_freq)
     if not heat.empty:
-        pivot = heat.pivot(index="ano", columns="mes", values="n").fillna(0)
+        if heat_freq == "week":
+            period_col = "semana"
+            columns_range = list(range(1, 54))
+            col_labels = [str(w) for w in columns_range]
+            x_title = "Semana epidemiológica"
+        else:
+            period_col = "mes"
+            columns_range = list(range(1, 13))
+            col_labels = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"]
+            x_title = "Mês"
+        pivot = heat.pivot(index="ano", columns=period_col, values="n").fillna(0)
         pivot = pivot.reindex(sorted(pivot.index))
-        pivot = pivot.reindex(columns=list(range(1, 13)), fill_value=0)
-        month_labels = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"]
+        pivot = pivot.reindex(columns=columns_range, fill_value=0)
         fig = go.Figure(
             data=go.Heatmap(
                 z=pivot.values,
-                x=month_labels,
+                x=col_labels,
                 y=[str(int(x)) for x in pivot.index],
-                hovertemplate="Ano %{y}<br>Mês %{x}<br>Registros %{z}<extra></extra>",
+                hovertemplate="Ano %{y}<br>" + x_title + " %{x}<br>Registros %{z}<extra></extra>",
             )
         )
-        fig.update_layout(title="Sazonalidade — ano × mês", xaxis_title="Mês", yaxis_title="Ano")
+        fig.update_layout(title=f"Sazonalidade — ano × {heat_freq_label.lower()}", xaxis_title=x_title, yaxis_title="Ano")
         render_plotly_chart(fig)
+        if show_covid_context:
+            st.caption(COVID_CONTEXT_NOTE)
         render_interval_total(heat, value_col="n")
-        download_button(heat, f"{source.lower()}_heatmap_ano_mes.csv", "Baixar dados do heatmap")
+        download_button(heat, f"{source.lower()}_heatmap_ano_{period_col}.csv", "Baixar dados do heatmap")
 
 
 
@@ -8134,34 +8672,54 @@ def render_sinan_lcr_indicators(table: LoadedTable, exprs: Dict[str, Optional[st
 
     quimio_expr = exprs.get("quimio_label")
     if quimio_expr:
-        df_quimio = query_category(table, quimio_expr, graph_where, top_n=40)
+        df_quimio = query_sinan_quimio_by_case_status(table, exprs, graph_where)
         if not df_quimio.empty:
             df_quimio = add_text(df_quimio)
-            st.markdown("**Exame Quimiocitológico do líquor (LCR)**")
+            st.markdown("**Exame Quimiocitol\u00f3gico do l\u00edquor (LCR)**")
+            st.caption(
+                "Este gr\u00e1fico agora separa a realiza\u00e7\u00e3o/cobertura do exame em tr\u00eas estratos: "
+                "casos totais, casos confirmados e casos descartados. Isso faz sentido metodol\u00f3gico porque "
+                "v\u00e1rias an\u00e1lises do painel comparam confirmados e descartados; aqui a leitura \u00e9 de cobertura do "
+                "procedimento, n\u00e3o de desempenho diagn\u00f3stico. O estrato 'Casos totais' inclui os demais e tamb\u00e9m "
+                "registros sem classifica\u00e7\u00e3o final, portanto os tr\u00eas denominadores n\u00e3o s\u00e3o mutuamente exclusivos."
+            )
             if exprs.get("quimio_inferred_from_params"):
                 st.caption(
-                    "LAB_LIQUOR não foi encontrado no banco; a realização do exame quimiocitológico foi inferida pela presença "
-                    "de pelo menos um parâmetro do LCR preenchido (hemácias, neutrófilos, glicose, leucócitos, eosinófilos, "
-                    "proteínas, monócitos, linfócitos ou cloreto)."
+                    "LAB_LIQUOR n\u00e3o foi encontrado no banco; a realiza\u00e7\u00e3o do exame quimiocitol\u00f3gico foi inferida pela presen\u00e7a "
+                    "de pelo menos um par\u00e2metro do LCR preenchido (hem\u00e1cias, neutr\u00f3filos, glicose, leuc\u00f3citos, eosin\u00f3filos, "
+                    "prote\u00ednas, mon\u00f3citos, linf\u00f3citos ou cloreto)."
                 )
             fig_quimio_lcr = px.bar(
                 df_quimio,
-                x="n",
-                y="categoria",
-                orientation="h",
+                x="grupo_classificacao",
+                y="pct",
+                color="categoria",
                 text="texto",
-                title="Exame Quimiocitológico do líquor (LCR)",
-                labels={"categoria": "Exame quimiocitológico do LCR", "n": "Registros", "pct": "%"},
-                hover_data={"texto": False, "pct": ":.2f"},
+                barmode="stack",
+                title="Exame Quimiocitol\u00f3gico do l\u00edquor (LCR) por classifica\u00e7\u00e3o final",
+                labels={
+                    "grupo_classificacao": "Estrato da classifica\u00e7\u00e3o final",
+                    "categoria": "Exame quimiocitol\u00f3gico do LCR",
+                    "n": "Registros",
+                    "pct": "% dentro do estrato",
+                    "denominador": "Denominador do estrato",
+                },
+                hover_data={"texto": False, "n": True, "pct": ":.2f", "denominador": True},
+                category_orders={
+                    "grupo_classificacao": ["Casos totais", "Casos confirmados", "Casos descartados"],
+                    "categoria": ["Sim", "N\u00e3o", "Ignorado", "Sem informa\u00e7\u00e3o"],
+                },
             )
-            fig_quimio_lcr.update_layout(yaxis={"categoryorder": "total ascending"})
+            fig_quimio_lcr.update_traces(textposition="inside")
+            fig_quimio_lcr.update_yaxes(range=[0, 100])
             render_plotly_chart(fig_quimio_lcr)
-            render_interval_total(df_quimio, value_col="n")
+            render_interval_total(df_quimio, value_col="n", by_col="grupo_classificacao")
             copyable_dataframe(df_quimio, width="stretch", hide_index=True)
+            download_button(df_quimio, "sinan_exame_quimiocitologico_lcr_por_classificacao.csv")
     else:
         st.info(
-            "Não foi detectado LAB_LIQUOR nem parâmetros quimiocitológicos do LCR suficientes "
-            "para inferir a realização do exame."
+            "N\u00e3o foi detectado LAB_LIQUOR nem par\u00e2metros quimiocitol\u00f3gicos do LCR suficientes "
+            "para inferir a realiza\u00e7\u00e3o do exame."
         )
 
     with st.expander("📌 Tabela-resumo: como os parâmetros do LCR costumam se comportar por etiologia", expanded=True):
@@ -8195,7 +8753,8 @@ def render_sinan_lcr_indicators(table: LoadedTable, exprs: Dict[str, Optional[st
     st.markdown("**Distribuição dos parâmetros quimiocitológicos do LCR**")
     st.caption(
         "Os histogramas foram substituídos por classes clínicas fixas. As faixas do eixo x seguem os intervalos da tabela-resumo "
-        "e destacam zonas de sobreposição entre etiologias, em vez de usar bins automáticos que mudam conforme o recorte filtrado."
+        "e destacam zonas de sobreposição entre etiologias, em vez de usar bins automáticos que mudam conforme o recorte filtrado. "
+        "O denominador destes gráficos agora é o mesmo da tabela-resumo: registros com punção lombar e exame quimiocitológico realizados."
     )
     st.caption(
         "⚠️ Antes de entrar nas estatísticas e nas faixas clínicas, os valores passam por uma neutralização de "
@@ -8247,7 +8806,7 @@ def render_sinan_lcr_indicators(table: LoadedTable, exprs: Dict[str, Optional[st
         if not expr:
             st.info(f"Para gerar a distribuição de {titulo}, o campo correspondente precisa existir no SINAN e ser detectado automaticamente.")
             return
-        dist = query_sinan_numeric_distribution_stratified_by_reference_bins(table, expr, graph_where, key, strat_sql)
+        dist = query_sinan_numeric_distribution_stratified_by_reference_bins(table, expr, lcr_eligible_where, key, strat_sql)
         if dist.empty:
             st.info(f"Não há valores numéricos válidos para {titulo} no recorte atual.")
             return
@@ -8259,6 +8818,9 @@ def render_sinan_lcr_indicators(table: LoadedTable, exprs: Dict[str, Optional[st
         hover_data = {"texto": False, "pct": ":.2f", "denominador": True, "faixa_inicio": ":.2f", "faixa_fim": ":.2f"}
         if "leitura" in dist.columns:
             hover_data["leitura"] = True
+        for meta_col in ["unidade", "tipo_valor", "faixa_operacional", "uso_permitido", "comportamento_truncamento"]:
+            if meta_col in dist.columns:
+                hover_data[meta_col] = True
         category_orders = {"faixa": sinan_lcr_distribution_bin_order(key)} if sinan_lcr_distribution_bin_order(key) else {}
         if strat_choice == SINAN_LCR_AGE_STRATIFICATION_LABEL:
             category_orders["estrato"] = SINAN_LCR_AGE_STRATA_ORDER
@@ -8322,23 +8884,24 @@ def render_sinan_lcr_indicators(table: LoadedTable, exprs: Dict[str, Optional[st
 
     st.markdown("**Distribuição dos glóbulos brancos no LCR**")
     st.caption(
-        "Leucócitos são registrados como contagem absoluta (céls/mm³). Neutrófilos, linfócitos, monócitos e eosinófilos são percentuais "
-        "em relação ao total de leucócitos; por isso, esses diferenciais devem ser lidos como composição celular, não como contagem absoluta."
+        "Leucócitos são registrados como contagem absoluta (céls/mm³). Neutrófilos, linfócitos e eosinófilos são lidos como percentuais "
+        "em relação ao total de leucócitos. LAB_MONO é tratado com cautela: quando fica entre 0 e 100, pode ser lido como composição celular; "
+        "valores >100 são sinalizados como incompatíveis/ambíguos, pois o dicionário operacional apontou máximo 994."
     )
     render_param_distribution("leuco", "Leucócitos", "Leucócitos (céls/mm³)")
     render_param_distribution("neutro", "Neutrófilos", "Neutrófilos (% dos leucócitos)")
     render_param_distribution("linfo", "Linfócitos", "Linfócitos (% dos leucócitos)")
-    render_param_distribution("mono", "Monócitos", "Monócitos (% dos leucócitos)")
+    render_param_distribution("mono", "Monócitos", "Monócitos (LAB_MONO; % apenas quando 0-100)")
     render_param_distribution("eosi", "Eosinófilos", "Eosinófilos (% dos leucócitos)")
 
     st.markdown("**Distribuição — aspecto do líquor (Ficha SINAN)**")
     st.caption(
         "Campo 48 da ficha de investigação: 1 — Límpido; 2 — Purulento; 3 — Hemorrágico; "
         "4 — Turvo; 5 — Xantocrômico; 6 — Outro; 9 — Ignorado. O gráfico abaixo usa essas categorias oficiais, "
-        "mantendo ignorados/sem informação para avaliar também completude de preenchimento."
+        "mantendo ignorados/sem informação para avaliar também completude de preenchimento entre os elegíveis para interpretação do exame (punção + quimiocitológico)."
     )
     if exprs.get("lab_aspect_label"):
-        aspect_dist = query_sinan_lcr_aspect_distribution(table, exprs, graph_where, strat_sql)
+        aspect_dist = query_sinan_lcr_aspect_distribution(table, exprs, lcr_eligible_where, strat_sql)
         if aspect_dist.empty:
             st.info("Não há registros com aspecto do líquor preenchido no recorte atual.")
         else:
@@ -8410,6 +8973,31 @@ def render_sinan_lcr_indicators(table: LoadedTable, exprs: Dict[str, Optional[st
     )
     copyable_dataframe(quimio_summary, width="stretch", hide_index=True)
     download_button(quimio_summary, "sinan_quimiocitologico_liquor_resumo_parametros.csv")
+
+    with st.expander("Metadados e auditoria dos valores LAB_*", expanded=False):
+        metadata_df = sinan_lcr_metadata_dataframe([key for key, _, _ in sinan_quimio_param_exprs(exprs)])
+        if not metadata_df.empty:
+            st.markdown("**Cadastro operacional por parâmetro**")
+            st.caption("Este cadastro alimenta a tabela-resumo e os hovers dos gráficos de distribuição: unidade, tipo, faixa operacional, sentinelas, teto plausível, teto de sistema/truncamento e uso permitido.")
+            copyable_dataframe(metadata_df, width="stretch", hide_index=True)
+            download_button(metadata_df, "sinan_lcr_metadados_parametros.csv")
+        st.markdown("**Tabela longa de auditoria: valor bruto, valor limpo e flags**")
+        st.caption("Preserva valor bruto, valor limpo e flags separadas: sentinela/ausente, teto do sistema, acima do teto de plausibilidade e percentual incompatível. A prévia é limitada para proteger memória e navegador.")
+        audit_limit = st.number_input(
+            "Máximo de linhas da auditoria LCR",
+            min_value=100,
+            max_value=max(100, perf_int("perf_download_row_limit", DEFAULT_DOWNLOAD_ROW_LIMIT)),
+            value=min(5000, max(100, perf_int("perf_download_row_limit", DEFAULT_DOWNLOAD_ROW_LIMIT))),
+            step=100,
+            key="sinan_lcr_audit_long_limit",
+        )
+        if st.checkbox("Carregar prévia da auditoria LCR", value=False, key="sinan_lcr_load_audit_long"):
+            audit_long = query_sinan_lcr_numeric_audit_long(table, exprs, lcr_eligible_where, int(audit_limit))
+            if audit_long.empty:
+                st.info("Não há valores laboratoriais para auditar no recorte elegível atual.")
+            else:
+                copyable_dataframe(audit_long, width="stretch", hide_index=True)
+                download_button(audit_long, "sinan_lcr_auditoria_valores_brutos_limpos_flags.csv")
 
     render_quimio_classification_tab(table, exprs, base_where)
 
@@ -8938,11 +9526,35 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, grap
         if not comunicantes.empty:
             st.markdown("**Número de comunicantes por realização de quimioprofilaxia**")
             st.caption("Segundo a estrutura do dicionário de dados do SINAN para meningite, `MED_NUCOMU` registra o número de comunicantes identificados e `MED_QUIMIO` informa se foi realizada quimioprofilaxia, codificada como Sim, Não ou Ignorado. O gráfico cruza o total de comunicantes registrados por ano com a situação de realização da quimioprofilaxia e inclui a série total de comunicantes.")
+            if exprs.get("con_code"):
+                st.caption(
+                    "Correção do denominador: agora há duas visões — todos os registros do recorte e elegíveis operacionais "
+                    "para quimioprofilaxia de contatos (CON_DIAGES 02/03/09: formas meningocócicas e Haemophilus influenzae). "
+                    "Use a visão elegível para interpretação de cobertura; a visão todos serve como sensibilidade/auditoria do denominador amplo."
+                )
+            else:
+                st.caption(
+                    "Observação: não foi possível criar a visão elegível (CON_DIAGES 02/03/09), porque CON_DIAGES não foi detectado. "
+                    "Os valores abaixo correspondem ao contingente completo de registros ativos e podem subestimar a cobertura real."
+                )
             comunicantes = comunicantes.copy()
-            comunicantes["serie"] = comunicantes["quimioprofilaxia"].astype(str)
-            comunicantes_plot = comunicantes.rename(columns={"comunicantes_total": "valor"}).copy()
+            recortes_qp = comunicantes["recorte_quimioprofilaxia"].dropna().unique().tolist() if "recorte_quimioprofilaxia" in comunicantes.columns else []
+            default_recorte = "Elegíveis operacionais (CON_DIAGES 02/03/09)" if "Elegíveis operacionais (CON_DIAGES 02/03/09)" in recortes_qp else (recortes_qp[0] if recortes_qp else None)
+            if len(recortes_qp) > 1:
+                recorte_sel = st.selectbox(
+                    "Recorte do denominador da quimioprofilaxia",
+                    recortes_qp,
+                    index=recortes_qp.index(default_recorte) if default_recorte in recortes_qp else 0,
+                    key="sinan_quimioprofilaxia_recorte",
+                )
+                comunicantes_plot_base = comunicantes[comunicantes["recorte_quimioprofilaxia"].eq(recorte_sel)].copy()
+            else:
+                recorte_sel = default_recorte
+                comunicantes_plot_base = comunicantes.copy()
+            comunicantes_plot_base["serie"] = comunicantes_plot_base["quimioprofilaxia"].astype(str)
+            comunicantes_plot = comunicantes_plot_base.rename(columns={"comunicantes_total": "valor"}).copy()
             total_comunicantes = (
-                comunicantes
+                comunicantes_plot_base
                 .groupby("ano", as_index=False)
                 .agg(
                     valor=("total_comunicantes_ano", "max"),
@@ -8973,7 +9585,7 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, grap
             render_plotly_chart(fig_comunicantes)
             render_interval_total(comunicantes_plot, value_col="valor", by_col="serie", value_label="comunicantes")
             copyable_dataframe(comunicantes, width="stretch", hide_index=True)
-            download_button(comunicantes, "sinan_comunicantes_quimioprofilaxia.csv")
+            download_button(comunicantes, "sinan_comunicantes_quimioprofilaxia_todos_e_elegiveis.csv")
         else:
             st.info("Para gerar o gráfico de comunicantes/profilaxia, MED_NUCOMU e/ou MED_QUIMIO precisam existir no SINAN.")
 
@@ -9439,7 +10051,39 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
         else conversion_base_where
     )
 
+    if exprs.get("con_label"):
+        con_coverage_text = ""
+        if exprs.get("con_code"):
+            con_coverage_text = coverage_subtitle_from_df(query_field_coverage(table, exprs["con_code"], confirmed_conversion_where))
+        conclusao_df = query_category(table, exprs["con_label"], confirmed_conversion_where, top_n=40)
+        if not conclusao_df.empty:
+            conclusao_df = add_text(conclusao_df)
+            fig_conclusao = px.bar(
+                conclusao_df,
+                x="n",
+                y="categoria",
+                orientation="h",
+                text="texto",
+                title="Conclusão diagnóstica entre casos confirmados" + (f"<br><sup>{con_coverage_text}</sup>" if con_coverage_text else ""),
+                labels={"categoria": "Conclusão diagnóstica", "n": "Casos confirmados", "pct": "% dos confirmados"},
+                hover_data={"texto": False, "pct": ":.2f"},
+            )
+            fig_conclusao.update_layout(yaxis={"categoryorder": "total ascending"})
+            render_plotly_chart(fig_conclusao)
+            st.caption(
+                "Prevalência das categorias específicas de CON_DIAGES entre casos confirmados. "
+                "Categorias ausentes/ignoradas permanecem no gráfico para preservar a leitura do denominador."
+            )
+            if con_coverage_text:
+                st.caption("CON_DIAGES — " + con_coverage_text)
+            render_interval_total(conclusao_df, value_col="n", value_label="casos confirmados")
+            copyable_dataframe(conclusao_df, width="stretch", hide_index=True)
+            download_button(conclusao_df, "sinan_conclusao_diagnostica_confirmados.csv")
+
     if exprs.get("con_group"):
+        con_coverage_text = ""
+        if exprs.get("con_code"):
+            con_coverage_text = coverage_subtitle_from_df(query_field_coverage(table, exprs["con_code"], confirmed_conversion_where))
         df = query_category(table, exprs["con_group"], confirmed_conversion_where, top_n=40)
         if not df.empty:
             df = add_text(df)
@@ -9449,16 +10093,49 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                 y="categoria",
                 orientation="h",
                 text="texto",
-                title="Classificação etiológica conforme o SINAN para os casos confirmados",
+                title="Classificação etiológica conforme o SINAN para os casos confirmados" + (f"<br><sup>{con_coverage_text}</sup>" if con_coverage_text else ""),
                 labels={"categoria": "Classificação etiológica conforme o SINAN", "n": "Casos confirmados", "pct": "%"},
                 hover_data={"texto": False, "pct": ":.2f"},
             )
             fig.update_layout(yaxis={"categoryorder": "total ascending"})
             render_plotly_chart(fig)
+            if con_coverage_text:
+                st.caption("CON_DIAGES — " + con_coverage_text)
             render_interval_total(df, value_col="n", value_label="casos confirmados")
             copyable_dataframe(df, width="stretch", hide_index=True)
 
+    if exprs.get("criterio_code"):
+        criterio_presenca = query_field_presence(
+            table,
+            exprs["criterio_code"],
+            confirmed_conversion_where,
+            present_label="Sim — critério informado",
+            absent_label="Não — sem critério informado",
+        )
+        if not criterio_presenca.empty:
+            criterio_presenca = add_text(criterio_presenca)
+            fig_criterio_presenca = px.bar(
+                criterio_presenca,
+                x="categoria",
+                y="n",
+                text="texto",
+                title="Presença de critério de confirmação entre casos confirmados",
+                labels={"categoria": "Critério de confirmação", "n": "Casos confirmados", "pct": "% dos confirmados"},
+                hover_data={"texto": False, "pct": ":.2f", "denominador": True},
+            )
+            render_plotly_chart(fig_criterio_presenca)
+            st.caption(
+                "Este gráfico mostra se o campo CRITERIO está informado entre os casos confirmados. "
+                "O gráfico seguinte detalha quais critérios foram registrados entre os preenchidos."
+            )
+            render_interval_total(criterio_presenca, value_col="n", value_label="casos confirmados")
+            copyable_dataframe(criterio_presenca, width="stretch", hide_index=True)
+            download_button(criterio_presenca, "sinan_presenca_criterio_confirmacao_confirmados.csv")
+
     if exprs.get("criterio_label"):
+        criterio_coverage_text = ""
+        if exprs.get("criterio_code"):
+            criterio_coverage_text = coverage_subtitle_from_df(query_field_coverage(table, exprs["criterio_code"], confirmed_conversion_where))
         criterio_df = query_category(table, exprs["criterio_label"], confirmed_conversion_where, top_n=40)
         if not criterio_df.empty:
             criterio_df = add_text(criterio_df)
@@ -9468,41 +10145,57 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                 y="categoria",
                 orientation="h",
                 text="texto",
-                title="Critério de confirmação entre casos confirmados",
+                title="Critério de confirmação entre casos confirmados" + (f"<br><sup>{criterio_coverage_text}</sup>" if criterio_coverage_text else ""),
                 labels={"categoria": "Critério", "n": "Casos confirmados", "pct": "%"},
                 hover_data={"texto": False, "pct": ":.2f"},
             )
             fig_criterio.update_layout(yaxis={"categoryorder": "total ascending"})
             render_plotly_chart(fig_criterio)
+            if criterio_coverage_text:
+                st.caption("CRITERIO — " + criterio_coverage_text)
             render_interval_total(criterio_df, value_col="n", value_label="casos confirmados")
             copyable_dataframe(criterio_df, width="stretch", hide_index=True)
 
     etio = query_sinan_etiology_lethality(table, exprs, conversion_base_where)
     if not etio.empty:
-        st.caption("Denominador do gráfico: casos confirmados do respectivo grupo etiológico (CLASSI_FIN = 1). Fórmula: óbitos por meningite entre confirmados / casos confirmados do grupo.")
+        st.caption("Denominador do gráfico: mostra lado a lado a letalidade bruta (óbitos por meningite / confirmados) e a letalidade com evolução conhecida (óbitos por meningite / confirmados com EVOLUCAO em alta, óbito por meningite ou óbito por outra causa).")
         etio = etio.copy()
         etio["denominador_letalidade"] = etio["confirmados"]
-        etio["texto"] = [
+        etio["denominador_letalidade_evolucao_conhecida"] = etio["confirmados_evolucao_conhecida"]
+        etio_long = pd.concat([
+            etio.assign(
+                estimativa=LETHALITY_LABEL,
+                letalidade_valor=etio["letalidade_pct"],
+                denominador_letalidade_plot=etio["denominador_letalidade"],
+            ),
+            etio.assign(
+                estimativa=LETHALITY_KNOWN_EVOL_LABEL,
+                letalidade_valor=etio["letalidade_evolucao_conhecida_pct"],
+                denominador_letalidade_plot=etio["denominador_letalidade_evolucao_conhecida"],
+            ),
+        ], ignore_index=True)
+        etio_long["texto"] = [
             f"{br_pct(p)} ({br_int(o)}/{br_int(c)})"
-            for p, o, c in zip(etio["letalidade_pct"], etio["obitos_meningite"], etio["denominador_letalidade"])
+            for p, o, c in zip(etio_long["letalidade_valor"], etio_long["obitos_meningite"], etio_long["denominador_letalidade_plot"])
         ]
         fig3 = px.bar(
-            etio,
-            x="letalidade_pct",
+            etio_long,
+            x="letalidade_valor",
             y="grupo_etiologico",
+            color="estimativa",
             orientation="h",
+            barmode="group",
             text="texto",
             title="Letalidade conforme grupo etiológico do SINAN",
-            labels={"letalidade_pct": "Óbitos por meningite / casos confirmados (%)", "grupo_etiologico": "Grupo etiológico", "denominador_letalidade": "Casos confirmados do grupo"},
-            hover_data={"obitos_meningite": True, "denominador_letalidade": True},
-            color_discrete_sequence=[PLOTLY_DEFAULT_BLUE],
+            labels={"letalidade_valor": "Letalidade (%)", "grupo_etiologico": "Grupo etiológico", "denominador_letalidade_plot": "Denominador", "estimativa": "Estimativa"},
+            hover_data={"obitos_meningite": True, "denominador_letalidade_plot": True, "texto": False},
+            color_discrete_map={LETHALITY_LABEL: PLOTLY_DEFAULT_BLUE, LETHALITY_KNOWN_EVOL_LABEL: DARK_GRAY},
         )
         disable_death_red(fig3)
         preserve_trace_colors(fig3)
-        fig3.update_traces(marker_color=PLOTLY_DEFAULT_BLUE)
         fig3.update_layout(yaxis={"categoryorder": "total ascending"})
         render_plotly_chart(fig3)
-        render_interval_total(etio, value_col="obitos_meningite", denominator_col="confirmados", value_label="óbitos por meningite", denominator_label="casos confirmados")
+        render_interval_total(etio, value_col="obitos_meningite", denominator_col="confirmados_evolucao_conhecida", value_label="óbitos por meningite", denominator_label="confirmados com evolução conhecida")
         copyable_dataframe(etio, width="stretch", hide_index=True)
         download_button(etio, "sinan_letalidade_por_etiologia.csv")
 
@@ -9644,7 +10337,6 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
             st.info("Sem dados suficientes de idade e sexo para gerar a pirâmide etária com os filtros atuais.")
             return
         pyr = pyr.sort_values("faixa_ini").reset_index(drop=True)
-        pyr["faixa"] = pyr["faixa_ini"].astype(int).astype(str) + "–" + (pyr["faixa_ini"].astype(int) + 4).astype(str)
         pyr["valor"] = np.where(pyr["sexo"].eq("Masculino"), -pyr["n"], pyr["n"])
         faixa_order_pyr = pyr.sort_values("faixa_ini")["faixa"].drop_duplicates().tolist()
         fig_pyr = px.bar(
@@ -9659,6 +10351,11 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
         )
         fig_pyr.update_layout(barmode="relative", yaxis={"categoryorder": "array", "categoryarray": faixa_order_pyr})
         render_plotly_chart(fig_pyr)
+        st.caption(
+            "A faixa quinquenal 0–4 anos foi desdobrada em '< 1 ano' e '1–4 anos' porque as janelas de imunização "
+            "relevantes para meningite (Pentavalente/Meningo C no primeiro ano de vida; Pneumo 10 e reforços nos anos "
+            "seguintes) atuam de forma concentrada nessas idades e ficariam escondidas dentro de um único bloco 0–4."
+        )
         render_interval_total(pyr, value_col="n", by_col="sexo")
         suffix = sinan_case_filter_suffix(selection)
         filename = f"{source.lower()}_piramide_{suffix}.csv" if suffix else f"{source.lower()}_piramide.csv"
@@ -9672,7 +10369,6 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
             st.info("Sem dados suficientes de idade para gerar a distribuição por faixa etária com os filtros atuais.")
             return
         age_df = age_df.sort_values("faixa_ini").reset_index(drop=True)
-        age_df["faixa"] = age_df["faixa_ini"].astype(int).astype(str) + "–" + (age_df["faixa_ini"].astype(int) + 4).astype(str)
         age_df["denominador"] = int(age_df["n"].sum())
         age_df["pct"] = np.where(age_df["denominador"].gt(0), (age_df["n"] / age_df["denominador"] * 100).round(2), np.nan)
         age_df = add_text(age_df)
@@ -9725,6 +10421,12 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
         if not exprs.get("classi_code"):
             st.info("Para gerar a escolaridade por confirmados e descartados no SINAN, o campo CLASSI_FIN precisa existir e ser detectado automaticamente.")
             return
+        st.caption(
+            "Atenção: no SINAN, a categoria 10 ('não se aplica') de CS_ESCOL_N costuma representar quase 40% da base e é "
+            "composta majoritariamente por pacientes com menos de 5 anos, para quem o campo de escolaridade não é "
+            "aplicável. Os gráficos abaixo incluem essa categoria como registrada na ficha; ela não deve ser lida como "
+            "'sem preenchimento pela equipe', e sim como resultado esperado da composição etária dos casos de meningite."
+        )
         _education_age_stratification_note()
         schooling_where = base_where if base_where is not None else graph_where
         stratify_by_age = False
