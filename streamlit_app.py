@@ -67,7 +67,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-07-03-v49r-revisao-graficos"
+APP_VERSION = "2026-07-03-v49r2-ajustes-graficos"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos
@@ -1623,7 +1623,7 @@ SINAN_LCR_GLUCOSE_POSITION_ORDER = [
 ]
 SINAN_LCR_GLUCOSE_POSITION_COLOR_MAP = {
     "Preservada (esperado)": "#2CA02C",
-    "Reduzida (esperado)": "#2CA02C",
+    "Reduzida (esperado)": "#1F77B4",
     "Reduzida (atípico p/ viral)": "#D62728",
     "Preservada (atípico)": "#FF7F0E",
 }
@@ -2850,18 +2850,25 @@ def age_band_expr(age_sql: str, width: int = 5) -> str:
 
 
 # Granularidade etária primária das pirâmides/distribuições demográficas (NU_IDADE_N
-# e derivadas): o bloco quinquenal 0–4 anos mistura crianças com perfis de imunização
-# muito distintos entre si — a janela da Pentavalente/Meningo C atua fortemente no
-# primeiro ano de vida, e a do Pneumo 10/reforços segue nos anos seguintes até os 4
-# anos. Agregar tudo em "0–4" esconde esse contraste. As funções abaixo abrem uma
-# faixa "< 1 ano" e uma faixa "1–4 anos" explícitas e mantêm as faixas quinquenais
-# normais (5–9, 10–14, ...) para as demais idades.
+# e derivadas). A pedido, o primeiro corte etário foi alinhado ao estrato usado na
+# análise quimiocitológica do LCR (neonatos até 6 meses): abre-se uma faixa
+# "até 6 meses" e uma faixa "> 6 meses e até 4 anos", mantendo as faixas quinquenais
+# normais (5–9, 10–14, ...) para as demais idades. Isso torna a distribuição etária
+# coerente com a estratificação neonatal do LCR. Observação: o corte em 6 meses só
+# distingue corretamente lactentes quando a idade vem em resolução sub-anual (idade
+# DATASUS codificada em meses/dias); quando a base traz idade apenas em anos inteiros,
+# todos os menores de 1 ano caem em "até 6 meses" — limitação inerente ao dado.
+_AGE_PYRAMID_BAND_6M_LABEL = "até 6 meses"
+_AGE_PYRAMID_BAND_6M_4Y_LABEL = "> 6 meses e até 4 anos"
+_AGE_PYRAMID_6M_CUTOFF = 0.5  # 6 meses em anos fracionários (= SINAN_LCR_NEONATAL_CUTOFF_YEARS)
+
+
 def _age_pyramid_band_label_sql(age_alias: str = "idade") -> str:
     return f"""
     CASE
         WHEN {age_alias} < 0 OR {age_alias} > 130 THEN NULL
-        WHEN {age_alias} < 1 THEN '< 1 ano'
-        WHEN {age_alias} < 5 THEN '1–4 anos'
+        WHEN {age_alias} < {_AGE_PYRAMID_6M_CUTOFF} THEN '{_AGE_PYRAMID_BAND_6M_LABEL}'
+        WHEN {age_alias} < 5 THEN '{_AGE_PYRAMID_BAND_6M_4Y_LABEL}'
         ELSE
             CAST(CAST(FLOOR({age_alias} / 5) * 5 AS INTEGER) AS VARCHAR)
             || '–' ||
@@ -2874,7 +2881,7 @@ def _age_pyramid_band_order_sql(age_alias: str = "idade") -> str:
     return f"""
     CASE
         WHEN {age_alias} < 0 OR {age_alias} > 130 THEN NULL
-        WHEN {age_alias} < 1 THEN 0
+        WHEN {age_alias} < {_AGE_PYRAMID_6M_CUTOFF} THEN 0
         WHEN {age_alias} < 5 THEN 1
         ELSE CAST(FLOOR({age_alias} / 5) * 5 AS INTEGER)
     END
@@ -9594,6 +9601,7 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, grap
                     "2 — óbito por meningite": DEATH_RED,
                     "3 — óbito por outra causa": "#1F77B4",
                     LETHALITY_LABEL: "#000000",
+                    LETHALITY_KNOWN_EVOL_LABEL: DARK_GRAY,
                 }
                 for idx, categoria in enumerate(evol_confirmados["categoria"].dropna().unique().tolist()):
                     df_cat = evol_confirmados[evol_confirmados["categoria"].eq(categoria)].copy()
@@ -9642,6 +9650,34 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, grap
                         row=2,
                         col=1,
                     )
+                # Segunda linha de letalidade: com evolução conhecida no denominador
+                # (óbitos por meningite / confirmados com EVOLUCAO em alta/óbito),
+                # trazida de volta a pedido, ao lado da letalidade bruta, para a mesma
+                # leitura já usada no gráfico de letalidade por etiologia.
+                letalidade_evol_df = ind[["ano", "letalidade_confirmados_evolucao_conhecida", "obitos_meningite_confirmados", "confirmados_evolucao_conhecida"]].copy()
+                letalidade_evol_df = letalidade_evol_df[pd.to_numeric(letalidade_evol_df["confirmados_evolucao_conhecida"], errors="coerce").fillna(0).gt(0)]
+                if not letalidade_evol_df.empty:
+                    letalidade_evol_df["texto_letalidade"] = [br_pct(v) for v in letalidade_evol_df["letalidade_confirmados_evolucao_conhecida"]]
+                    fig_evol_confirmados.add_trace(
+                        go.Scatter(
+                            x=letalidade_evol_df["ano"],
+                            y=letalidade_evol_df["letalidade_confirmados_evolucao_conhecida"],
+                            mode="lines+markers+text",
+                            name=LETHALITY_KNOWN_EVOL_LABEL,
+                            text=letalidade_evol_df["texto_letalidade"],
+                            textposition="bottom center",
+                            line={"color": DARK_GRAY},
+                            marker={"color": DARK_GRAY},
+                            customdata=np.stack([letalidade_evol_df["obitos_meningite_confirmados"], letalidade_evol_df["confirmados_evolucao_conhecida"]], axis=-1),
+                            hovertemplate=(
+                                "Ano %{x}<br>Letalidade (evolução conhecida): %{y:.2f}%<br>"
+                                "Óbitos por meningite: %{customdata[0]}<br>"
+                                "Confirmados com evolução conhecida: %{customdata[1]}<extra></extra>"
+                            ),
+                        ),
+                        row=2,
+                        col=1,
+                    )
                 fig_evol_confirmados.update_layout(
                     title="Evolução dos casos confirmados com evolução conhecida",
                 )
@@ -9649,9 +9685,10 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, grap
                 fig_evol_confirmados.update_yaxes(title_text="Confirmados com evolução conhecida", row=1, col=1)
                 fig_evol_confirmados.update_yaxes(title_text="Letalidade (%)", ticksuffix="%", row=2, col=1)
                 st.caption(
-                    "A letalidade (óbitos por meningite / confirmados) é exibida em um painel separado, abaixo, "
-                    "para evitar que sua escala em % seja confundida visualmente com as contagens absolutas de 'alta' acima. "
-                    "O cálculo da letalidade não foi alterado, apenas a forma como o gráfico é organizado."
+                    "O painel inferior mostra duas letalidades lado a lado: a **bruta** (óbitos por meningite / confirmados) "
+                    "e a **com evolução conhecida** (óbitos por meningite / confirmados com EVOLUCAO em alta ou óbito). "
+                    "Ambas ficam em painel separado das contagens absolutas acima para evitar confusão de escala (% x contagem). "
+                    "O cálculo não foi alterado; a letalidade com evolução conhecida é a mais sensível quando há perda de evolução."
                 )
                 disable_death_red(fig_evol_confirmados)
                 preserve_trace_colors(fig_evol_confirmados)
@@ -11244,7 +11281,6 @@ def render_source(source: str) -> Optional[Dict[str, object]]:
     ]
     if source == "SINAN":
         analysis_sections.append("Sobreposição NU_NOTIFIC / NM_PACIENT")
-        analysis_sections.append("Quimiocitologia e classificação etiológica")
     analysis_sections.extend([
         "Campos importantes não preenchidos",
         "Prévia",
@@ -11271,8 +11307,6 @@ def render_source(source: str) -> Optional[Dict[str, object]]:
         render_demography_tab(table, source, graph_where, exprs, base_where=base_where)
     elif selected_section == "Sobreposição NU_NOTIFIC / NM_PACIENT" and source == "SINAN":
         render_sinan_overlap_tab(table, base_where, exprs)
-    elif selected_section == "Quimiocitologia e classificação etiológica" and source == "SINAN":
-        render_quimio_classification_tab(table, exprs, base_where)
     elif selected_section == "Campos importantes não preenchidos":
         render_quality_tab(table, source, base_where, exprs)
     elif selected_section == "Prévia":
