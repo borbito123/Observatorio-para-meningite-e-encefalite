@@ -67,7 +67,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-07-02-v49-conclusao-criterio"
+APP_VERSION = "2026-07-03-v49r-revisao-graficos"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos
@@ -4268,6 +4268,30 @@ def coverage_subtitle_from_df(df: pd.DataFrame) -> str:
     return f"N preenchido={format_int_br(filled)}; N ausente={format_int_br(missing)}; cobertura={pct_text}; N total={format_int_br(total)}"
 
 
+def render_field_completeness_warning(coverage_df: pd.DataFrame, field_label: str, threshold_pct: float = 30.0) -> None:
+    """Aviso automático quando o campo-base de um gráfico tem alta ausência.
+
+    Recebe o dataframe de `query_field_coverage` e emite um `st.warning` quando o
+    percentual de ausência supera o limiar (padrão 30%). Complementa — não
+    substitui — o subtítulo de cobertura, tornando explícito no próprio gráfico
+    que a distribuição dos preenchidos é uma subamostra, não o total.
+    """
+    if coverage_df is None or coverage_df.empty:
+        return
+    row = coverage_df.iloc[0]
+    total = int(row.get("n_total", 0) or 0)
+    missing = int(row.get("n_ausente", 0) or 0)
+    if total <= 0:
+        return
+    pct_missing = 100.0 * missing / total
+    if pct_missing >= threshold_pct:
+        st.warning(
+            f"⚠️ {field_label}: {format_int_br(missing)} de {format_int_br(total)} registros "
+            f"({pct_missing:.1f}%) sem informação no recorte atual. Leia a distribuição dos "
+            "preenchidos como subamostra, não como o total filtrado."
+        )
+
+
 def query_field_presence(
     table: LoadedTable,
     field_sql: str,
@@ -5954,6 +5978,13 @@ def query_sinan_numeric_distribution_stratified_by_reference_bins(
     df = run_query(table, sql)
     if df.empty:
         return df
+    # Correção (revisão v49): preserva as faixas de referência com contagem zero.
+    # A agregação SQL só devolve as faixas efetivamente presentes; em recortes
+    # pequenos ou estratificados, faixas com n=0 desapareciam do eixo x, o que
+    # quebrava a comparabilidade visual entre filtros, anos e estratos (mesma
+    # gramática visual). Aqui reconstruímos a grade completa (faixa × estrato)
+    # a partir das classes clínicas fixas, com n=0 explícito e pct=0.
+    df = _sinan_lcr_fill_zero_reference_bins(df, param_key)
     meta = sinan_lcr_param_metadata(param_key)
     if meta:
         df["unidade"] = meta.unidade
@@ -5964,6 +5995,50 @@ def query_sinan_numeric_distribution_stratified_by_reference_bins(
     if not stratification_sql and "estrato" in df.columns:
         df = df.drop(columns=["estrato"])
     return df
+
+
+def _sinan_lcr_fill_zero_reference_bins(df: pd.DataFrame, param_key: str) -> pd.DataFrame:
+    """Completa a distribuição por faixas fixas mantendo bins com n=0 explícitos.
+
+    A query agrega apenas as faixas com ocorrência; esta função reconstrói a
+    grade completa de faixas clínicas (na ordem fixa das especificações) para
+    cada estrato presente, atribuindo n=0/pct=0 às faixas ausentes. O
+    denominador por estrato é preservado (soma dos n do estrato, idêntica ao
+    SUM() OVER da própria query), de modo que os percentuais não mudam para as
+    faixas que já existiam.
+    """
+    specs = sinan_lcr_distribution_bin_specs(param_key)
+    if df.empty or not specs or "faixa" not in df.columns or "estrato" not in df.columns:
+        return df
+    bins = [
+        {
+            "faixa": str(spec["label"]),
+            "ordem": idx,
+            "faixa_inicio": (float(spec["start"]) if spec.get("start") is not None else np.nan),
+            "faixa_fim": (float(spec["end"]) if spec.get("end") is not None else np.nan),
+            "leitura": spec.get("leitura"),
+        }
+        for idx, spec in enumerate(specs, start=1)
+    ]
+    estratos = list(dict.fromkeys(df["estrato"].tolist()))
+    denom_by_estrato = df.groupby("estrato")["n"].sum().to_dict()
+    grid_rows = []
+    for est in estratos:
+        for b in bins:
+            grid_rows.append({"estrato": est, **b})
+    full = pd.DataFrame(grid_rows)
+    existing = df[["estrato", "faixa", "n"]].copy()
+    merged = full.merge(existing, on=["estrato", "faixa"], how="left")
+    merged["n"] = pd.to_numeric(merged["n"], errors="coerce").fillna(0).astype(int)
+    merged["denominador"] = merged["estrato"].map(denom_by_estrato).fillna(0).astype(int)
+    merged["pct"] = np.where(
+        merged["denominador"] > 0,
+        (100.0 * merged["n"] / merged["denominador"]).round(2),
+        np.nan,
+    )
+    ordered_cols = ["faixa_inicio", "faixa_fim", "faixa", "estrato", "n", "denominador", "pct", "ordem", "leitura"]
+    merged = merged[ordered_cols].sort_values(["ordem", "estrato"]).reset_index(drop=True)
+    return merged
 
 
 # =============================================================================
@@ -8535,7 +8610,11 @@ def render_temporal_tab(table: LoadedTable, source: str, graph_where: str, exprs
             period_col = "semana"
             columns_range = list(range(1, 54))
             col_labels = [str(w) for w in columns_range]
-            x_title = "Semana epidemiológica"
+            # Correção (revisão v49): rótulo honesto. A semana é derivada da data
+            # (EXTRACT(WEEK), padrão ISO), que se aproxima — mas não é idêntica —
+            # à semana epidemiológica oficial (SE), definida a partir de SEM_NOT
+            # (formato AAAASS). Evita-se prometer precisão que o cálculo não tem.
+            x_title = "Semana do ano (derivada da data, ~ISO)"
         else:
             period_col = "mes"
             columns_range = list(range(1, 13))
@@ -8554,6 +8633,13 @@ def render_temporal_tab(table: LoadedTable, source: str, graph_where: str, exprs
         )
         fig.update_layout(title=f"Sazonalidade — ano × {heat_freq_label.lower()}", xaxis_title=x_title, yaxis_title="Ano")
         render_plotly_chart(fig)
+        if heat_freq == "week":
+            st.caption(
+                "A semana aqui é calculada a partir da data (padrão ISO, semanas 1–53). "
+                "Para a semana epidemiológica oficial (SE), o campo `SEM_NOT` (AAAASS) é a referência "
+                "correta e evita a variação mecânica de meses com 4 ou 5 semanas; considere-o para "
+                "análises sazonais estritas."
+            )
         if show_covid_context:
             st.caption(COVID_CONTEXT_NOTE)
         render_interval_total(heat, value_col="n")
@@ -8598,7 +8684,10 @@ def sinan_lcr_apply_small_cell_opacity(
         opacities = []
         for x_val in trace.x:
             n_val = lookup.get(x_val)
-            if n_val is not None and n_val < min_cell:
+            # n=0 é faixa vazia (bin de referência sem ocorrência), não amostra
+            # pequena: mantém opacidade cheia e não dispara o aviso, que é
+            # reservado a células com 0 < n < min_cell (poucos casos reais).
+            if n_val is not None and 0 < n_val < min_cell:
                 opacities.append(0.35)
                 has_small_cell = True
             else:
@@ -8867,6 +8956,27 @@ def render_sinan_lcr_indicators(table: LoadedTable, exprs: Dict[str, Optional[st
                 + (" no cruzamento faixa × estrato" if is_stratified else "")
                 + "; leitura pouco robusta, evite interpretar como padrão."
             )
+        # Correção (revisão v49): leitura clínica das faixas como texto estático,
+        # não apenas no hover do Plotly. O hover se perde em captura de tela,
+        # impressão ou PDF — justamente onde este painel costuma ser usado para
+        # decisão/relatório. Mostramos aqui as faixas presentes (n>0) no recorte.
+        if "leitura" in dist.columns and "faixa" in dist.columns:
+            leitura_base = dist[dist["n"] > 0] if "n" in dist.columns else dist
+            sort_cols = ["ordem"] if "ordem" in leitura_base.columns else ["faixa"]
+            leitura_rows = (
+                leitura_base[sort_cols + ["faixa", "leitura"]]
+                .dropna(subset=["leitura"])
+                .drop_duplicates(subset=["faixa"])
+                .sort_values(sort_cols)
+            )
+            linhas_leitura = [
+                f"- **{row.faixa}** — {row.leitura}"
+                for row in leitura_rows.itertuples()
+                if str(getattr(row, "leitura", "")).strip()
+            ]
+            if linhas_leitura:
+                st.markdown("**Leitura clínica das faixas presentes neste gráfico:**")
+                st.markdown("\n".join(linhas_leitura))
         if strat_sql and "estrato" in dist.columns:
             render_interval_total(dist, value_col="n", by_col="estrato")
         else:
@@ -9119,6 +9229,62 @@ def query_sinan_overlap_details(
     return run_query(table, sql)
 
 
+def query_sinan_overlap_composite_summary(
+    table: LoadedTable,
+    target_col: str,
+    where_sql: str,
+    exprs: Dict[str, Optional[str]],
+    municipality_col: Optional[str] = None,
+) -> Tuple[pd.DataFrame, List[str]]:
+    """Sobreposição por chave composta (valor + ano + município).
+
+    O resumo simples agrupa apenas pelo valor repetido de NU_NOTIFIC, o que gera
+    falso positivo quando o mesmo número é reutilizado em anos ou municípios
+    diferentes (a numeração da notificação costuma ser única apenas dentro de um
+    escopo administrativo). Aqui distinguimos:
+      • sobreposição na CHAVE COMPOSTA — mesmo NU_NOTIFIC no mesmo ano/município,
+        indício mais forte de duplicidade real;
+      • sobreposição apenas por REUSO de numeração — mesmo NU_NOTIFIC, mas em
+        ano/município distintos, provavelmente não é duplicidade.
+    Retorna (dataframe_resumo, descrição_da_chave).
+    """
+    target_expr = clean_str_expr(target_col)
+    dt = exprs.get("dt")
+    key_parts = [f"COALESCE(CAST(({target_expr}) AS VARCHAR), '(sem)')"]
+    key_desc = ["NU_NOTIFIC"]
+    if dt:
+        key_parts.append(f"COALESCE(CAST(EXTRACT(YEAR FROM ({dt})) AS VARCHAR), '(sem)')")
+        key_desc.append("ano")
+    if municipality_col:
+        muni_expr = clean_str_expr(municipality_col)
+        key_parts.append(f"COALESCE(CAST(({muni_expr}) AS VARCHAR), '(sem)')")
+        key_desc.append("município")
+    if len(key_parts) == 1:
+        # Sem ano nem município disponíveis não há chave composta a construir.
+        return pd.DataFrame(), key_desc
+    composite_key = " || '|' || ".join(key_parts)
+    sql = f"""
+        WITH base AS (
+            SELECT {target_expr} AS valor,
+                   {composite_key} AS chave
+            FROM {table.ref_sql}
+            {where_sql}
+        ), valid AS (
+            SELECT valor, chave FROM base WHERE valor IS NOT NULL
+        ), por_valor AS (
+            SELECT valor, COUNT(*) AS n FROM valid GROUP BY valor
+        ), por_chave AS (
+            SELECT chave, COUNT(*) AS n FROM valid GROUP BY chave
+        )
+        SELECT
+            (SELECT COUNT(*) FROM valid) AS registros_com_valor,
+            COALESCE((SELECT SUM(n) FROM por_valor WHERE n > 1), 0) AS registros_sobrepostos_simples,
+            COALESCE((SELECT SUM(n) FROM por_chave WHERE n > 1), 0) AS registros_sobrepostos_composta,
+            COALESCE((SELECT COUNT(*) FROM por_chave WHERE n > 1), 0) AS chaves_compostas_com_sobreposicao
+    """
+    return run_query(table, sql), key_desc
+
+
 def render_overlap_block(
     table: LoadedTable,
     base_where: str,
@@ -9207,6 +9373,62 @@ def render_sinan_overlap_tab(table: LoadedTable, base_where: str, exprs: Dict[st
         file_slug="nu_notific",
         extra_cols=[(clean_str_expr(nm_col), "nm_pacient")] if nm_col else None,
     )
+
+    # Correção (revisão v49): sobreposição de NU_NOTIFIC por chave composta.
+    # A numeração da notificação costuma ser única apenas dentro de um escopo
+    # administrativo (ano/município), então repetição simples do número gera
+    # falso positivo de duplicidade. Aqui separamos duplicidade provável (mesmo
+    # número no mesmo ano/município) do mero reuso de numeração.
+    if nu_col:
+        muni_col = choose_candidate(
+            columns,
+            ["ID_MUNICIP", "ID_MN_OCORR", "CODMUNOCOR", "ID_MN_RESI", "CODMUNRES", "MUNIC_MOV", "MUNIC_RES"],
+        )
+        composite_summary, key_desc = query_sinan_overlap_composite_summary(
+            table, nu_col, base_where, exprs, municipality_col=muni_col,
+        )
+        st.markdown("#### Duplicidade provável × reuso de numeração (chave composta)")
+        st.caption(
+            "Chave composta usada: " + " + ".join(f"`{k}`" for k in key_desc)
+            + ". Compara a repetição simples do `NU_NOTIFIC` com a repetição da chave composta, "
+            "para separar duplicidade provável (mesmo número no mesmo ano/município) de reuso "
+            "legítimo da numeração em anos/municípios diferentes."
+        )
+        if composite_summary is None or composite_summary.empty:
+            st.info(
+                "Não foi possível construir a chave composta (faltam data e/ou município no recorte). "
+                "Considere apenas a sobreposição simples acima."
+            )
+        else:
+            crow = composite_summary.iloc[0]
+            simples = int(crow.get("registros_sobrepostos_simples", 0) or 0)
+            composta = int(crow.get("registros_sobrepostos_composta", 0) or 0)
+            apenas_reuso = max(simples - composta, 0)
+            m1, m2, m3 = st.columns(3)
+            m1.metric(
+                "Sobrepostos por número simples",
+                f"{simples:,}".replace(",", "."),
+                help="Registros cujo NU_NOTIFIC se repete, sem considerar ano/município.",
+            )
+            m2.metric(
+                "Duplicidade provável (chave composta)",
+                f"{composta:,}".replace(",", "."),
+                help="Registros com mesmo NU_NOTIFIC no mesmo ano/município.",
+            )
+            m3.metric(
+                "Apenas reuso de numeração",
+                f"{apenas_reuso:,}".replace(",", "."),
+                help="Repetem o NU_NOTIFIC, mas em ano/município diferentes; provavelmente não são duplicidade.",
+            )
+            if simples > 0 and apenas_reuso > 0:
+                st.caption(
+                    f"⚠️ Dos {simples:,}".replace(",", ".")
+                    + f" registros sinalizados pela sobreposição simples, {apenas_reuso:,}".replace(",", ".")
+                    + " são provavelmente reuso de numeração (ano/município distintos), não duplicidade real. "
+                    "Use a chave composta como triagem mais específica."
+                )
+            copyable_dataframe(composite_summary, width="stretch", hide_index=True)
+            download_button(composite_summary, "sinan_sobreposicao_nu_notific_chave_composta.csv")
 
     st.markdown("---")
 
@@ -10053,8 +10275,10 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
 
     if exprs.get("con_label"):
         con_coverage_text = ""
+        con_coverage_df = pd.DataFrame()
         if exprs.get("con_code"):
-            con_coverage_text = coverage_subtitle_from_df(query_field_coverage(table, exprs["con_code"], confirmed_conversion_where))
+            con_coverage_df = query_field_coverage(table, exprs["con_code"], confirmed_conversion_where)
+            con_coverage_text = coverage_subtitle_from_df(con_coverage_df)
         conclusao_df = query_category(table, exprs["con_label"], confirmed_conversion_where, top_n=40)
         if not conclusao_df.empty:
             conclusao_df = add_text(conclusao_df)
@@ -10069,6 +10293,7 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                 hover_data={"texto": False, "pct": ":.2f"},
             )
             fig_conclusao.update_layout(yaxis={"categoryorder": "total ascending"})
+            render_field_completeness_warning(con_coverage_df, "CON_DIAGES (conclusão diagnóstica)")
             render_plotly_chart(fig_conclusao)
             st.caption(
                 "Prevalência das categorias específicas de CON_DIAGES entre casos confirmados. "
@@ -10082,8 +10307,10 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
 
     if exprs.get("con_group"):
         con_coverage_text = ""
+        con_coverage_df = pd.DataFrame()
         if exprs.get("con_code"):
-            con_coverage_text = coverage_subtitle_from_df(query_field_coverage(table, exprs["con_code"], confirmed_conversion_where))
+            con_coverage_df = query_field_coverage(table, exprs["con_code"], confirmed_conversion_where)
+            con_coverage_text = coverage_subtitle_from_df(con_coverage_df)
         df = query_category(table, exprs["con_group"], confirmed_conversion_where, top_n=40)
         if not df.empty:
             df = add_text(df)
@@ -10098,6 +10325,7 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                 hover_data={"texto": False, "pct": ":.2f"},
             )
             fig.update_layout(yaxis={"categoryorder": "total ascending"})
+            render_field_completeness_warning(con_coverage_df, "CON_DIAGES (classificação etiológica)")
             render_plotly_chart(fig)
             if con_coverage_text:
                 st.caption("CON_DIAGES — " + con_coverage_text)
@@ -10134,8 +10362,10 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
 
     if exprs.get("criterio_label"):
         criterio_coverage_text = ""
+        criterio_coverage_df = pd.DataFrame()
         if exprs.get("criterio_code"):
-            criterio_coverage_text = coverage_subtitle_from_df(query_field_coverage(table, exprs["criterio_code"], confirmed_conversion_where))
+            criterio_coverage_df = query_field_coverage(table, exprs["criterio_code"], confirmed_conversion_where)
+            criterio_coverage_text = coverage_subtitle_from_df(criterio_coverage_df)
         criterio_df = query_category(table, exprs["criterio_label"], confirmed_conversion_where, top_n=40)
         if not criterio_df.empty:
             criterio_df = add_text(criterio_df)
@@ -10150,6 +10380,7 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                 hover_data={"texto": False, "pct": ":.2f"},
             )
             fig_criterio.update_layout(yaxis={"categoryorder": "total ascending"})
+            render_field_completeness_warning(criterio_coverage_df, "CRITERIO (critério de confirmação)")
             render_plotly_chart(fig_criterio)
             if criterio_coverage_text:
                 st.caption("CRITERIO — " + criterio_coverage_text)
