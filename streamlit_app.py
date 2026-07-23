@@ -67,7 +67,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-07-23-v49r3-sobreposicao-nu-notific"
+APP_VERSION = "2026-07-23-v49r4-sobreposicao-auditada"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos
@@ -9236,45 +9236,131 @@ def query_sinan_overlap_details(
     return run_query(table, sql)
 
 
+@dataclass(frozen=True)
+class SinanNotificationKeySpec:
+    """Especificação da chave administrativa de referência da notificação SINAN."""
+
+    target_expr: str
+    dt_expr: Optional[str]
+    year_expr: str
+    agravo_expr: Optional[str]
+    municipality_expr: Optional[str]
+    composite_key: str
+    incomplete_expr: str
+    key_desc: Tuple[str, ...]
+    missing_official: Tuple[str, ...]
+
+    @property
+    def usable(self) -> bool:
+        """A data e o município de notificação são indispensáveis para separar reuso."""
+        return bool(self.dt_expr and self.municipality_expr)
+
+    @property
+    def schema_complete(self) -> bool:
+        return not self.missing_official
+
+
+def _normalized_identity_expr(col: Optional[str]) -> str:
+    """Normaliza texto para comparação exata, preservando o valor original na saída."""
+    if not col:
+        return "NULL"
+    raw = clean_str_expr(col)
+    return f"NULLIF(UPPER(regexp_replace({raw}, '[[:space:]]+', ' ', 'g')), '')"
+
+
 def _sinan_nu_notific_composite_components(
     target_col: str,
     exprs: Dict[str, Optional[str]],
     municipality_col: Optional[str],
-) -> Tuple[str, Optional[str], str, Optional[str], str, str, List[str]]:
-    """Monta, em um único ponto, os componentes da chave de NU_NOTIFIC.
+    agravo_col: Optional[str] = None,
+) -> SinanNotificationKeySpec:
+    """Monta a chave administrativa com os campos-chave documentados pelo SINAN.
 
-    Prioriza DT_NOTIFIC quando detectada; usa a data geral selecionada apenas
-    como fallback. A chave administrativa é formada pelo número, ano e
-    município disponíveis no banco.
+    O dicionário da notificação individual identifica NU_NOTIFIC, DT_NOTIFIC,
+    ID_AGRAVO e ID_MUNICIP como campos-chave. Para evitar falsos positivos, a
+    data completa de notificação é usada, e não apenas o ano. ID_AGRAVO entra
+    quando disponível; DT_NOTIFIC e ID_MUNICIP são indispensáveis para separar
+    duplicidade provável de reuso da numeração.
     """
     target_expr = clean_str_expr(target_col)
-    dt_expr = exprs.get("dt_notificacao") or exprs.get("dt")
+    dt_expr = exprs.get("dt_notificacao")
     year_expr = f"EXTRACT(YEAR FROM ({dt_expr}))" if dt_expr else "NULL"
+    agravo_expr = clean_str_expr(agravo_col) if agravo_col else None
     municipality_expr = clean_str_expr(municipality_col) if municipality_col else None
 
-    key_parts = [f"COALESCE(CAST(({target_expr}) AS VARCHAR), '(sem número)')"]
-    key_desc = ["NU_NOTIFIC"]
+    key_parts = [f"COALESCE(CAST(({target_expr}) AS VARCHAR), '(sem NU_NOTIFIC)')"]
+    key_desc: List[str] = ["NU_NOTIFIC"]
     incomplete_tests: List[str] = []
+    missing_official: List[str] = []
 
     if dt_expr:
-        key_parts.append(f"COALESCE(CAST(({year_expr}) AS VARCHAR), '(sem ano)')")
-        key_desc.append("ano da notificação")
-        incomplete_tests.append(f"({year_expr}) IS NULL")
+        key_parts.append(f"COALESCE(CAST(({dt_expr}) AS VARCHAR), '(sem DT_NOTIFIC)')")
+        key_desc.append("DT_NOTIFIC")
+        incomplete_tests.append(f"({dt_expr}) IS NULL")
+    else:
+        missing_official.append("DT_NOTIFIC")
+
+    if agravo_expr:
+        key_parts.append(f"COALESCE(CAST(({agravo_expr}) AS VARCHAR), '(sem ID_AGRAVO)')")
+        key_desc.append("ID_AGRAVO")
+        incomplete_tests.append(f"({agravo_expr}) IS NULL")
+    else:
+        missing_official.append("ID_AGRAVO")
+
     if municipality_expr:
-        key_parts.append(f"COALESCE(CAST(({municipality_expr}) AS VARCHAR), '(sem município)')")
-        key_desc.append("município")
+        key_parts.append(f"COALESCE(CAST(({municipality_expr}) AS VARCHAR), '(sem ID_MUNICIP)')")
+        key_desc.append("ID_MUNICIP")
         incomplete_tests.append(f"({municipality_expr}) IS NULL")
+    else:
+        missing_official.append("ID_MUNICIP")
 
     composite_key = " || '|' || ".join(key_parts)
     incomplete_expr = " OR ".join(incomplete_tests) if incomplete_tests else "FALSE"
+    return SinanNotificationKeySpec(
+        target_expr=target_expr,
+        dt_expr=dt_expr,
+        year_expr=year_expr,
+        agravo_expr=agravo_expr,
+        municipality_expr=municipality_expr,
+        composite_key=composite_key,
+        incomplete_expr=incomplete_expr,
+        key_desc=tuple(key_desc),
+        missing_official=tuple(missing_official),
+    )
+
+
+def _sinan_chronology_alert_expr(
+    dt_symptom_sql: Optional[str],
+    dt_notification_sql: Optional[str],
+    dt_investigation_sql: Optional[str],
+    dt_closure_sql: Optional[str],
+) -> str:
+    """Aponta incompatibilidades básicas entre datas previstas nos dicionários."""
+    checks: List[str] = []
+    if dt_symptom_sql and dt_notification_sql:
+        checks.append(
+            "CASE WHEN "
+            f"({dt_symptom_sql}) > ({dt_notification_sql}) "
+            "THEN 'DT_SIN_PRI posterior a DT_NOTIFIC' ELSE NULL END"
+        )
+    if dt_investigation_sql and dt_notification_sql:
+        checks.append(
+            "CASE WHEN "
+            f"({dt_investigation_sql}) < ({dt_notification_sql}) "
+            "THEN 'DT_INVEST anterior a DT_NOTIFIC' ELSE NULL END"
+        )
+    if dt_closure_sql and dt_investigation_sql:
+        checks.append(
+            "CASE WHEN "
+            f"({dt_closure_sql}) < ({dt_investigation_sql}) "
+            "THEN 'DT_ENCERRA anterior a DT_INVEST' ELSE NULL END"
+        )
+    if not checks:
+        return "'Não avaliado: datas insuficientes'"
     return (
-        target_expr,
-        dt_expr,
-        year_expr,
-        municipality_expr,
-        composite_key,
-        incomplete_expr,
-        key_desc,
+        "COALESCE(NULLIF(CONCAT_WS('; ', "
+        + ", ".join(checks)
+        + "), ''), 'Sem inconsistência cronológica nos campos disponíveis')"
     )
 
 
@@ -9283,40 +9369,120 @@ def query_sinan_nu_notific_duplicate_records(
     target_col: str,
     where_sql: str,
     exprs: Dict[str, Optional[str]],
-    patient_col: Optional[str] = None,
-    municipality_col: Optional[str] = None,
+    context_cols: Optional[Dict[str, Optional[str]]] = None,
 ) -> pd.DataFrame:
-    """Lista, sem amostragem, todos os registros cujo NU_NOTIFIC se repete.
-
-    Diferentemente do resumo agregado do gráfico, esta tabela mantém uma linha
-    por registro, permitindo localizar exatamente cada ocorrência envolvida na
-    sobreposição simples do número de notificação.
-    """
+    """Lista todos os registros cujo NU_NOTIFIC se repete, sem gráfico ou amostra."""
+    context_cols = context_cols or {}
     target_expr = clean_str_expr(target_col)
-    dt_expr = exprs.get("dt_notificacao") or exprs.get("dt")
-    date_sql = dt_expr or "NULL"
-    year_sql = f"EXTRACT(YEAR FROM ({dt_expr}))" if dt_expr else "NULL"
-    municipality_sql = clean_str_expr(municipality_col) if municipality_col else "NULL"
-    patient_sql = clean_str_expr(patient_col) if patient_col else "NULL"
+    dt_notification_sql = exprs.get("dt_notificacao")
+    date_sql = dt_notification_sql or "NULL"
+    year_sql = f"EXTRACT(YEAR FROM ({dt_notification_sql}))" if dt_notification_sql else "NULL"
+    agravo_sql = clean_str_expr(context_cols["agravo"]) if context_cols.get("agravo") else "NULL"
+    municipality_sql = (
+        clean_str_expr(context_cols["municipality_notification"])
+        if context_cols.get("municipality_notification")
+        else "NULL"
+    )
+    unit_sql = (
+        clean_str_expr(context_cols["notification_unit"])
+        if context_cols.get("notification_unit")
+        else "NULL"
+    )
+    patient_sql = clean_str_expr(context_cols["patient"]) if context_cols.get("patient") else "NULL"
+    birth_sql = date_expr(context_cols["birth_date"]) if context_cols.get("birth_date") else "NULL"
+    sex_sql = clean_code_expr(context_cols["sex"]) if context_cols.get("sex") else "NULL"
+    mother_sql = clean_str_expr(context_cols["mother_name"]) if context_cols.get("mother_name") else "NULL"
+    cns_sql = clean_str_expr(context_cols["cns"]) if context_cols.get("cns") else "NULL"
+    phonetic_sql = (
+        clean_str_expr(context_cols["phonetic_name"])
+        if context_cols.get("phonetic_name")
+        else "NULL"
+    )
+    soundex_sql = clean_str_expr(context_cols["soundex"]) if context_cols.get("soundex") else "NULL"
+    municipality_res_sql = (
+        clean_str_expr(context_cols["municipality_residence"])
+        if context_cols.get("municipality_residence")
+        else "NULL"
+    )
+    dt_entry_sql = (
+        date_expr(context_cols["date_entry"])
+        if context_cols.get("date_entry")
+        else "NULL"
+    )
+    micro_identifier_sql = (
+        clean_str_expr(context_cols["micro_identifier"])
+        if context_cols.get("micro_identifier")
+        else "NULL"
+    )
+    return_flow_sql = (
+        clean_code_expr(context_cols["return_flow_status"])
+        if context_cols.get("return_flow_status")
+        else "NULL"
+    )
+    received_return_flow_sql = (
+        clean_str_expr(context_cols["received_return_flow"])
+        if context_cols.get("received_return_flow")
+        else "NULL"
+    )
+    migrated_sql = (
+        clean_code_expr(context_cols["migrated_windows"])
+        if context_cols.get("migrated_windows")
+        else "NULL"
+    )
+    dt_symptom_sql = exprs.get("dt_sin_pri")
+    dt_investigation_sql = (
+        date_expr(context_cols["date_investigation"])
+        if context_cols.get("date_investigation")
+        else None
+    )
+    dt_closure_sql = exprs.get("dt_encerramento")
     classi_sql = exprs.get("classi_label") or "NULL"
+    con_sql = exprs.get("con_label") or "NULL"
+    con_group_sql = exprs.get("con_group") or "NULL"
+    criterio_sql = exprs.get("criterio_label") or "NULL"
     evol_sql = exprs.get("evol_label") or "NULL"
-    con_sql = exprs.get("con_group") or "NULL"
+    chronology_sql = _sinan_chronology_alert_expr(
+        dt_symptom_sql,
+        dt_notification_sql,
+        dt_investigation_sql,
+        dt_closure_sql,
+    )
 
     order_sql = (
-        "nu_notific, data_referencia NULLS LAST, municipio NULLS LAST, "
-        "nm_pacient NULLS LAST, classificacao_final NULLS LAST"
+        "nu_notific, data_notificacao NULLS LAST, municipio_notificacao NULLS LAST, "
+        "unidade_notificadora NULLS LAST, nm_pacient NULLS LAST, classificacao_final NULLS LAST"
     )
     sql = f"""
         WITH base AS (
             SELECT
                 {target_expr} AS nu_notific,
-                {date_sql} AS data_referencia,
-                {year_sql} AS ano_referencia,
-                {municipality_sql} AS municipio,
+                {date_sql} AS data_notificacao,
+                {year_sql} AS ano_notificacao,
+                {agravo_sql} AS id_agravo,
+                {municipality_sql} AS municipio_notificacao,
+                {unit_sql} AS unidade_notificadora,
                 {patient_sql} AS nm_pacient,
+                {birth_sql} AS data_nascimento,
+                {sex_sql} AS sexo,
+                {mother_sql} AS nome_mae,
+                {cns_sql} AS cartao_sus,
+                {phonetic_sql} AS chave_fonetica_nome,
+                {soundex_sql} AS soundex_nome,
+                {municipality_res_sql} AS municipio_residencia,
+                {dt_entry_sql} AS data_primeira_digitacao,
+                {micro_identifier_sql} AS identificador_micro_primeira_inclusao,
+                {return_flow_sql} AS situacao_fluxo_retorno,
+                {received_return_flow_sql} AS recebido_por_fluxo_retorno,
+                {migrated_sql} AS migrado_sinan_windows,
+                {dt_symptom_sql or 'NULL'} AS data_primeiros_sintomas,
+                {dt_investigation_sql or 'NULL'} AS data_investigacao,
+                {dt_closure_sql or 'NULL'} AS data_encerramento,
                 {classi_sql} AS classificacao_final,
+                {con_sql} AS conclusao_diagnostica,
+                {con_group_sql} AS grupo_etiologico,
+                {criterio_sql} AS criterio_confirmacao,
                 {evol_sql} AS evolucao,
-                {con_sql} AS grupo_etiologico
+                {chronology_sql} AS alerta_cronologia
             FROM {table.ref_sql}
             {where_sql}
         ), marcados AS (
@@ -9334,18 +9500,39 @@ def query_sinan_nu_notific_duplicate_records(
             ROW_NUMBER() OVER (ORDER BY {order_sql}) AS ordem_exportacao,
             ROW_NUMBER() OVER (
                 PARTITION BY nu_notific
-                ORDER BY data_referencia NULLS LAST, municipio NULLS LAST,
-                         nm_pacient NULLS LAST, classificacao_final NULLS LAST
+                ORDER BY data_notificacao NULLS LAST, municipio_notificacao NULLS LAST,
+                         unidade_notificadora NULLS LAST, nm_pacient NULLS LAST,
+                         classificacao_final NULLS LAST
             ) AS registro_no_numero,
             nu_notific,
             registros_mesmo_numero,
-            data_referencia,
-            ano_referencia,
-            municipio,
+            data_notificacao,
+            ano_notificacao,
+            id_agravo,
+            municipio_notificacao,
+            unidade_notificadora,
             nm_pacient,
+            data_nascimento,
+            sexo,
+            nome_mae,
+            cartao_sus,
+            chave_fonetica_nome,
+            soundex_nome,
+            municipio_residencia,
+            data_primeira_digitacao,
+            identificador_micro_primeira_inclusao,
+            situacao_fluxo_retorno,
+            recebido_por_fluxo_retorno,
+            migrado_sinan_windows,
+            data_primeiros_sintomas,
+            data_investigacao,
+            data_encerramento,
             classificacao_final,
+            conclusao_diagnostica,
+            grupo_etiologico,
+            criterio_confirmacao,
             evolucao,
-            grupo_etiologico
+            alerta_cronologia
         FROM duplicados
         ORDER BY {order_sql}
     """
@@ -9358,37 +9545,28 @@ def query_sinan_overlap_composite_summary(
     where_sql: str,
     exprs: Dict[str, Optional[str]],
     municipality_col: Optional[str] = None,
+    agravo_col: Optional[str] = None,
 ) -> Tuple[pd.DataFrame, List[str]]:
-    """Resume a repetição simples e a classificação pela chave composta.
-
-    Os registros cujo número se repete são particionados em duas classes
-    mutuamente exclusivas no nível do registro:
-      • Duplicidade provável: a mesma chave composta aparece mais de uma vez;
-      • Reuso de numeração: o número se repete, mas aquela chave aparece uma
-        única vez, em contexto administrativo diferente.
-    """
-    (
-        target_expr,
-        _dt_expr,
-        _year_expr,
-        _municipality_expr,
-        composite_key,
-        _incomplete_expr,
-        key_desc,
-    ) = _sinan_nu_notific_composite_components(target_col, exprs, municipality_col)
-
-    if len(key_desc) == 1:
-        return pd.DataFrame(), key_desc
+    """Resume repetição simples e classificação pela chave oficial disponível."""
+    key_spec = _sinan_nu_notific_composite_components(
+        target_col,
+        exprs,
+        municipality_col,
+        agravo_col,
+    )
+    if not key_spec.usable:
+        return pd.DataFrame(), list(key_spec.key_desc)
 
     sql = f"""
         WITH base AS (
             SELECT
-                {target_expr} AS valor,
-                {composite_key} AS chave
+                {key_spec.target_expr} AS valor,
+                {key_spec.composite_key} AS chave,
+                CASE WHEN {key_spec.incomplete_expr} THEN TRUE ELSE FALSE END AS chave_incompleta
             FROM {table.ref_sql}
             {where_sql}
         ), valid AS (
-            SELECT valor, chave
+            SELECT valor, chave, chave_incompleta
             FROM base
             WHERE valor IS NOT NULL
         ), por_valor AS (
@@ -9403,6 +9581,7 @@ def query_sinan_overlap_composite_summary(
             SELECT
                 v.valor,
                 v.chave,
+                v.chave_incompleta,
                 pv.n_numero,
                 pc.n_chave
             FROM valid v
@@ -9410,16 +9589,67 @@ def query_sinan_overlap_composite_summary(
             JOIN por_chave pc USING (valor, chave)
         )
         SELECT
-            COUNT(*) AS registros_com_valor,
+            COUNT(*) AS registros_com_nu_notific,
             COALESCE(SUM(CASE WHEN n_numero > 1 THEN 1 ELSE 0 END), 0) AS registros_sobrepostos_simples,
+            COUNT(DISTINCT CASE WHEN n_numero > 1 THEN valor END) AS numeros_repetidos_distintos,
             COALESCE(SUM(CASE WHEN n_numero > 1 AND n_chave > 1 THEN 1 ELSE 0 END), 0) AS registros_duplicidade_provavel,
             COALESCE(SUM(CASE WHEN n_numero > 1 AND n_chave = 1 THEN 1 ELSE 0 END), 0) AS registros_reuso_numeracao,
             COUNT(DISTINCT CASE WHEN n_numero > 1 AND n_chave > 1 THEN valor END) AS numeros_com_duplicidade_provavel,
             COUNT(DISTINCT CASE WHEN n_numero > 1 AND n_chave = 1 THEN valor END) AS numeros_com_reuso_numeracao,
-            COUNT(DISTINCT CASE WHEN n_numero > 1 AND n_chave > 1 THEN chave END) AS chaves_compostas_com_sobreposicao
+            COUNT(DISTINCT CASE WHEN n_numero > 1 AND n_chave > 1 THEN chave END) AS chaves_oficiais_repetidas,
+            COALESCE(SUM(CASE WHEN n_numero > 1 AND chave_incompleta THEN 1 ELSE 0 END), 0) AS registros_com_chave_incompleta
         FROM classificados
     """
-    return run_query(table, sql), key_desc
+    return run_query(table, sql), list(key_spec.key_desc)
+
+
+def _distinct_stats_sql(specs: Sequence[Tuple[str, str, str]]) -> str:
+    """Gera contagens distintas e de preenchimento para cada evidência.
+
+    A contagem de preenchimento evita tratar um único valor não nulo, acompanhado
+    de vários vazios, como concordância entre registros.
+    """
+    if not specs:
+        return ""
+    expressions: List[str] = []
+    for metric_alias, column_alias, _label in specs:
+        expressions.extend(
+            [
+                f"COUNT(DISTINCT {column_alias}) FILTER (WHERE {column_alias} IS NOT NULL) AS {metric_alias}",
+                f"COUNT({column_alias}) FILTER (WHERE {column_alias} IS NOT NULL) AS {metric_alias}_preenchidos",
+            ]
+        )
+    return ",\n                " + ",\n                ".join(expressions)
+
+
+def _sql_any_divergence(table_alias: str, specs: Sequence[Tuple[str, str, str]]) -> str:
+    tests = [f"{table_alias}.{metric_alias} > 1" for metric_alias, _column, _label in specs]
+    return " OR ".join(tests) if tests else "FALSE"
+
+
+def _sql_consistent_count(table_alias: str, specs: Sequence[Tuple[str, str, str]]) -> str:
+    terms = [
+        (
+            f"CASE WHEN {table_alias}.{metric_alias} = 1 "
+            f"AND {table_alias}.{metric_alias}_preenchidos >= 2 THEN 1 ELSE 0 END"
+        )
+        for metric_alias, _column, _label in specs
+    ]
+    return " + ".join(terms) if terms else "0"
+
+
+def _sql_divergent_labels(table_alias: str, specs: Sequence[Tuple[str, str, str]]) -> str:
+    if not specs:
+        return "'Nenhum campo disponível'"
+    cases = [
+        f"CASE WHEN {table_alias}.{metric_alias} > 1 THEN {qstr(label)} ELSE NULL END"
+        for metric_alias, _column, label in specs
+    ]
+    return (
+        "COALESCE(NULLIF(CONCAT_WS('; ', "
+        + ", ".join(cases)
+        + "), ''), 'Nenhuma divergência nos campos preenchidos')"
+    )
 
 
 def query_sinan_overlap_composite_details(
@@ -9428,47 +9658,263 @@ def query_sinan_overlap_composite_details(
     where_sql: str,
     exprs: Dict[str, Optional[str]],
     municipality_col: Optional[str] = None,
-    patient_col: Optional[str] = None,
+    agravo_col: Optional[str] = None,
+    context_cols: Optional[Dict[str, Optional[str]]] = None,
 ) -> Tuple[pd.DataFrame, List[str]]:
-    """Classifica todos os registros repetidos como duplicidade provável ou reuso.
+    """Classifica registros repetidos e acrescenta evidências de identidade/contexto."""
+    context_cols = context_cols or {}
+    key_spec = _sinan_nu_notific_composite_components(
+        target_col,
+        exprs,
+        municipality_col,
+        agravo_col,
+    )
+    if not key_spec.usable:
+        return pd.DataFrame(), list(key_spec.key_desc)
 
-    A saída não tem LIMIT e constitui a tabela auditável solicitada para indicar
-    exatamente quais registros pertencem a cada classe.
-    """
-    (
-        target_expr,
-        dt_expr,
-        year_expr,
-        municipality_expr,
-        composite_key,
-        incomplete_expr,
-        key_desc,
-    ) = _sinan_nu_notific_composite_components(target_col, exprs, municipality_col)
+    patient_col = context_cols.get("patient")
+    birth_col = context_cols.get("birth_date")
+    sex_col = context_cols.get("sex")
+    mother_col = context_cols.get("mother_name")
+    cns_col = context_cols.get("cns")
+    municipality_res_col = context_cols.get("municipality_residence")
+    phonetic_col = context_cols.get("phonetic_name")
+    soundex_col = context_cols.get("soundex")
+    unit_col = context_cols.get("notification_unit")
+    investigation_col = context_cols.get("date_investigation")
+    date_entry_col = context_cols.get("date_entry")
+    micro_identifier_col = context_cols.get("micro_identifier")
+    return_flow_col = context_cols.get("return_flow_status")
+    received_return_flow_col = context_cols.get("received_return_flow")
+    migrated_col = context_cols.get("migrated_windows")
 
-    if len(key_desc) == 1:
-        return pd.DataFrame(), key_desc
-
-    date_sql = dt_expr or "NULL"
-    municipality_sql = municipality_expr or "NULL"
+    date_sql = key_spec.dt_expr or "NULL"
+    agravo_sql = key_spec.agravo_expr or "NULL"
+    municipality_sql = key_spec.municipality_expr or "NULL"
+    unit_sql = clean_str_expr(unit_col) if unit_col else "NULL"
     patient_sql = clean_str_expr(patient_col) if patient_col else "NULL"
+    birth_sql = date_expr(birth_col) if birth_col else "NULL"
+    sex_sql = clean_code_expr(sex_col) if sex_col else "NULL"
+    mother_sql = clean_str_expr(mother_col) if mother_col else "NULL"
+    cns_sql = clean_str_expr(cns_col) if cns_col else "NULL"
+    phonetic_sql = clean_str_expr(phonetic_col) if phonetic_col else "NULL"
+    soundex_sql = clean_str_expr(soundex_col) if soundex_col else "NULL"
+    municipality_res_sql = clean_str_expr(municipality_res_col) if municipality_res_col else "NULL"
+    dt_entry_sql = date_expr(date_entry_col) if date_entry_col else "NULL"
+    micro_identifier_sql = clean_str_expr(micro_identifier_col) if micro_identifier_col else "NULL"
+    return_flow_sql = clean_code_expr(return_flow_col) if return_flow_col else "NULL"
+    received_return_flow_sql = clean_str_expr(received_return_flow_col) if received_return_flow_col else "NULL"
+    migrated_sql = clean_code_expr(migrated_col) if migrated_col else "NULL"
+    dt_symptom_sql = exprs.get("dt_sin_pri")
+    dt_investigation_sql = date_expr(investigation_col) if investigation_col else None
+    dt_closure_sql = exprs.get("dt_encerramento")
     classi_sql = exprs.get("classi_label") or "NULL"
+    con_sql = exprs.get("con_label") or "NULL"
+    con_group_sql = exprs.get("con_group") or "NULL"
+    criterio_sql = exprs.get("criterio_label") or "NULL"
     evol_sql = exprs.get("evol_label") or "NULL"
-    con_sql = exprs.get("con_group") or "NULL"
-    key_label = " + ".join(key_desc)
+    chronology_sql = _sinan_chronology_alert_expr(
+        dt_symptom_sql,
+        key_spec.dt_expr,
+        dt_investigation_sql,
+        dt_closure_sql,
+    )
+
+    identity_specs: List[Tuple[str, str, str]] = []
+    if patient_col:
+        identity_specs.append(("nomes_paciente_distintos", "nm_pacient_cmp", "NM_PACIENT"))
+    if birth_col:
+        identity_specs.append(("datas_nascimento_distintas", "data_nascimento_cmp", "DT_NASC"))
+    if sex_col:
+        identity_specs.append(("sexos_distintos", "sexo_cmp", "CS_SEXO"))
+    if mother_col:
+        identity_specs.append(("nomes_mae_distintos", "nome_mae_cmp", "NM_MAE_PAC"))
+    if cns_col:
+        identity_specs.append(("cartoes_sus_distintos", "cartao_sus_cmp", "ID_CNS_SUS"))
+    # FONETICA_N e SOUNDEX são derivados do nome; permanecem na saída para
+    # conferência manual, mas não contam como evidências independentes no escore.
+    if municipality_res_col:
+        identity_specs.append(("municipios_residencia_distintos", "municipio_residencia_cmp", "ID_MN_RESI"))
+
+    context_specs: List[Tuple[str, str, str]] = []
+    if unit_col:
+        context_specs.append(("unidades_notificadoras_distintas", "unidade_notificadora_cmp", "ID_UNIDADE"))
+    if date_entry_col:
+        context_specs.append(("datas_digitacao_distintas", "data_primeira_digitacao_cmp", "DT_DIGITA"))
+    if micro_identifier_col:
+        context_specs.append(("micros_inclusao_distintos", "identificador_micro_cmp", "IDENT_MICR"))
+    if return_flow_col:
+        context_specs.append(("situacoes_fluxo_retorno_distintas", "situacao_fluxo_retorno_cmp", "CS_FLXRET"))
+    if received_return_flow_col:
+        context_specs.append(("recebimentos_fluxo_retorno_distintos", "recebido_fluxo_retorno_cmp", "FLXRECEBI"))
+    if migrated_col:
+        context_specs.append(("indicadores_migracao_distintos", "migrado_windows_cmp", "MIGRADO_W"))
+    if dt_symptom_sql:
+        context_specs.append(("datas_sintomas_distintas", "data_primeiros_sintomas_cmp", "DT_SIN_PRI"))
+    if dt_investigation_sql:
+        context_specs.append(("datas_investigacao_distintas", "data_investigacao_cmp", "DT_INVEST"))
+    if dt_closure_sql:
+        context_specs.append(("datas_encerramento_distintas", "data_encerramento_cmp", "DT_ENCERRA"))
+    if exprs.get("classi_label"):
+        context_specs.append(("classificacoes_finais_distintas", "classificacao_final_cmp", "CLASSI_FIN"))
+    if exprs.get("con_label"):
+        context_specs.append(("conclusoes_diagnosticas_distintas", "conclusao_diagnostica_cmp", "CON_DIAGES"))
+    if exprs.get("criterio_label"):
+        context_specs.append(("criterios_confirmacao_distintos", "criterio_confirmacao_cmp", "CRITERIO"))
+    if exprs.get("evol_label"):
+        context_specs.append(("evolucoes_distintas", "evolucao_cmp", "EVOLUCAO"))
+
+    strong_identity_labels = {"DT_NASC", "CS_SEXO", "NM_MAE_PAC", "ID_CNS_SUS"}
+    strong_identity_specs = [
+        spec for spec in identity_specs if spec[2] in strong_identity_labels
+    ]
+
+    all_stats = identity_specs + context_specs
+    stats_sql = _distinct_stats_sql(all_stats)
+    pc_identity_divergence = _sql_any_divergence("pc", identity_specs)
+    pn_identity_divergence = _sql_any_divergence("pn", identity_specs)
+    pc_strong_divergence = _sql_any_divergence("pc", strong_identity_specs)
+    pn_strong_divergence = _sql_any_divergence("pn", strong_identity_specs)
+    pc_identity_consistent = _sql_consistent_count("pc", identity_specs)
+    pn_identity_consistent = _sql_consistent_count("pn", identity_specs)
+    pc_strong_consistent = _sql_consistent_count("pc", strong_identity_specs)
+    pn_strong_consistent = _sql_consistent_count("pn", strong_identity_specs)
+    pc_context_divergence = _sql_any_divergence("pc", context_specs)
+    pc_identity_labels = _sql_divergent_labels("pc", identity_specs)
+    pn_identity_labels = _sql_divergent_labels("pn", identity_specs)
+    pc_strong_labels = _sql_divergent_labels("pc", strong_identity_specs)
+    pn_strong_labels = _sql_divergent_labels("pn", strong_identity_specs)
+    pc_context_labels = _sql_divergent_labels("pc", context_specs)
+
+    key_label = " + ".join(key_spec.key_desc)
+    missing_key_text = ", ".join(key_spec.missing_official)
+    if missing_key_text:
+        schema_key_note = (
+            "Chave administrativa parcial: campo(s) não detectado(s) no banco: "
+            + missing_key_text
+            + "."
+        )
+    else:
+        schema_key_note = "Chave administrativa completa nos quatro campos-chave documentados."
+
+    identity_fields_text = ", ".join(label for _metric, _column, label in identity_specs)
+    identity_fields_text = identity_fields_text or "nenhum campo de identidade detectado"
+    strong_fields_text = ", ".join(label for _metric, _column, label in strong_identity_specs)
+    strong_fields_text = strong_fields_text or "nenhum identificador estável detectado"
+
+    evidence_identity_sql = f"""
+        CASE
+            WHEN pc.registros_mesma_chave > 1 THEN
+                CASE
+                    WHEN ({pc_strong_divergence})
+                        THEN 'Mesma chave administrativa, mas há conflito em identificadores estáveis: ' || ({pc_strong_labels}) || '.'
+                    WHEN ({pc_strong_consistent}) >= 2
+                        THEN 'Mesma chave administrativa e concordância em pelo menos dois identificadores estáveis preenchidos em dois ou mais registros.'
+                    WHEN ({pc_identity_consistent}) >= 2
+                        THEN 'Mesma chave administrativa e concordância em múltiplos campos de apoio, mas com poucos identificadores estáveis completos.'
+                    WHEN ({pc_identity_divergence})
+                        THEN 'Mesma chave administrativa e divergência apenas ou principalmente em campos de apoio; revisar o registro original.'
+                    ELSE 'Mesma chave administrativa, porém a identificação está incompleta para confirmar o mesmo paciente.'
+                END
+            ELSE
+                CASE
+                    WHEN ({pn_strong_divergence})
+                        THEN 'Chaves administrativas diferentes e conflito em identificadores estáveis: ' || ({pn_strong_labels}) || '; reuso compatível com pessoas ou episódios distintos.'
+                    WHEN ({pn_strong_consistent}) >= 2
+                        THEN 'Chaves administrativas diferentes, mas concordância em pelo menos dois identificadores estáveis; revisar transferência, correção, renotificação ou novo episódio da mesma pessoa.'
+                    WHEN ({pn_identity_consistent}) >= 3
+                        THEN 'Chaves administrativas diferentes, porém vários campos de apoio concordam; revisar possível vínculo com a mesma pessoa.'
+                    WHEN ({pn_identity_divergence})
+                        THEN 'Chaves administrativas diferentes e identidade divergente; reuso compatível com pessoas ou episódios distintos.'
+                    ELSE 'Chaves administrativas diferentes e identificação insuficiente para confirmar pessoas distintas.'
+                END
+        END
+    """
+
+    profile_sql = f"""
+        CASE
+            WHEN pc.registros_mesma_chave > 1 AND ({pc_strong_divergence})
+                THEN 'Conflito de identidade na mesma chave administrativa'
+            WHEN pc.registros_mesma_chave > 1 AND ({pc_context_divergence})
+                THEN 'Possíveis versões, atualizações ou propagações do mesmo caso'
+            WHEN pc.registros_mesma_chave > 1 AND (({pc_strong_consistent}) >= 2 OR ({pc_identity_consistent}) >= 2)
+                THEN 'Cópia muito semelhante do mesmo caso'
+            WHEN pc.registros_mesma_chave > 1
+                THEN 'Duplicidade provável com identificação insuficiente'
+            WHEN pc.registros_mesma_chave = 1 AND (({pn_strong_consistent}) >= 2 OR ({pn_identity_consistent}) >= 3)
+                THEN 'Mesmo paciente em chaves administrativas distintas'
+            WHEN pc.registros_mesma_chave = 1 AND ({pn_strong_divergence})
+                THEN 'Pessoas ou episódios provavelmente distintos'
+            WHEN pc.registros_mesma_chave = 1 AND ({pn_identity_divergence})
+                THEN 'Pessoas ou episódios provavelmente distintos'
+            ELSE 'Reuso de numeração com identificação insuficiente'
+        END
+    """
+
+    priority_sql = f"""
+        CASE
+            WHEN pc.registros_mesma_chave > 1 AND ({pc_strong_divergence}) THEN 'Alta'
+            WHEN pc.registros_mesma_chave = 1 AND (({pn_strong_consistent}) >= 2 OR ({pn_identity_consistent}) >= 3) THEN 'Alta'
+            WHEN pc.registros_mesma_chave > 1 THEN 'Média'
+            WHEN pc.registros_mesma_chave = 1 AND (({pn_strong_divergence}) OR ({pn_identity_divergence})) THEN 'Baixa'
+            ELSE 'Média'
+        END
+    """
 
     sql = f"""
         WITH base AS (
             SELECT
-                {target_expr} AS nu_notific,
-                {date_sql} AS data_referencia,
-                {year_expr} AS ano_referencia,
-                {municipality_sql} AS municipio,
+                {key_spec.target_expr} AS nu_notific,
+                {date_sql} AS data_notificacao,
+                {key_spec.year_expr} AS ano_notificacao,
+                {agravo_sql} AS id_agravo,
+                {municipality_sql} AS municipio_notificacao,
+                {unit_sql} AS unidade_notificadora,
                 {patient_sql} AS nm_pacient,
+                {birth_sql} AS data_nascimento,
+                {sex_sql} AS sexo,
+                {mother_sql} AS nome_mae,
+                {cns_sql} AS cartao_sus,
+                {phonetic_sql} AS chave_fonetica_nome,
+                {soundex_sql} AS soundex_nome,
+                {municipality_res_sql} AS municipio_residencia,
+                {dt_entry_sql} AS data_primeira_digitacao,
+                {micro_identifier_sql} AS identificador_micro_primeira_inclusao,
+                {return_flow_sql} AS situacao_fluxo_retorno,
+                {received_return_flow_sql} AS recebido_por_fluxo_retorno,
+                {migrated_sql} AS migrado_sinan_windows,
+                {dt_symptom_sql or 'NULL'} AS data_primeiros_sintomas,
+                {dt_investigation_sql or 'NULL'} AS data_investigacao,
+                {dt_closure_sql or 'NULL'} AS data_encerramento,
                 {classi_sql} AS classificacao_final,
+                {con_sql} AS conclusao_diagnostica,
+                {con_group_sql} AS grupo_etiologico,
+                {criterio_sql} AS criterio_confirmacao,
                 {evol_sql} AS evolucao,
-                {con_sql} AS grupo_etiologico,
-                {composite_key} AS chave_composta,
-                CASE WHEN {incomplete_expr} THEN TRUE ELSE FALSE END AS chave_composta_incompleta
+                {_normalized_identity_expr(patient_col)} AS nm_pacient_cmp,
+                {birth_sql} AS data_nascimento_cmp,
+                {sex_sql} AS sexo_cmp,
+                {_normalized_identity_expr(mother_col)} AS nome_mae_cmp,
+                {cns_sql} AS cartao_sus_cmp,
+                {_normalized_identity_expr(phonetic_col)} AS chave_fonetica_cmp,
+                {_normalized_identity_expr(soundex_col)} AS soundex_cmp,
+                {municipality_res_sql} AS municipio_residencia_cmp,
+                {unit_sql} AS unidade_notificadora_cmp,
+                {dt_entry_sql} AS data_primeira_digitacao_cmp,
+                {micro_identifier_sql} AS identificador_micro_cmp,
+                {return_flow_sql} AS situacao_fluxo_retorno_cmp,
+                {received_return_flow_sql} AS recebido_fluxo_retorno_cmp,
+                {migrated_sql} AS migrado_windows_cmp,
+                {dt_symptom_sql or 'NULL'} AS data_primeiros_sintomas_cmp,
+                {dt_investigation_sql or 'NULL'} AS data_investigacao_cmp,
+                {dt_closure_sql or 'NULL'} AS data_encerramento_cmp,
+                {classi_sql} AS classificacao_final_cmp,
+                {con_sql} AS conclusao_diagnostica_cmp,
+                {criterio_sql} AS criterio_confirmacao_cmp,
+                {evol_sql} AS evolucao_cmp,
+                {chronology_sql} AS alerta_cronologia,
+                {key_spec.composite_key} AS chave_administrativa,
+                CASE WHEN {key_spec.incomplete_expr} THEN TRUE ELSE FALSE END AS chave_administrativa_incompleta
             FROM {table.ref_sql}
             {where_sql}
         ), valid AS (
@@ -9479,80 +9925,116 @@ def query_sinan_overlap_composite_details(
             SELECT
                 nu_notific,
                 COUNT(*) AS registros_mesmo_numero,
-                COUNT(DISTINCT chave_composta) AS contextos_distintos_numero
+                COUNT(DISTINCT chave_administrativa) AS contextos_administrativos_distintos{stats_sql}
             FROM valid
             GROUP BY nu_notific
         ), por_chave AS (
             SELECT
                 nu_notific,
-                chave_composta,
-                COUNT(*) AS registros_mesma_chave
+                chave_administrativa,
+                COUNT(*) AS registros_mesma_chave{stats_sql}
             FROM valid
-            GROUP BY nu_notific, chave_composta
+            GROUP BY nu_notific, chave_administrativa
         ), classificados AS (
             SELECT
                 v.*,
                 pn.registros_mesmo_numero,
-                pn.contextos_distintos_numero,
+                pn.contextos_administrativos_distintos,
                 pc.registros_mesma_chave,
                 CASE
                     WHEN pc.registros_mesma_chave > 1 THEN 'Duplicidade provável'
                     ELSE 'Reuso de numeração'
                 END AS classificacao_sobreposicao,
+                {profile_sql} AS perfil_auditoria,
+                {priority_sql} AS prioridade_revisao,
+                {evidence_identity_sql} AS evidencia_identidade,
+                CASE
+                    WHEN pc.registros_mesma_chave > 1 THEN {pc_identity_labels}
+                    ELSE {pn_identity_labels}
+                END AS campos_identidade_divergentes,
+                CASE
+                    WHEN pc.registros_mesma_chave > 1 THEN {pc_context_labels}
+                    ELSE 'Não se aplica: a chave administrativa já difere.'
+                END AS campos_contexto_divergentes,
                 CASE
                     WHEN pc.registros_mesma_chave > 1
-                        THEN 'Mesmo NU_NOTIFIC repetido na mesma chave administrativa ({key_label}).'
-                    ELSE 'NU_NOTIFIC repetido, mas esta chave administrativa aparece uma única vez.'
+                        THEN 'NU_NOTIFIC repetido com a mesma chave administrativa ({key_label}).'
+                    ELSE 'NU_NOTIFIC repetido, mas a chave administrativa ({key_label}) difere.'
                 END AS criterio_classificacao,
                 CASE
-                    WHEN v.chave_composta_incompleta
-                        THEN 'Chave composta incompleta; revisar manualmente a classificação.'
-                    ELSE 'Chave composta completa nos campos disponíveis.'
-                END AS observacao_chave
+                    WHEN v.chave_administrativa_incompleta
+                        THEN 'Há valor ausente em pelo menos um componente disponível da chave; revisar manualmente.'
+                    ELSE {qstr(schema_key_note)}
+                END AS observacao_chave,
+                {qstr(identity_fields_text)} AS campos_identidade_avaliados,
+                {qstr(strong_fields_text)} AS campos_identidade_estaveis_avaliados
             FROM valid v
             JOIN por_numero pn USING (nu_notific)
-            JOIN por_chave pc USING (nu_notific, chave_composta)
+            JOIN por_chave pc USING (nu_notific, chave_administrativa)
             WHERE pn.registros_mesmo_numero > 1
         )
         SELECT
             ROW_NUMBER() OVER (
                 ORDER BY
-                    CASE classificacao_sobreposicao
-                        WHEN 'Duplicidade provável' THEN 1
-                        WHEN 'Reuso de numeração' THEN 2
-                        ELSE 3
-                    END,
+                    CASE prioridade_revisao WHEN 'Alta' THEN 1 WHEN 'Média' THEN 2 ELSE 3 END,
+                    CASE classificacao_sobreposicao WHEN 'Duplicidade provável' THEN 1 ELSE 2 END,
                     nu_notific,
-                    ano_referencia NULLS LAST,
-                    municipio NULLS LAST,
-                    data_referencia NULLS LAST,
+                    data_notificacao NULLS LAST,
+                    municipio_notificacao NULLS LAST,
                     nm_pacient NULLS LAST
             ) AS ordem_exportacao,
             ROW_NUMBER() OVER (
                 PARTITION BY nu_notific
-                ORDER BY ano_referencia NULLS LAST, municipio NULLS LAST,
-                         data_referencia NULLS LAST, nm_pacient NULLS LAST
+                ORDER BY data_notificacao NULLS LAST, municipio_notificacao NULLS LAST,
+                         unidade_notificadora NULLS LAST, nm_pacient NULLS LAST
             ) AS registro_no_numero,
             classificacao_sobreposicao,
+            perfil_auditoria,
+            prioridade_revisao,
+            evidencia_identidade,
+            campos_identidade_divergentes,
+            campos_contexto_divergentes,
             nu_notific,
             registros_mesmo_numero,
-            contextos_distintos_numero,
+            contextos_administrativos_distintos,
             registros_mesma_chave,
-            chave_composta,
-            chave_composta_incompleta,
-            ano_referencia,
-            municipio,
-            data_referencia,
+            chave_administrativa,
+            chave_administrativa_incompleta,
+            data_notificacao,
+            ano_notificacao,
+            id_agravo,
+            municipio_notificacao,
+            unidade_notificadora,
             nm_pacient,
+            data_nascimento,
+            sexo,
+            nome_mae,
+            cartao_sus,
+            chave_fonetica_nome,
+            soundex_nome,
+            municipio_residencia,
+            data_primeira_digitacao,
+            identificador_micro_primeira_inclusao,
+            situacao_fluxo_retorno,
+            recebido_por_fluxo_retorno,
+            migrado_sinan_windows,
+            data_primeiros_sintomas,
+            data_investigacao,
+            data_encerramento,
             classificacao_final,
-            evolucao,
+            conclusao_diagnostica,
             grupo_etiologico,
+            criterio_confirmacao,
+            evolucao,
+            alerta_cronologia,
             criterio_classificacao,
-            observacao_chave
+            observacao_chave,
+            campos_identidade_avaliados,
+            campos_identidade_estaveis_avaliados
         FROM classificados
         ORDER BY ordem_exportacao
     """
-    return run_query(table, sql, cache=False), key_desc
+    return run_query(table, sql, cache=False), list(key_spec.key_desc)
 
 
 def render_overlap_block(
@@ -9570,12 +10052,18 @@ def render_overlap_block(
     details_heading: Optional[str] = None,
     details_limit: Optional[int] = 200,
     download_all_details: bool = False,
+    show_details_chart: bool = True,
+    intro_caption: Optional[str] = None,
+    details_caption: Optional[str] = None,
 ) -> None:
-    """Renderiza um bloco completo de análise de sobreposição para uma coluna."""
+    """Renderiza métricas e tabela de sobreposição; o gráfico é opcional."""
     st.markdown(f"### Sobreposição de `{display_label}`")
     st.caption(
-        f"Esta análise verifica se o mesmo valor de `{display_label}` aparece em mais de um registro após os filtros-base. "
-        "Sobreposição é um sinal operacional de possível duplicidade ou repetição de caso; a revisão final deve considerar datas, classificação e evolução."
+        intro_caption
+        or (
+            f"Esta análise verifica se o mesmo valor de `{display_label}` aparece em mais de um registro após os filtros-base. "
+            "Sobreposição é um sinal operacional de possível duplicidade ou repetição de caso; a revisão final deve considerar datas, identificação, classificação e evolução."
+        )
     )
     schema = schema_df(table)
     columns = schema["coluna"].astype(str).tolist() if "coluna" in schema.columns else []
@@ -9619,23 +10107,38 @@ def render_overlap_block(
         details_heading
         or f"**Valores de `{display_label}` que se repetem na planilha e quantas vezes cada um aparece:**"
     )
-    plot_df = details.head(30).copy()
-    plot_df["texto"] = plot_df["registros"].astype(int).astype(str)
-    fig = px.bar(
-        plot_df,
-        x="registros",
-        y=value_label,
-        orientation="h",
-        text="texto",
-        title=chart_title or f"Principais {display_label} com sobreposição",
-        labels={value_label: display_label, "registros": "Registros"},
-    )
-    fig.update_layout(yaxis={"categoryorder": "array", "categoryarray": plot_df[value_label].tolist()[::-1]})
-    render_plotly_chart(fig)
-    st.caption(
-        "O gráfico exibe no máximo os 30 valores mais frequentes. A tabela e o CSV abaixo "
-        + ("contêm todos os valores repetidos do recorte." if details_limit is None else f"contêm até {int(details_limit)} valores repetidos.")
-    )
+    if show_details_chart:
+        plot_df = details.head(30).copy()
+        plot_df["texto"] = plot_df["registros"].astype(int).astype(str)
+        fig = px.bar(
+            plot_df,
+            x="registros",
+            y=value_label,
+            orientation="h",
+            text="texto",
+            title=chart_title or f"Principais {display_label} com sobreposição",
+            labels={value_label: display_label, "registros": "Registros"},
+        )
+        fig.update_layout(yaxis={"categoryorder": "array", "categoryarray": plot_df[value_label].tolist()[::-1]})
+        render_plotly_chart(fig)
+        default_details_caption = (
+            "O gráfico exibe no máximo os 30 valores mais frequentes. A tabela e o CSV abaixo "
+            + (
+                "contêm todos os valores repetidos do recorte."
+                if details_limit is None
+                else f"contêm até {int(details_limit)} valores repetidos."
+            )
+        )
+    else:
+        default_details_caption = (
+            "O gráfico de barras foi removido. A tabela e o CSV abaixo "
+            + (
+                "contêm todos os valores repetidos do recorte."
+                if details_limit is None
+                else f"contêm até {int(details_limit)} valores repetidos."
+            )
+        )
+    st.caption(details_caption or default_details_caption)
     copyable_dataframe(details, width="stretch", hide_index=True)
     download_button(
         details,
@@ -9645,57 +10148,336 @@ def render_overlap_block(
     )
 
 
+def _sinan_overlap_reference_table(
+    columns: Sequence[str],
+    context_cols: Dict[str, Optional[str]],
+    exprs: Dict[str, Optional[str]],
+) -> pd.DataFrame:
+    """Expõe de forma transparente os campos usados na triagem e na revisão."""
+    detected = {str(col).upper() for col in columns}
+    rows = [
+        ("Chave administrativa", "NU_NOTIFIC", "Número da notificação; campo-chave para identificar o registro."),
+        ("Chave administrativa", "DT_NOTIFIC", "Data de preenchimento da ficha; campo-chave."),
+        ("Chave administrativa", "ID_AGRAVO", "Código do agravo; campo-chave."),
+        ("Chave administrativa", "ID_MUNICIP", "Município da unidade notificadora; campo-chave."),
+        ("Contexto administrativo", "ID_UNIDADE", "Unidade notificadora/CNES; ajuda a reconhecer transferências ou notificações por serviços distintos."),
+        ("Identidade", "NM_PACIENT", "Nome completo do paciente; nomes iguais podem representar homônimos."),
+        ("Identidade", "DT_NASC", "Data de nascimento; reforça ou enfraquece a hipótese de ser a mesma pessoa."),
+        ("Identidade", "CS_SEXO", "Sexo; usado como verificação complementar de consistência."),
+        ("Identidade", "NM_MAE_PAC", "Nome da mãe; campo essencial e forte apoio à vinculação."),
+        ("Identidade", "ID_CNS_SUS", "Cartão SUS; identificador individual quando preenchido."),
+        ("Identidade", "FONETICA_N", "Primeiro e último nomes concatenados; apoio à comparação fonética de grafias próximas."),
+        ("Identidade", "SOUNDEX", "Código Soundex interno; apoio à vinculação quando o nome varia."),
+        ("Identidade", "ID_MN_RESI", "Município de residência; contexto complementar, não identificador isolado."),
+        ("Origem e fluxo", "DT_DIGITA", "Data da primeira inclusão; segundo o dicionário, não é atualizada após alterações."),
+        ("Origem e fluxo", "IDENT_MICR", "Código da instalação onde ocorreu a primeira inclusão do registro."),
+        ("Origem e fluxo", "CS_FLXRET", "Situação do fluxo de retorno do registro."),
+        ("Origem e fluxo", "FLXRECEBI", "Indica recebimento por fluxo de retorno."),
+        ("Origem e fluxo", "MIGRADO_W", "Indica origem em migração do Sinan Windows."),
+        ("Cronologia", "DT_SIN_PRI", "Data dos primeiros sintomas; deve ser menor ou igual a DT_NOTIFIC."),
+        ("Cronologia", "DT_INVEST", "Início da investigação; deve ser igual ou posterior a DT_NOTIFIC."),
+        ("Cronologia", "DT_ENCERRA", "Encerramento; deve ser igual ou posterior a DT_INVEST."),
+        ("Investigação", "CLASSI_FIN", "Classificação final do caso."),
+        ("Investigação", "CON_DIAGES", "Conclusão diagnóstica específica da meningite."),
+        ("Investigação", "CRITERIO", "Critério usado para confirmação."),
+        ("Investigação", "EVOLUCAO", "Desfecho do caso."),
+    ]
+    aliases = {
+        "NU_NOTIFIC": context_cols.get("nu_notific"),
+        "DT_NOTIFIC": context_cols.get("date_notification"),
+        "ID_AGRAVO": context_cols.get("agravo"),
+        "ID_MUNICIP": context_cols.get("municipality_notification"),
+        "ID_UNIDADE": context_cols.get("notification_unit"),
+        "NM_PACIENT": context_cols.get("patient"),
+        "DT_NASC": context_cols.get("birth_date"),
+        "CS_SEXO": context_cols.get("sex"),
+        "NM_MAE_PAC": context_cols.get("mother_name"),
+        "ID_CNS_SUS": context_cols.get("cns"),
+        "FONETICA_N": context_cols.get("phonetic_name"),
+        "SOUNDEX": context_cols.get("soundex"),
+        "ID_MN_RESI": context_cols.get("municipality_residence"),
+        "DT_DIGITA": context_cols.get("date_entry"),
+        "IDENT_MICR": context_cols.get("micro_identifier"),
+        "CS_FLXRET": context_cols.get("return_flow_status"),
+        "FLXRECEBI": context_cols.get("received_return_flow"),
+        "MIGRADO_W": context_cols.get("migrated_windows"),
+        "DT_SIN_PRI": context_cols.get("date_symptom"),
+        "DT_INVEST": context_cols.get("date_investigation"),
+        "DT_ENCERRA": context_cols.get("date_closure"),
+        "CLASSI_FIN": context_cols.get("classification_final"),
+        "CON_DIAGES": context_cols.get("diagnosis_conclusion"),
+        "CRITERIO": context_cols.get("confirmation_criterion"),
+        "EVOLUCAO": context_cols.get("outcome"),
+    }
+    out = []
+    for group, field, use in rows:
+        actual = aliases.get(field)
+        is_detected = bool(actual and str(actual).upper() in detected)
+        out.append(
+            {
+                "Grupo": group,
+                "Campo de referência": field,
+                "Coluna detectada": actual or "—",
+                "Disponível": "Sim" if is_detected else "Não",
+                "Uso na auditoria": use,
+            }
+        )
+    return pd.DataFrame(out)
+
+
 def render_sinan_overlap_tab(table: LoadedTable, base_where: str, exprs: Dict[str, Optional[str]]) -> None:
     st.caption(
-        "Verificação de duplicidade/repetição no SINAN: avalia separadamente se o mesmo `NU_NOTIFIC` (identificador "
-        "operacional da notificação) e o mesmo `NM_PACIENT` (nome do paciente) aparecem em mais de um registro do "
-        "arquivo carregado, após os filtros-base aplicados."
+        "A aba separa duas perguntas: (1) se o número da notificação reaparece na mesma chave administrativa "
+        "do SINAN ou em outra; e (2) se os campos de identidade e investigação sustentam que os registros "
+        "representam a mesma pessoa e o mesmo episódio. A classificação é uma triagem auditável, não uma exclusão automática."
     )
     schema = schema_df(table)
     columns = schema["coluna"].astype(str).tolist() if "coluna" in schema.columns else []
+
     nu_col = choose_candidate(columns, ["NU_NOTIFIC", "NUM_NOTIFIC", "NUNOTIFIC", "NU_NOTIF"])
+    dt_not_col = choose_candidate(columns, ["DT_NOTIFIC", "DT_NOTIFICACAO", "DATA_NOTIFICACAO"])
+    dt_symptom_col = choose_candidate(columns, ["DT_SIN_PRI", "DT_SINTOMAS", "DATA_PRIMEIROS_SINTOMAS"])
+    dt_closure_col = choose_candidate(columns, ["DT_ENCERRA", "DT_ENCERRAMENTO", "DATA_ENCERRAMENTO"])
     nm_col = choose_candidate(columns, ["NM_PACIENT", "NOME_PACIENTE", "NM_PACIENTE", "PACIENTE"])
-    muni_col = choose_candidate(
-        columns,
-        ["ID_MUNICIP", "ID_MN_OCORR", "CODMUNOCOR", "ID_MN_RESI", "CODMUNRES", "MUNIC_MOV", "MUNIC_RES"],
-    )
+    agravo_col = choose_candidate(columns, ["ID_AGRAVO", "CO_CID", "AGRAVO", "CID"])
+    muni_not_col = choose_candidate(columns, ["ID_MUNICIP", "CODMUNNOT", "MUN_NOT", "MUNIC_NOT"])
+    unit_col = choose_candidate(columns, ["ID_UNIDADE", "CO_UNIDADE_NOTIFICACAO", "UNIDADE_NOTIFICADORA", "CNES_NOTIFICADOR"])
+    birth_col = choose_candidate(columns, ["DT_NASC", "DT_NASCIMENTO", "DATA_NASCIMENTO", "NASCIMENTO"])
+    sex_col = choose_candidate(columns, ["CS_SEXO", "SEXO"])
+    mother_col = choose_candidate(columns, ["NM_MAE_PAC", "NM_MAE", "NOME_MAE", "NOME_DA_MAE"])
+    cns_col = choose_candidate(columns, ["ID_CNS_SUS", "CNS", "CARTAO_SUS", "NU_CARTAO_SUS"])
+    phonetic_col = choose_candidate(columns, ["FONETICA_N", "CHAVE_FONETICA"])
+    soundex_col = choose_candidate(columns, ["SOUNDEX", "DS_SOUNDEX"])
+    muni_res_col = choose_candidate(columns, ["ID_MN_RESI", "CODMUNRES", "MUNIC_RES", "MUN_RES"])
+    dt_invest_col = choose_candidate(columns, ["DT_INVEST", "DT_INVESTIGACAO", "DATA_INVESTIGACAO"])
+    dt_entry_col = choose_candidate(columns, ["DT_DIGITA", "DT_DIGITACAO", "DATA_DIGITACAO"])
+    micro_identifier_col = choose_candidate(columns, ["IDENT_MICR", "IDENTIFICADOR_MICRO"])
+    return_flow_col = choose_candidate(columns, ["CS_FLXRET", "FLUXO_RETORNO"])
+    received_return_flow_col = choose_candidate(columns, ["FLXRECEBI", "RECEBIDO_FLUXO_RETORNO"])
+    migrated_col = choose_candidate(columns, ["MIGRADO_W", "MIGRADO_WINDOWS"])
+    classi_col = choose_candidate(columns, ["CLASSI_FIN", "CLASSIFICACAO_FINAL"])
+    con_col = choose_candidate(columns, ["CON_DIAGES", "CONCLUSAO_DIAGNOSTICA"])
+    criterio_col = choose_candidate(columns, ["CRITERIO", "CRITERIO_CONFIRMACAO"])
+    evol_col = choose_candidate(columns, ["EVOLUCAO", "EVOLUCAO_CASO"])
 
-    # Novo bloco solicitado: replica a leitura de NM_PACIENT para NU_NOTIFIC,
-    # substitui a visualização anterior e exporta todos os
-    # números repetidos, sem o LIMIT de 200 anteriormente aplicado.
-    render_overlap_block(
-        table,
-        base_where,
-        exprs,
-        col_name="NU_NOTIFIC",
-        candidates=["NU_NOTIFIC", "NUM_NOTIFIC", "NUNOTIFIC", "NU_NOTIF"],
-        value_label="nu_notific",
-        display_label="NU_NOTIFIC",
-        file_slug="nu_notific",
-        extra_cols=[(clean_str_expr(nm_col), "nm_pacient")] if nm_col else None,
-        chart_title="Sobreposição de NU_NOTIFIC",
-        details_heading=(
-            "**Números de notificação repetidos no recorte e quantidade de registros associados:**"
-        ),
-        details_limit=None,
-        download_all_details=True,
-    )
+    context_cols: Dict[str, Optional[str]] = {
+        "nu_notific": nu_col,
+        "date_notification": dt_not_col,
+        "date_symptom": dt_symptom_col,
+        "date_closure": dt_closure_col,
+        "agravo": agravo_col,
+        "municipality_notification": muni_not_col,
+        "notification_unit": unit_col,
+        "patient": nm_col,
+        "birth_date": birth_col,
+        "sex": sex_col,
+        "mother_name": mother_col,
+        "cns": cns_col,
+        "phonetic_name": phonetic_col,
+        "soundex": soundex_col,
+        "municipality_residence": muni_res_col,
+        "date_investigation": dt_invest_col,
+        "date_entry": dt_entry_col,
+        "micro_identifier": micro_identifier_col,
+        "return_flow_status": return_flow_col,
+        "received_return_flow": received_return_flow_col,
+        "migrated_windows": migrated_col,
+        "classification_final": classi_col,
+        "diagnosis_conclusion": con_col,
+        "confirmation_criterion": criterio_col,
+        "outcome": evol_col,
+    }
 
-    if nu_col:
+    st.markdown("### Sobreposição de `NU_NOTIFIC`")
+    if not nu_col:
+        st.warning("Não localizei o campo `NU_NOTIFIC` no SINAN carregado.")
+    else:
+        key_spec = _sinan_nu_notific_composite_components(
+            nu_col,
+            exprs,
+            muni_not_col,
+            agravo_col,
+        )
+        composite_summary, key_desc = query_sinan_overlap_composite_summary(
+            table,
+            nu_col,
+            base_where,
+            exprs,
+            municipality_col=muni_not_col,
+            agravo_col=agravo_col,
+        )
+        composite_details = pd.DataFrame()
+
+        st.markdown("#### Duplicidade provável × reuso de numeração")
+        detected_key = " + ".join(f"`{field}`" for field in key_desc)
+        missing_key = ", ".join(f"`{field}`" for field in key_spec.missing_official)
+        st.caption(
+            "Esta análise não depende de gráfico. O dicionário da notificação individual marca `NU_NOTIFIC`, "
+            "`DT_NOTIFIC`, `ID_AGRAVO` e `ID_MUNICIP` como campos-chave; o painel usa os componentes detectados "
+            f"no banco ({detected_key}). **Duplicidade provável** significa que a mesma chave aparece mais de uma "
+            "vez; **reuso de numeração** significa que o número reaparece em outra combinação administrativa. "
+            "Identificação do paciente, datas do episódio, investigação e campos internos de origem/fluxo são usados "
+            "como evidência adicional para priorizar a revisão, sem substituir a conferência do registro original."
+            + (f" A chave está parcial porque não foram detectados: {missing_key}." if missing_key else "")
+        )
+
+        if not key_spec.usable or composite_summary is None or composite_summary.empty:
+            missing_required = []
+            if not key_spec.dt_expr:
+                missing_required.append("DT_NOTIFIC")
+            if not key_spec.municipality_expr:
+                missing_required.append("ID_MUNICIP")
+            st.info(
+                "Não foi possível classificar duplicidade provável versus reuso de numeração porque faltam "
+                + ", ".join(f"`{field}`" for field in missing_required)
+                + ". A tabela de sobreposição simples permanece disponível abaixo."
+            )
+        else:
+            crow = composite_summary.iloc[0]
+            simples = int(crow.get("registros_sobrepostos_simples", 0) or 0)
+            duplicidade = int(crow.get("registros_duplicidade_provavel", 0) or 0)
+            reuso = int(crow.get("registros_reuso_numeracao", 0) or 0)
+            incompletos = int(crow.get("registros_com_chave_incompleta", 0) or 0)
+            if simples > 0:
+                composite_details, _ = query_sinan_overlap_composite_details(
+                    table,
+                    nu_col,
+                    base_where,
+                    exprs,
+                    municipality_col=muni_not_col,
+                    agravo_col=agravo_col,
+                    context_cols=context_cols,
+                )
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric(
+                "Registros com NU_NOTIFIC repetido",
+                f"{simples:,}".replace(",", "."),
+                help="Todas as linhas cujo NU_NOTIFIC aparece mais de uma vez.",
+            )
+            m2.metric(
+                "Duplicidade provável",
+                f"{duplicidade:,}".replace(",", "."),
+                help="Linhas em que a mesma chave administrativa aparece mais de uma vez.",
+            )
+            m3.metric(
+                "Reuso de numeração",
+                f"{reuso:,}".replace(",", "."),
+                help="Linhas em que NU_NOTIFIC se repete, mas a chave administrativa é diferente.",
+            )
+            m4.metric(
+                "Chave incompleta",
+                f"{incompletos:,}".replace(",", "."),
+                help="Linhas repetidas com algum componente disponível da chave sem preenchimento.",
+            )
+
+            summary_rows = pd.DataFrame(
+                [
+                    {
+                        "Indicador": "Registros com NU_NOTIFIC repetido",
+                        "Registros": simples,
+                        "Interpretação": "Universo da triagem; ainda não distingue duplicidade de reuso.",
+                    },
+                    {
+                        "Indicador": "Duplicidade provável",
+                        "Registros": duplicidade,
+                        "Interpretação": "Mesma chave administrativa repetida; revisar identidade e diferenças de investigação.",
+                    },
+                    {
+                        "Indicador": "Reuso de numeração",
+                        "Registros": reuso,
+                        "Interpretação": "NU_NOTIFIC igual em chave administrativa diferente; pode ser reuso legítimo, transferência, correção ou renotificação.",
+                    },
+                    {
+                        "Indicador": "Chave administrativa incompleta",
+                        "Registros": incompletos,
+                        "Interpretação": "A classificação exige revisão manual reforçada por ausência de componente da chave.",
+                    },
+                ]
+            )
+            st.markdown("**Resumo geral da triagem administrativa**")
+            copyable_dataframe(summary_rows, width="stretch", hide_index=True)
+            download_button(
+                summary_rows,
+                "sinan_nu_notific_duplicidade_reuso_resumo_geral.csv",
+                label="Baixar resumo geral da triagem",
+                max_rows=0,
+            )
+
+            if composite_details is None or composite_details.empty:
+                st.success("Não há registros repetidos para classificar pela chave administrativa no recorte atual.")
+            else:
+                class_order = ["Duplicidade provável", "Reuso de numeração"]
+                classification_summary = (
+                    composite_details.groupby("classificacao_sobreposicao", dropna=False)
+                    .agg(
+                        registros=("nu_notific", "size"),
+                        numeros_notificacao_distintos=("nu_notific", "nunique"),
+                        chaves_administrativas_distintas=("chave_administrativa", "nunique"),
+                        revisao_alta=("prioridade_revisao", lambda s: int((s == "Alta").sum())),
+                    )
+                    .reindex(class_order, fill_value=0)
+                    .rename_axis("classificacao_sobreposicao")
+                    .reset_index()
+                )
+                classification_summary["pct_registros_sobrepostos"] = np.where(
+                    simples > 0,
+                    (100.0 * classification_summary["registros"] / simples).round(2),
+                    np.nan,
+                )
+                definitions = {
+                    "Duplicidade provável": "A mesma chave administrativa aparece mais de uma vez.",
+                    "Reuso de numeração": "O NU_NOTIFIC reaparece, mas a chave administrativa difere.",
+                }
+                classification_summary["definicao_operacional"] = classification_summary[
+                    "classificacao_sobreposicao"
+                ].map(definitions)
+                st.markdown("**Resumo por classificação**")
+                st.caption(
+                    "A primeira tabela mostra o universo e as regras; esta segunda tabela distribui os registros nas "
+                    "duas classes e informa quantos receberam prioridade alta após a verificação de identidade."
+                )
+                copyable_dataframe(classification_summary, width="stretch", hide_index=True)
+                download_button(
+                    classification_summary,
+                    "sinan_nu_notific_duplicidade_reuso_resumo_por_classificacao.csv",
+                    label="Baixar resumo por classificação",
+                    max_rows=0,
+                )
+
+                st.markdown("**Registros classificados e evidências para revisão**")
+                st.caption(
+                    "Cada linha mantém a classificação administrativa e acrescenta evidências de identidade e contexto. "
+                    "`DT_NASC`, `CS_SEXO`, `NM_MAE_PAC` e `ID_CNS_SUS` são tratados como identificadores mais estáveis; "
+                    "`NM_PACIENT` e município de residência entram como apoio independente; `FONETICA_N` e `SOUNDEX`, "
+                    "por derivarem do nome, ficam disponíveis para conferência manual sem inflar o escore. Concordância só é "
+                    "contada quando o mesmo valor não nulo aparece em pelo menos dois registros. Unidade notificadora, "
+                    "datas, classificação final, conclusão diagnóstica, critério, evolução, primeira digitação e fluxo de "
+                    "retorno ajudam a diferenciar cópia, atualização, propagação, transferência, homônimo ou novo episódio. "
+                    "Nenhuma divergência, isoladamente, prova erro."
+                )
+                copyable_dataframe(composite_details, width="stretch", hide_index=True)
+                download_button(
+                    composite_details,
+                    "sinan_nu_notific_duplicidade_reuso_registros_auditados.csv",
+                    label="Baixar CSV completo dos registros classificados",
+                    max_rows=0,
+                )
+
+        st.markdown("#### Todos os registros envolvidos na sobreposição simples de `NU_NOTIFIC`")
         duplicate_records = query_sinan_nu_notific_duplicate_records(
             table,
             nu_col,
             base_where,
             exprs,
-            patient_col=nm_col,
-            municipality_col=muni_col,
+            context_cols=context_cols,
         )
-        if not duplicate_records.empty:
-            st.markdown("**Todos os registros envolvidos na sobreposição simples de `NU_NOTIFIC`**")
+        if duplicate_records.empty:
+            st.success("Não há `NU_NOTIFIC` repetido no recorte atual.")
+        else:
             st.caption(
-                "Esta é a tabela de conferência do gráfico: mantém uma linha por registro, sem amostragem e sem "
-                "limite de download. Assim, o CSV identifica exatamente todas as ocorrências de números de "
-                "notificação repetidos no recorte filtrado."
+                "Sem gráfico de barras e sem tabela agregada intermediária: esta é a relação completa, com uma linha "
+                "por registro e sem amostragem. Os campos adicionais permitem comparar identidade, contexto da "
+                "notificação, investigação, desfecho, origem/fluxo e coerência das datas."
             )
             copyable_dataframe(duplicate_records, width="stretch", hide_index=True)
             download_button(
@@ -9705,111 +10487,37 @@ def render_sinan_overlap_tab(table: LoadedTable, base_where: str, exprs: Dict[st
                 max_rows=0,
             )
 
-        composite_summary, key_desc = query_sinan_overlap_composite_summary(
-            table,
-            nu_col,
-            base_where,
-            exprs,
-            municipality_col=muni_col,
-        )
-        composite_details, _ = query_sinan_overlap_composite_details(
-            table,
-            nu_col,
-            base_where,
-            exprs,
-            municipality_col=muni_col,
-            patient_col=nm_col,
-        )
-
-        st.markdown("#### Duplicidade provável × reuso de numeração (chave composta)")
-        st.caption(
-            "Chave composta usada: " + " + ".join(f"`{k}`" for k in key_desc)
-            + ". O gráfico simples acima é uma triagem visual de qualquer repetição do número; esta análise "
-            "não é redundante, porque usa ano/município para classificar cada registro como duplicidade provável "
-            "ou reuso de numeração em outro contexto administrativo."
-        )
-
-        if composite_summary is None or composite_summary.empty:
-            st.info(
-                "Não foi possível construir a chave composta (faltam data e/ou município no recorte). "
-                "Considere apenas a sobreposição simples acima."
+        with st.expander("Campos de referência usados na auditoria", expanded=False):
+            st.caption(
+                "A tabela abaixo documenta quais campos foram procurados e como entram na triagem. Campos de identidade, "
+                "investigação e origem/fluxo complementam a chave administrativa; nenhum deles, isoladamente, determina exclusão."
             )
-        else:
-            crow = composite_summary.iloc[0]
-            simples = int(crow.get("registros_sobrepostos_simples", 0) or 0)
-            duplicidade = int(crow.get("registros_duplicidade_provavel", 0) or 0)
-            reuso = int(crow.get("registros_reuso_numeracao", 0) or 0)
-            m1, m2, m3 = st.columns(3)
-            m1.metric(
-                "Sobrepostos por número simples",
-                f"{simples:,}".replace(",", "."),
-                help="Todos os registros cujo NU_NOTIFIC se repete, antes de considerar ano/município.",
-            )
-            m2.metric(
-                "Duplicidade provável",
-                f"{duplicidade:,}".replace(",", "."),
-                help="Registros cuja chave composta NU_NOTIFIC + ano/município também se repete.",
-            )
-            m3.metric(
-                "Reuso de numeração",
-                f"{reuso:,}".replace(",", "."),
-                help="Registros de número repetido cuja chave composta aparece uma única vez.",
-            )
-
-            if simples > 0:
-                st.caption(
-                    f"Dos {simples:,} registros com número repetido, {duplicidade:,} foram classificados como "
-                    f"duplicidade provável e {reuso:,} como reuso de numeração. "
-                    "A classificação é uma triagem administrativa e deve ser revisada com os demais campos."
-                    .replace(",", ".")
-                )
-
-            copyable_dataframe(composite_summary, width="stretch", hide_index=True)
-            download_button(
-                composite_summary,
-                "sinan_sobreposicao_nu_notific_chave_composta_resumo.csv",
-                label="Baixar resumo da chave composta",
-            )
-
-            if composite_details is None or composite_details.empty:
-                st.success("Não há registros repetidos para classificar pela chave composta no recorte atual.")
-            else:
-                class_order = ["Duplicidade provável", "Reuso de numeração"]
-                classification_summary = (
-                    composite_details.groupby("classificacao_sobreposicao", dropna=False)
-                    .agg(
-                        registros=("nu_notific", "size"),
-                        numeros_notificacao_distintos=("nu_notific", "nunique"),
-                        chaves_compostas_distintas=("chave_composta", "nunique"),
-                    )
-                    .reindex(class_order, fill_value=0)
-                    .rename_axis("classificacao_sobreposicao")
-                    .reset_index()
-                )
-                st.markdown("**Resumo por classificação**")
-                copyable_dataframe(classification_summary, width="stretch", hide_index=True)
-                download_button(
-                    classification_summary,
-                    "sinan_nu_notific_duplicidade_provavel_reuso_resumo.csv",
-                    label="Baixar CSV do resumo por classificação",
-                    max_rows=0,
-                )
-
-                st.markdown("**Casos classificados: duplicidade provável e reuso de numeração**")
-                st.caption(
-                    "A tabela abaixo contém uma linha por registro repetido e informa a classe, a chave composta, "
-                    "as contagens do número e da chave, os campos de contexto e um alerta quando a chave está "
-                    "incompleta. O CSV não é truncado pelo limite genérico de downloads."
-                )
-                copyable_dataframe(composite_details, width="stretch", hide_index=True)
-                download_button(
-                    composite_details,
-                    "sinan_nu_notific_duplicidade_provavel_reuso_casos.csv",
-                    label="Baixar CSV completo dos casos classificados",
-                    max_rows=0,
-                )
+            reference_df = _sinan_overlap_reference_table(columns, context_cols, exprs)
+            copyable_dataframe(reference_df, width="stretch", hide_index=True)
 
     st.markdown("---")
+
+    nm_extra_cols: List[Tuple[str, str]] = []
+    if nu_col:
+        nm_extra_cols.append((clean_str_expr(nu_col), "nu_notific"))
+    if birth_col:
+        nm_extra_cols.append((date_expr(birth_col), "data_nascimento"))
+    if sex_col:
+        nm_extra_cols.append((clean_code_expr(sex_col), "sexo"))
+    if mother_col:
+        nm_extra_cols.append((clean_str_expr(mother_col), "nome_mae"))
+    if cns_col:
+        nm_extra_cols.append((clean_str_expr(cns_col), "cartao_sus"))
+    if phonetic_col:
+        nm_extra_cols.append((clean_str_expr(phonetic_col), "chave_fonetica_nome"))
+    if soundex_col:
+        nm_extra_cols.append((clean_str_expr(soundex_col), "soundex_nome"))
+    if muni_res_col:
+        nm_extra_cols.append((clean_str_expr(muni_res_col), "municipio_residencia"))
+    if unit_col:
+        nm_extra_cols.append((clean_str_expr(unit_col), "unidade_notificadora"))
+    if exprs.get("dt_sin_pri"):
+        nm_extra_cols.append((exprs["dt_sin_pri"], "data_primeiros_sintomas"))
 
     render_overlap_block(
         table,
@@ -9820,7 +10528,18 @@ def render_sinan_overlap_tab(table: LoadedTable, base_where: str, exprs: Dict[st
         value_label="nm_pacient",
         display_label="NM_PACIENT",
         file_slug="nm_pacient",
-        extra_cols=[(clean_str_expr(nu_col), "nu_notific")] if nu_col else None,
+        extra_cols=nm_extra_cols,
+        show_details_chart=False,
+        intro_caption=(
+            "A repetição de `NM_PACIENT` é apenas uma triagem de nomes iguais. Homônimos são esperados; por isso, "
+            "a tabela agrega os valores observados de `DT_NASC`, `CS_SEXO`, `NM_MAE_PAC`, `ID_CNS_SUS`, "
+            "`FONETICA_N`, `SOUNDEX`, `ID_MN_RESI`, `ID_UNIDADE`, datas e números de notificação quando esses campos existem."
+        ),
+        details_heading="**Nomes de pacientes repetidos e informações disponíveis para diferenciar homônimos:**",
+        details_caption=(
+            "O gráfico de barras “Principais NM_PACIENT com sobreposição” foi removido. A tabela e o CSV mantêm "
+            "os nomes repetidos e os campos de apoio à revisão."
+        ),
     )
 
 
