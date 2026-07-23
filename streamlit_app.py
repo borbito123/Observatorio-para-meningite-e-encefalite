@@ -67,7 +67,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-07-03-v49r2-ajustes-graficos"
+APP_VERSION = "2026-07-23-v49r3-sobreposicao-nu-notific"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos
@@ -420,7 +420,6 @@ TITLE_EXACT_FIXES = {
     "atendimentos e mortes administrativas": "Atendimentos e mortes administrativas",
     "atendimentos por modalidade hospitalar e ambulatorial": "Atendimentos por modalidade hospitalar e ambulatorial",
     "dias de permanência": "Dias de permanência",
-    "principais nu_notific com sobreposição": "Principais NU_NOTIFIC com sobreposição",
     "média dos parâmetros do exame quimiocitológico do líquor (lcr)": "Média dos parâmetros do exame quimiocitológico do líquor (LCR)",
 }
 
@@ -9165,13 +9164,14 @@ def query_sinan_overlap_details(
     exprs: Dict[str, Optional[str]],
     value_label: str = "valor",
     extra_cols: Optional[List[Tuple[str, str]]] = None,
-    limit: int = 200,
+    limit: Optional[int] = 200,
 ) -> pd.DataFrame:
-    """Detalhe de sobreposição: lista cada valor repetido, quantas vezes aparece e colunas de contexto.
+    """Detalhe agregado de sobreposição: uma linha por valor repetido.
 
-    extra_cols: lista de (expressão_sql, nome_da_coluna_resultado) adicionais a exibir junto,
-    útil para mostrar, por exemplo, o NU_NOTIFIC junto da sobreposição de NM_PACIENT (e vice-versa),
-    deixando claro o que está se repetindo na planilha.
+    ``limit=None`` remove o limite SQL e permite que a exportação contenha todos
+    os valores repetidos. ``extra_cols`` recebe pares (expressão SQL, nome da
+    coluna) usados para agregar contexto, por exemplo NM_PACIENT ao analisar
+    NU_NOTIFIC.
     """
     target_expr = clean_str_expr(target_col)
     dt_expr = exprs.get("dt")
@@ -9211,6 +9211,7 @@ def query_sinan_overlap_details(
             f"STRING_AGG(DISTINCT CAST({safe_name} AS VARCHAR), '; ' ORDER BY CAST({safe_name} AS VARCHAR)) AS {safe_name}_observados"
         )
     optional_sql = (",\n            " + ",\n            ".join(optional_cols)) if optional_cols else ""
+    limit_sql = "" if limit is None else f"\n        LIMIT {max(1, int(limit))}"
     sql = f"""
         WITH base AS (
             SELECT
@@ -9230,10 +9231,125 @@ def query_sinan_overlap_details(
         FROM base
         JOIN counts USING (valor_alvo)
         GROUP BY base.valor_alvo, counts.registros
-        ORDER BY counts.registros DESC, base.valor_alvo
-        LIMIT {int(limit)}
+        ORDER BY counts.registros DESC, base.valor_alvo{limit_sql}
     """
     return run_query(table, sql)
+
+
+def _sinan_nu_notific_composite_components(
+    target_col: str,
+    exprs: Dict[str, Optional[str]],
+    municipality_col: Optional[str],
+) -> Tuple[str, Optional[str], str, Optional[str], str, str, List[str]]:
+    """Monta, em um único ponto, os componentes da chave de NU_NOTIFIC.
+
+    Prioriza DT_NOTIFIC quando detectada; usa a data geral selecionada apenas
+    como fallback. A chave administrativa é formada pelo número, ano e
+    município disponíveis no banco.
+    """
+    target_expr = clean_str_expr(target_col)
+    dt_expr = exprs.get("dt_notificacao") or exprs.get("dt")
+    year_expr = f"EXTRACT(YEAR FROM ({dt_expr}))" if dt_expr else "NULL"
+    municipality_expr = clean_str_expr(municipality_col) if municipality_col else None
+
+    key_parts = [f"COALESCE(CAST(({target_expr}) AS VARCHAR), '(sem número)')"]
+    key_desc = ["NU_NOTIFIC"]
+    incomplete_tests: List[str] = []
+
+    if dt_expr:
+        key_parts.append(f"COALESCE(CAST(({year_expr}) AS VARCHAR), '(sem ano)')")
+        key_desc.append("ano da notificação")
+        incomplete_tests.append(f"({year_expr}) IS NULL")
+    if municipality_expr:
+        key_parts.append(f"COALESCE(CAST(({municipality_expr}) AS VARCHAR), '(sem município)')")
+        key_desc.append("município")
+        incomplete_tests.append(f"({municipality_expr}) IS NULL")
+
+    composite_key = " || '|' || ".join(key_parts)
+    incomplete_expr = " OR ".join(incomplete_tests) if incomplete_tests else "FALSE"
+    return (
+        target_expr,
+        dt_expr,
+        year_expr,
+        municipality_expr,
+        composite_key,
+        incomplete_expr,
+        key_desc,
+    )
+
+
+def query_sinan_nu_notific_duplicate_records(
+    table: LoadedTable,
+    target_col: str,
+    where_sql: str,
+    exprs: Dict[str, Optional[str]],
+    patient_col: Optional[str] = None,
+    municipality_col: Optional[str] = None,
+) -> pd.DataFrame:
+    """Lista, sem amostragem, todos os registros cujo NU_NOTIFIC se repete.
+
+    Diferentemente do resumo agregado do gráfico, esta tabela mantém uma linha
+    por registro, permitindo localizar exatamente cada ocorrência envolvida na
+    sobreposição simples do número de notificação.
+    """
+    target_expr = clean_str_expr(target_col)
+    dt_expr = exprs.get("dt_notificacao") or exprs.get("dt")
+    date_sql = dt_expr or "NULL"
+    year_sql = f"EXTRACT(YEAR FROM ({dt_expr}))" if dt_expr else "NULL"
+    municipality_sql = clean_str_expr(municipality_col) if municipality_col else "NULL"
+    patient_sql = clean_str_expr(patient_col) if patient_col else "NULL"
+    classi_sql = exprs.get("classi_label") or "NULL"
+    evol_sql = exprs.get("evol_label") or "NULL"
+    con_sql = exprs.get("con_group") or "NULL"
+
+    order_sql = (
+        "nu_notific, data_referencia NULLS LAST, municipio NULLS LAST, "
+        "nm_pacient NULLS LAST, classificacao_final NULLS LAST"
+    )
+    sql = f"""
+        WITH base AS (
+            SELECT
+                {target_expr} AS nu_notific,
+                {date_sql} AS data_referencia,
+                {year_sql} AS ano_referencia,
+                {municipality_sql} AS municipio,
+                {patient_sql} AS nm_pacient,
+                {classi_sql} AS classificacao_final,
+                {evol_sql} AS evolucao,
+                {con_sql} AS grupo_etiologico
+            FROM {table.ref_sql}
+            {where_sql}
+        ), marcados AS (
+            SELECT
+                *,
+                COUNT(*) OVER (PARTITION BY nu_notific) AS registros_mesmo_numero
+            FROM base
+            WHERE nu_notific IS NOT NULL
+        ), duplicados AS (
+            SELECT *
+            FROM marcados
+            WHERE registros_mesmo_numero > 1
+        )
+        SELECT
+            ROW_NUMBER() OVER (ORDER BY {order_sql}) AS ordem_exportacao,
+            ROW_NUMBER() OVER (
+                PARTITION BY nu_notific
+                ORDER BY data_referencia NULLS LAST, municipio NULLS LAST,
+                         nm_pacient NULLS LAST, classificacao_final NULLS LAST
+            ) AS registro_no_numero,
+            nu_notific,
+            registros_mesmo_numero,
+            data_referencia,
+            ano_referencia,
+            municipio,
+            nm_pacient,
+            classificacao_final,
+            evolucao,
+            grupo_etiologico
+        FROM duplicados
+        ORDER BY {order_sql}
+    """
+    return run_query(table, sql, cache=False)
 
 
 def query_sinan_overlap_composite_summary(
@@ -9243,53 +9359,200 @@ def query_sinan_overlap_composite_summary(
     exprs: Dict[str, Optional[str]],
     municipality_col: Optional[str] = None,
 ) -> Tuple[pd.DataFrame, List[str]]:
-    """Sobreposição por chave composta (valor + ano + município).
+    """Resume a repetição simples e a classificação pela chave composta.
 
-    O resumo simples agrupa apenas pelo valor repetido de NU_NOTIFIC, o que gera
-    falso positivo quando o mesmo número é reutilizado em anos ou municípios
-    diferentes (a numeração da notificação costuma ser única apenas dentro de um
-    escopo administrativo). Aqui distinguimos:
-      • sobreposição na CHAVE COMPOSTA — mesmo NU_NOTIFIC no mesmo ano/município,
-        indício mais forte de duplicidade real;
-      • sobreposição apenas por REUSO de numeração — mesmo NU_NOTIFIC, mas em
-        ano/município distintos, provavelmente não é duplicidade.
-    Retorna (dataframe_resumo, descrição_da_chave).
+    Os registros cujo número se repete são particionados em duas classes
+    mutuamente exclusivas no nível do registro:
+      • Duplicidade provável: a mesma chave composta aparece mais de uma vez;
+      • Reuso de numeração: o número se repete, mas aquela chave aparece uma
+        única vez, em contexto administrativo diferente.
     """
-    target_expr = clean_str_expr(target_col)
-    dt = exprs.get("dt")
-    key_parts = [f"COALESCE(CAST(({target_expr}) AS VARCHAR), '(sem)')"]
-    key_desc = ["NU_NOTIFIC"]
-    if dt:
-        key_parts.append(f"COALESCE(CAST(EXTRACT(YEAR FROM ({dt})) AS VARCHAR), '(sem)')")
-        key_desc.append("ano")
-    if municipality_col:
-        muni_expr = clean_str_expr(municipality_col)
-        key_parts.append(f"COALESCE(CAST(({muni_expr}) AS VARCHAR), '(sem)')")
-        key_desc.append("município")
-    if len(key_parts) == 1:
-        # Sem ano nem município disponíveis não há chave composta a construir.
+    (
+        target_expr,
+        _dt_expr,
+        _year_expr,
+        _municipality_expr,
+        composite_key,
+        _incomplete_expr,
+        key_desc,
+    ) = _sinan_nu_notific_composite_components(target_col, exprs, municipality_col)
+
+    if len(key_desc) == 1:
         return pd.DataFrame(), key_desc
-    composite_key = " || '|' || ".join(key_parts)
+
     sql = f"""
         WITH base AS (
-            SELECT {target_expr} AS valor,
-                   {composite_key} AS chave
+            SELECT
+                {target_expr} AS valor,
+                {composite_key} AS chave
             FROM {table.ref_sql}
             {where_sql}
         ), valid AS (
-            SELECT valor, chave FROM base WHERE valor IS NOT NULL
+            SELECT valor, chave
+            FROM base
+            WHERE valor IS NOT NULL
         ), por_valor AS (
-            SELECT valor, COUNT(*) AS n FROM valid GROUP BY valor
+            SELECT valor, COUNT(*) AS n_numero
+            FROM valid
+            GROUP BY valor
         ), por_chave AS (
-            SELECT chave, COUNT(*) AS n FROM valid GROUP BY chave
+            SELECT valor, chave, COUNT(*) AS n_chave
+            FROM valid
+            GROUP BY valor, chave
+        ), classificados AS (
+            SELECT
+                v.valor,
+                v.chave,
+                pv.n_numero,
+                pc.n_chave
+            FROM valid v
+            JOIN por_valor pv USING (valor)
+            JOIN por_chave pc USING (valor, chave)
         )
         SELECT
-            (SELECT COUNT(*) FROM valid) AS registros_com_valor,
-            COALESCE((SELECT SUM(n) FROM por_valor WHERE n > 1), 0) AS registros_sobrepostos_simples,
-            COALESCE((SELECT SUM(n) FROM por_chave WHERE n > 1), 0) AS registros_sobrepostos_composta,
-            COALESCE((SELECT COUNT(*) FROM por_chave WHERE n > 1), 0) AS chaves_compostas_com_sobreposicao
+            COUNT(*) AS registros_com_valor,
+            COALESCE(SUM(CASE WHEN n_numero > 1 THEN 1 ELSE 0 END), 0) AS registros_sobrepostos_simples,
+            COALESCE(SUM(CASE WHEN n_numero > 1 AND n_chave > 1 THEN 1 ELSE 0 END), 0) AS registros_duplicidade_provavel,
+            COALESCE(SUM(CASE WHEN n_numero > 1 AND n_chave = 1 THEN 1 ELSE 0 END), 0) AS registros_reuso_numeracao,
+            COUNT(DISTINCT CASE WHEN n_numero > 1 AND n_chave > 1 THEN valor END) AS numeros_com_duplicidade_provavel,
+            COUNT(DISTINCT CASE WHEN n_numero > 1 AND n_chave = 1 THEN valor END) AS numeros_com_reuso_numeracao,
+            COUNT(DISTINCT CASE WHEN n_numero > 1 AND n_chave > 1 THEN chave END) AS chaves_compostas_com_sobreposicao
+        FROM classificados
     """
     return run_query(table, sql), key_desc
+
+
+def query_sinan_overlap_composite_details(
+    table: LoadedTable,
+    target_col: str,
+    where_sql: str,
+    exprs: Dict[str, Optional[str]],
+    municipality_col: Optional[str] = None,
+    patient_col: Optional[str] = None,
+) -> Tuple[pd.DataFrame, List[str]]:
+    """Classifica todos os registros repetidos como duplicidade provável ou reuso.
+
+    A saída não tem LIMIT e constitui a tabela auditável solicitada para indicar
+    exatamente quais registros pertencem a cada classe.
+    """
+    (
+        target_expr,
+        dt_expr,
+        year_expr,
+        municipality_expr,
+        composite_key,
+        incomplete_expr,
+        key_desc,
+    ) = _sinan_nu_notific_composite_components(target_col, exprs, municipality_col)
+
+    if len(key_desc) == 1:
+        return pd.DataFrame(), key_desc
+
+    date_sql = dt_expr or "NULL"
+    municipality_sql = municipality_expr or "NULL"
+    patient_sql = clean_str_expr(patient_col) if patient_col else "NULL"
+    classi_sql = exprs.get("classi_label") or "NULL"
+    evol_sql = exprs.get("evol_label") or "NULL"
+    con_sql = exprs.get("con_group") or "NULL"
+    key_label = " + ".join(key_desc)
+
+    sql = f"""
+        WITH base AS (
+            SELECT
+                {target_expr} AS nu_notific,
+                {date_sql} AS data_referencia,
+                {year_expr} AS ano_referencia,
+                {municipality_sql} AS municipio,
+                {patient_sql} AS nm_pacient,
+                {classi_sql} AS classificacao_final,
+                {evol_sql} AS evolucao,
+                {con_sql} AS grupo_etiologico,
+                {composite_key} AS chave_composta,
+                CASE WHEN {incomplete_expr} THEN TRUE ELSE FALSE END AS chave_composta_incompleta
+            FROM {table.ref_sql}
+            {where_sql}
+        ), valid AS (
+            SELECT *
+            FROM base
+            WHERE nu_notific IS NOT NULL
+        ), por_numero AS (
+            SELECT
+                nu_notific,
+                COUNT(*) AS registros_mesmo_numero,
+                COUNT(DISTINCT chave_composta) AS contextos_distintos_numero
+            FROM valid
+            GROUP BY nu_notific
+        ), por_chave AS (
+            SELECT
+                nu_notific,
+                chave_composta,
+                COUNT(*) AS registros_mesma_chave
+            FROM valid
+            GROUP BY nu_notific, chave_composta
+        ), classificados AS (
+            SELECT
+                v.*,
+                pn.registros_mesmo_numero,
+                pn.contextos_distintos_numero,
+                pc.registros_mesma_chave,
+                CASE
+                    WHEN pc.registros_mesma_chave > 1 THEN 'Duplicidade provável'
+                    ELSE 'Reuso de numeração'
+                END AS classificacao_sobreposicao,
+                CASE
+                    WHEN pc.registros_mesma_chave > 1
+                        THEN 'Mesmo NU_NOTIFIC repetido na mesma chave administrativa ({key_label}).'
+                    ELSE 'NU_NOTIFIC repetido, mas esta chave administrativa aparece uma única vez.'
+                END AS criterio_classificacao,
+                CASE
+                    WHEN v.chave_composta_incompleta
+                        THEN 'Chave composta incompleta; revisar manualmente a classificação.'
+                    ELSE 'Chave composta completa nos campos disponíveis.'
+                END AS observacao_chave
+            FROM valid v
+            JOIN por_numero pn USING (nu_notific)
+            JOIN por_chave pc USING (nu_notific, chave_composta)
+            WHERE pn.registros_mesmo_numero > 1
+        )
+        SELECT
+            ROW_NUMBER() OVER (
+                ORDER BY
+                    CASE classificacao_sobreposicao
+                        WHEN 'Duplicidade provável' THEN 1
+                        WHEN 'Reuso de numeração' THEN 2
+                        ELSE 3
+                    END,
+                    nu_notific,
+                    ano_referencia NULLS LAST,
+                    municipio NULLS LAST,
+                    data_referencia NULLS LAST,
+                    nm_pacient NULLS LAST
+            ) AS ordem_exportacao,
+            ROW_NUMBER() OVER (
+                PARTITION BY nu_notific
+                ORDER BY ano_referencia NULLS LAST, municipio NULLS LAST,
+                         data_referencia NULLS LAST, nm_pacient NULLS LAST
+            ) AS registro_no_numero,
+            classificacao_sobreposicao,
+            nu_notific,
+            registros_mesmo_numero,
+            contextos_distintos_numero,
+            registros_mesma_chave,
+            chave_composta,
+            chave_composta_incompleta,
+            ano_referencia,
+            municipio,
+            data_referencia,
+            nm_pacient,
+            classificacao_final,
+            evolucao,
+            grupo_etiologico,
+            criterio_classificacao,
+            observacao_chave
+        FROM classificados
+        ORDER BY ordem_exportacao
+    """
+    return run_query(table, sql, cache=False), key_desc
 
 
 def render_overlap_block(
@@ -9302,8 +9565,13 @@ def render_overlap_block(
     display_label: str,
     file_slug: str,
     extra_cols: Optional[List[Tuple[str, str]]] = None,
+    *,
+    chart_title: Optional[str] = None,
+    details_heading: Optional[str] = None,
+    details_limit: Optional[int] = 200,
+    download_all_details: bool = False,
 ) -> None:
-    """Renderiza um bloco completo de análise de sobreposição (repetição de valores) para uma coluna do SINAN."""
+    """Renderiza um bloco completo de análise de sobreposição para uma coluna."""
     st.markdown(f"### Sobreposição de `{display_label}`")
     st.caption(
         f"Esta análise verifica se o mesmo valor de `{display_label}` aparece em mais de um registro após os filtros-base. "
@@ -9335,14 +9603,22 @@ def render_overlap_block(
     download_button(summary, f"sinan_sobreposicao_{file_slug}_resumo.csv")
 
     details = query_sinan_overlap_details(
-        table, target_col, base_where, exprs,
-        value_label=value_label, extra_cols=extra_cols, limit=200,
+        table,
+        target_col,
+        base_where,
+        exprs,
+        value_label=value_label,
+        extra_cols=extra_cols,
+        limit=details_limit,
     )
     if details.empty:
         st.success(f"Não há `{display_label}` repetido no recorte atual.")
         return
 
-    st.markdown(f"**Valores de `{display_label}` que se repetem na planilha e quantas vezes cada um aparece:**")
+    st.markdown(
+        details_heading
+        or f"**Valores de `{display_label}` que se repetem na planilha e quantas vezes cada um aparece:**"
+    )
     plot_df = details.head(30).copy()
     plot_df["texto"] = plot_df["registros"].astype(int).astype(str)
     fig = px.bar(
@@ -9351,13 +9627,22 @@ def render_overlap_block(
         y=value_label,
         orientation="h",
         text="texto",
-        title=f"Principais {display_label} com sobreposição",
+        title=chart_title or f"Principais {display_label} com sobreposição",
         labels={value_label: display_label, "registros": "Registros"},
     )
     fig.update_layout(yaxis={"categoryorder": "array", "categoryarray": plot_df[value_label].tolist()[::-1]})
     render_plotly_chart(fig)
+    st.caption(
+        "O gráfico exibe no máximo os 30 valores mais frequentes. A tabela e o CSV abaixo "
+        + ("contêm todos os valores repetidos do recorte." if details_limit is None else f"contêm até {int(details_limit)} valores repetidos.")
+    )
     copyable_dataframe(details, width="stretch", hide_index=True)
-    download_button(details, f"sinan_sobreposicao_{file_slug}_detalhes.csv")
+    download_button(
+        details,
+        f"sinan_sobreposicao_{file_slug}_detalhes.csv",
+        label="Baixar CSV dos valores repetidos",
+        max_rows=0 if download_all_details else None,
+    )
 
 
 def render_sinan_overlap_tab(table: LoadedTable, base_where: str, exprs: Dict[str, Optional[str]]) -> None:
@@ -9370,37 +9655,80 @@ def render_sinan_overlap_tab(table: LoadedTable, base_where: str, exprs: Dict[st
     columns = schema["coluna"].astype(str).tolist() if "coluna" in schema.columns else []
     nu_col = choose_candidate(columns, ["NU_NOTIFIC", "NUM_NOTIFIC", "NUNOTIFIC", "NU_NOTIF"])
     nm_col = choose_candidate(columns, ["NM_PACIENT", "NOME_PACIENTE", "NM_PACIENTE", "PACIENTE"])
+    muni_col = choose_candidate(
+        columns,
+        ["ID_MUNICIP", "ID_MN_OCORR", "CODMUNOCOR", "ID_MN_RESI", "CODMUNRES", "MUNIC_MOV", "MUNIC_RES"],
+    )
 
+    # Novo bloco solicitado: replica a leitura de NM_PACIENT para NU_NOTIFIC,
+    # substitui a visualização anterior e exporta todos os
+    # números repetidos, sem o LIMIT de 200 anteriormente aplicado.
     render_overlap_block(
-        table, base_where, exprs,
+        table,
+        base_where,
+        exprs,
         col_name="NU_NOTIFIC",
         candidates=["NU_NOTIFIC", "NUM_NOTIFIC", "NUNOTIFIC", "NU_NOTIF"],
         value_label="nu_notific",
         display_label="NU_NOTIFIC",
         file_slug="nu_notific",
         extra_cols=[(clean_str_expr(nm_col), "nm_pacient")] if nm_col else None,
+        chart_title="Sobreposição de NU_NOTIFIC",
+        details_heading=(
+            "**Números de notificação repetidos no recorte e quantidade de registros associados:**"
+        ),
+        details_limit=None,
+        download_all_details=True,
     )
 
-    # Correção (revisão v49): sobreposição de NU_NOTIFIC por chave composta.
-    # A numeração da notificação costuma ser única apenas dentro de um escopo
-    # administrativo (ano/município), então repetição simples do número gera
-    # falso positivo de duplicidade. Aqui separamos duplicidade provável (mesmo
-    # número no mesmo ano/município) do mero reuso de numeração.
     if nu_col:
-        muni_col = choose_candidate(
-            columns,
-            ["ID_MUNICIP", "ID_MN_OCORR", "CODMUNOCOR", "ID_MN_RESI", "CODMUNRES", "MUNIC_MOV", "MUNIC_RES"],
+        duplicate_records = query_sinan_nu_notific_duplicate_records(
+            table,
+            nu_col,
+            base_where,
+            exprs,
+            patient_col=nm_col,
+            municipality_col=muni_col,
         )
+        if not duplicate_records.empty:
+            st.markdown("**Todos os registros envolvidos na sobreposição simples de `NU_NOTIFIC`**")
+            st.caption(
+                "Esta é a tabela de conferência do gráfico: mantém uma linha por registro, sem amostragem e sem "
+                "limite de download. Assim, o CSV identifica exatamente todas as ocorrências de números de "
+                "notificação repetidos no recorte filtrado."
+            )
+            copyable_dataframe(duplicate_records, width="stretch", hide_index=True)
+            download_button(
+                duplicate_records,
+                "sinan_sobreposicao_nu_notific_todos_os_registros.csv",
+                label="Baixar CSV completo de todos os registros repetidos",
+                max_rows=0,
+            )
+
         composite_summary, key_desc = query_sinan_overlap_composite_summary(
-            table, nu_col, base_where, exprs, municipality_col=muni_col,
+            table,
+            nu_col,
+            base_where,
+            exprs,
+            municipality_col=muni_col,
         )
+        composite_details, _ = query_sinan_overlap_composite_details(
+            table,
+            nu_col,
+            base_where,
+            exprs,
+            municipality_col=muni_col,
+            patient_col=nm_col,
+        )
+
         st.markdown("#### Duplicidade provável × reuso de numeração (chave composta)")
         st.caption(
             "Chave composta usada: " + " + ".join(f"`{k}`" for k in key_desc)
-            + ". Compara a repetição simples do `NU_NOTIFIC` com a repetição da chave composta, "
-            "para separar duplicidade provável (mesmo número no mesmo ano/município) de reuso "
-            "legítimo da numeração em anos/municípios diferentes."
+            + ". O gráfico simples acima é uma triagem visual de qualquer repetição do número; esta análise "
+            "não é redundante, porque usa ano/município para classificar cada registro como duplicidade provável "
+            "ou reuso de numeração em outro contexto administrativo."
         )
+
         if composite_summary is None or composite_summary.empty:
             st.info(
                 "Não foi possível construir a chave composta (faltam data e/ou município no recorte). "
@@ -9409,38 +9737,84 @@ def render_sinan_overlap_tab(table: LoadedTable, base_where: str, exprs: Dict[st
         else:
             crow = composite_summary.iloc[0]
             simples = int(crow.get("registros_sobrepostos_simples", 0) or 0)
-            composta = int(crow.get("registros_sobrepostos_composta", 0) or 0)
-            apenas_reuso = max(simples - composta, 0)
+            duplicidade = int(crow.get("registros_duplicidade_provavel", 0) or 0)
+            reuso = int(crow.get("registros_reuso_numeracao", 0) or 0)
             m1, m2, m3 = st.columns(3)
             m1.metric(
                 "Sobrepostos por número simples",
                 f"{simples:,}".replace(",", "."),
-                help="Registros cujo NU_NOTIFIC se repete, sem considerar ano/município.",
+                help="Todos os registros cujo NU_NOTIFIC se repete, antes de considerar ano/município.",
             )
             m2.metric(
-                "Duplicidade provável (chave composta)",
-                f"{composta:,}".replace(",", "."),
-                help="Registros com mesmo NU_NOTIFIC no mesmo ano/município.",
+                "Duplicidade provável",
+                f"{duplicidade:,}".replace(",", "."),
+                help="Registros cuja chave composta NU_NOTIFIC + ano/município também se repete.",
             )
             m3.metric(
-                "Apenas reuso de numeração",
-                f"{apenas_reuso:,}".replace(",", "."),
-                help="Repetem o NU_NOTIFIC, mas em ano/município diferentes; provavelmente não são duplicidade.",
+                "Reuso de numeração",
+                f"{reuso:,}".replace(",", "."),
+                help="Registros de número repetido cuja chave composta aparece uma única vez.",
             )
-            if simples > 0 and apenas_reuso > 0:
+
+            if simples > 0:
                 st.caption(
-                    f"⚠️ Dos {simples:,}".replace(",", ".")
-                    + f" registros sinalizados pela sobreposição simples, {apenas_reuso:,}".replace(",", ".")
-                    + " são provavelmente reuso de numeração (ano/município distintos), não duplicidade real. "
-                    "Use a chave composta como triagem mais específica."
+                    f"Dos {simples:,} registros com número repetido, {duplicidade:,} foram classificados como "
+                    f"duplicidade provável e {reuso:,} como reuso de numeração. "
+                    "A classificação é uma triagem administrativa e deve ser revisada com os demais campos."
+                    .replace(",", ".")
                 )
+
             copyable_dataframe(composite_summary, width="stretch", hide_index=True)
-            download_button(composite_summary, "sinan_sobreposicao_nu_notific_chave_composta.csv")
+            download_button(
+                composite_summary,
+                "sinan_sobreposicao_nu_notific_chave_composta_resumo.csv",
+                label="Baixar resumo da chave composta",
+            )
+
+            if composite_details is None or composite_details.empty:
+                st.success("Não há registros repetidos para classificar pela chave composta no recorte atual.")
+            else:
+                class_order = ["Duplicidade provável", "Reuso de numeração"]
+                classification_summary = (
+                    composite_details.groupby("classificacao_sobreposicao", dropna=False)
+                    .agg(
+                        registros=("nu_notific", "size"),
+                        numeros_notificacao_distintos=("nu_notific", "nunique"),
+                        chaves_compostas_distintas=("chave_composta", "nunique"),
+                    )
+                    .reindex(class_order, fill_value=0)
+                    .rename_axis("classificacao_sobreposicao")
+                    .reset_index()
+                )
+                st.markdown("**Resumo por classificação**")
+                copyable_dataframe(classification_summary, width="stretch", hide_index=True)
+                download_button(
+                    classification_summary,
+                    "sinan_nu_notific_duplicidade_provavel_reuso_resumo.csv",
+                    label="Baixar CSV do resumo por classificação",
+                    max_rows=0,
+                )
+
+                st.markdown("**Casos classificados: duplicidade provável e reuso de numeração**")
+                st.caption(
+                    "A tabela abaixo contém uma linha por registro repetido e informa a classe, a chave composta, "
+                    "as contagens do número e da chave, os campos de contexto e um alerta quando a chave está "
+                    "incompleta. O CSV não é truncado pelo limite genérico de downloads."
+                )
+                copyable_dataframe(composite_details, width="stretch", hide_index=True)
+                download_button(
+                    composite_details,
+                    "sinan_nu_notific_duplicidade_provavel_reuso_casos.csv",
+                    label="Baixar CSV completo dos casos classificados",
+                    max_rows=0,
+                )
 
     st.markdown("---")
 
     render_overlap_block(
-        table, base_where, exprs,
+        table,
+        base_where,
+        exprs,
         col_name="NM_PACIENT",
         candidates=["NM_PACIENT", "NOME_PACIENTE", "NM_PACIENTE", "PACIENTE"],
         value_label="nm_pacient",
@@ -9448,6 +9822,7 @@ def render_sinan_overlap_tab(table: LoadedTable, base_where: str, exprs: Dict[st
         file_slug="nm_pacient",
         extra_cols=[(clean_str_expr(nu_col), "nu_notific")] if nu_col else None,
     )
+
 
 def render_indicators_tab(table: LoadedTable, source: str, base_where: str, graph_where: str, exprs: Dict[str, Optional[str]]) -> None:
     def br_int(value: object) -> str:
