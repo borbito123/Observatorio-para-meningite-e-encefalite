@@ -6,7 +6,8 @@ O app aceita upload de DuckDB, Parquet, CSV ou DBF, além de bancos hospedados n
 Parquet, calcula indicadores descritivos e separa:
 - CID-10 bruto do caso/óbito/atendimento;
 - classificação epidemiológica específica do SINAN, especialmente CON_DIAGES;
-- definições operacionais de série: total de notificações, confirmados, descartados e sem classificação/ignorados.
+- definições operacionais de série: total de notificações, confirmados, descartados e sem classificação/ignorados;
+- sobreposição multicritério de NU_NOTIFIC/NM_PACIENT, com comparação par a par de identidade, datas e classificação etiológica.
 
 Arquivos CSV e DBF enviados são convertidos internamente para Parquet (mantendo todos os
 campos como texto, para preservar zeros à esquerda em identificadores como NU_NOTIFIC) e passam
@@ -67,7 +68,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-07-23-v49r4-sobreposicao-auditada"
+APP_VERSION = "2026-07-24-v50-sobreposicao-multicriterio"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos
@@ -2215,6 +2216,7 @@ SOURCE_CONFIG: Dict[str, SourceConfig] = {
         field_notes=[
             "No recorte enviado, o SINAN tende a ter ID_AGRAVO constante como G039.",
             "Para etiologia/forma clínica no SINAN, priorize CON_DIAGES; complemente com CLA_ME_BAC, CLA_ME_ASS, CLA_ME_ETI, CRITERIO e EVOLUCAO.",
+            "Na área de sobreposição, NU_NOTIFIC/NM_PACIENT apenas iniciam a triagem; ANO_NASC, CS_SEXO, DT_NOTIFIC, DT_DIGITA, DT_INVEST, ATE_INTERN, DT_SIN_PRI, CLASSI_FIN e CON_DIAGES determinam a classificação multicritério.",
             "G04.2 não é inferido por CON_DIAGES=05; a classificação de 'outras bactérias' é refinada como G00 ou G01 conforme CLA_ME_BAC e campos complementares.",
         ],
     ),
@@ -2263,7 +2265,9 @@ FIELD_GUIDE = {
     "SINAN": [
         ("DT_SIN_PRI", "data principal", "início dos sintomas"),
         ("DT_NOTIFIC", "data alternativa", "notificação"),
-        ("NU_NOTIFIC", "identificador operacional", "número da notificação; usado para verificar sobreposição e possíveis duplicidades"),
+        ("DT_DIGITA / DT_INVEST / ATE_INTERN", "cronologia da sobreposição", "primeira digitação, início da investigação e internação; diferenças em dias ajudam a separar cópia de outro atendimento"),
+        ("ANO_NASC + CS_SEXO", "identidade demográfica", "verificam compatibilidade de ano de nascimento e sexo entre registros repetidos"),
+        ("NU_NOTIFIC", "identificador operacional", "inicia a triagem de sobreposição; a classificação compara também NM_PACIENT, ANO_NASC, CS_SEXO, datas, CLASSI_FIN e CON_DIAGES"),
         ("CLASSI_FIN", "definição de caso", "confirmado, descartado; demais valores/ausência são tratados como sem classificação"),
         ("CON_DIAGES", "etiologia/forma", "conclusão diagnóstica específica"),
         ("CLA_ME_BAC", "bactéria em outras bacterianas", "refina CON_DIAGES=05 em G00 ou G01"),
@@ -9124,9 +9128,14 @@ def query_sinan_overlap_summary(
     table: LoadedTable,
     target_col: str,
     where_sql: str,
+    target_expr_override: Optional[str] = None,
 ) -> pd.DataFrame:
-    """Resumo de sobreposição (valores repetidos) para uma coluna genérica (ex.: NU_NOTIFIC, NM_PACIENT)."""
-    target_expr = clean_str_expr(target_col)
+    """Resumo de sobreposição para uma coluna genérica.
+
+    ``target_expr_override`` permite que NM_PACIENT seja contado com a mesma
+    normalização usada na comparação multicritério, sem alterar o valor bruto.
+    """
+    target_expr = target_expr_override or clean_str_expr(target_col)
     sql = f"""
         WITH base AS (
             SELECT {target_expr} AS valor_alvo
@@ -9237,7 +9246,922 @@ def query_sinan_overlap_details(
     """
     return run_query(table, sql)
 
+# =============================================================================
+# Sobreposição SINAN — classificação multicritério por pares
+# =============================================================================
+# NU_NOTIFIC e NM_PACIENT funcionam como chaves de triagem. A classificação final
+# compara identidade, cronologia e investigação entre cada par de registros da
+# mesma chave candidata. Os limites temporais são parâmetros explícitos da interface.
 
+SINAN_OVERLAP_DATE_FIELDS: Tuple[Tuple[str, str], ...] = (
+    ("DT_NOTIFIC", "data_notificacao"),
+    ("DT_DIGITA", "data_digitacao"),
+    ("DT_INVEST", "data_investigacao"),
+    ("ATE_INTERN", "data_internacao"),
+    ("DT_SIN_PRI", "data_primeiros_sintomas"),
+)
+DEFAULT_SINAN_OVERLAP_CLOSE_DAYS = 7
+DEFAULT_SINAN_OVERLAP_DISTINCT_DAYS = 90
+DEFAULT_SINAN_OVERLAP_MIN_DATES = 2
+DEFAULT_SINAN_OVERLAP_MAX_PAIRS = 50000
+DEFAULT_SINAN_OVERLAP_MAX_PAIRS_PER_KEY = 5000
+
+
+def _sinan_overlap_group_expr(target_col: str, candidate_type: str) -> str:
+    """Expressão de agrupamento da chave candidata, preservando o valor bruto na saída."""
+    if candidate_type == "name":
+        return _normalized_identity_expr(target_col)
+    return clean_str_expr(target_col)
+
+
+def _sinan_overlap_birth_year_expr(context_cols: Dict[str, Optional[str]]) -> str:
+    """Usa ANO_NASC quando presente; deriva o ano de DT_NASC apenas como fallback."""
+    birth_year_col = context_cols.get("birth_year")
+    if birth_year_col:
+        code = clean_code_expr(birth_year_col)
+        parsed = f"TRY_CAST(({code}) AS INTEGER)"
+        return f"CASE WHEN {parsed} BETWEEN 1800 AND 2100 THEN {parsed} ELSE NULL END"
+    birth_date_col = context_cols.get("birth_date")
+    if birth_date_col:
+        birth_date_sql = date_expr(birth_date_col)
+        return f"EXTRACT(YEAR FROM ({birth_date_sql}))"
+    return "NULL"
+
+
+def _sinan_overlap_context_date_expr(
+    context_cols: Dict[str, Optional[str]],
+    key: str,
+    fallback: Optional[str] = None,
+) -> str:
+    col = context_cols.get(key)
+    if col:
+        return date_expr(col)
+    return fallback or "NULL"
+
+
+def query_sinan_overlap_candidate_records(
+    table: LoadedTable,
+    target_col: str,
+    where_sql: str,
+    exprs: Dict[str, Optional[str]],
+    context_cols: Dict[str, Optional[str]],
+    *,
+    candidate_type: str,
+) -> pd.DataFrame:
+    """Retorna todos os registros pertencentes a uma chave candidata repetida.
+
+    ``candidate_type`` deve ser ``"notification"`` para NU_NOTIFIC ou ``"name"``
+    para NM_PACIENT. A repetição de nome usa comparação normalizada de caixa e
+    espaços; o valor original continua disponível para auditoria.
+    """
+    target_raw_sql = clean_str_expr(target_col)
+    target_group_sql = _sinan_overlap_group_expr(target_col, candidate_type)
+
+    nu_col = context_cols.get("nu_notific")
+    patient_col = context_cols.get("patient")
+    birth_date_col = context_cols.get("birth_date")
+    sex_col = context_cols.get("sex")
+    agravo_col = context_cols.get("agravo")
+    municipality_col = context_cols.get("municipality_notification")
+    unit_col = context_cols.get("notification_unit")
+    municipality_res_col = context_cols.get("municipality_residence")
+    classi_col = context_cols.get("classification_final")
+    con_col = context_cols.get("diagnosis_conclusion")
+    criterio_col = context_cols.get("confirmation_criterion")
+    evol_col = context_cols.get("outcome")
+
+    nu_sql = clean_str_expr(nu_col) if nu_col else "NULL"
+    patient_sql = clean_str_expr(patient_col) if patient_col else "NULL"
+    birth_date_sql = date_expr(birth_date_col) if birth_date_col else "NULL"
+    birth_year_sql = _sinan_overlap_birth_year_expr(context_cols)
+    sex_sql = clean_code_expr(sex_col) if sex_col else "NULL"
+    agravo_sql = clean_str_expr(agravo_col) if agravo_col else "NULL"
+    municipality_sql = clean_str_expr(municipality_col) if municipality_col else "NULL"
+    unit_sql = clean_str_expr(unit_col) if unit_col else "NULL"
+    municipality_res_sql = clean_str_expr(municipality_res_col) if municipality_res_col else "NULL"
+
+    dt_notification_sql = _sinan_overlap_context_date_expr(
+        context_cols, "date_notification", exprs.get("dt_notificacao")
+    )
+    dt_entry_sql = _sinan_overlap_context_date_expr(context_cols, "date_entry")
+    dt_investigation_sql = _sinan_overlap_context_date_expr(context_cols, "date_investigation")
+    dt_hospitalization_sql = _sinan_overlap_context_date_expr(context_cols, "date_hospitalization")
+    dt_symptom_sql = _sinan_overlap_context_date_expr(
+        context_cols, "date_symptom", exprs.get("dt_sin_pri")
+    )
+    dt_closure_sql = _sinan_overlap_context_date_expr(
+        context_cols, "date_closure", exprs.get("dt_encerramento")
+    )
+
+    classi_code_sql = clean_code_expr(classi_col) if classi_col else "NULL"
+    con_code_sql = clean_code_expr(con_col, pad2=True) if con_col else "NULL"
+    criterio_code_sql = clean_code_expr(criterio_col) if criterio_col else "NULL"
+    evol_code_sql = clean_code_expr(evol_col) if evol_col else "NULL"
+    classi_label_sql = exprs.get("classi_label") or classi_code_sql
+    con_label_sql = exprs.get("con_label") or con_code_sql
+    con_group_sql = exprs.get("con_group") or "NULL"
+    criterio_label_sql = exprs.get("criterio_label") or criterio_code_sql
+    evol_label_sql = exprs.get("evol_label") or evol_code_sql
+
+    chronology_sql = _sinan_chronology_alert_expr(
+        dt_symptom_sql if dt_symptom_sql != "NULL" else None,
+        dt_notification_sql if dt_notification_sql != "NULL" else None,
+        dt_investigation_sql if dt_investigation_sql != "NULL" else None,
+        dt_closure_sql if dt_closure_sql != "NULL" else None,
+    )
+
+    sql = f"""
+        WITH base AS (
+            SELECT
+                ROW_NUMBER() OVER () AS id_registro_fonte,
+                {target_raw_sql} AS valor_candidato,
+                {target_group_sql} AS chave_candidata,
+                {nu_sql} AS nu_notific,
+                {patient_sql} AS nm_pacient,
+                {birth_date_sql} AS data_nascimento,
+                {birth_year_sql} AS ano_nascimento,
+                {sex_sql} AS sexo,
+                {dt_notification_sql} AS data_notificacao,
+                {dt_entry_sql} AS data_digitacao,
+                {dt_investigation_sql} AS data_investigacao,
+                {dt_hospitalization_sql} AS data_internacao,
+                {dt_symptom_sql} AS data_primeiros_sintomas,
+                {dt_closure_sql} AS data_encerramento,
+                {classi_code_sql} AS classi_fin_codigo,
+                {classi_label_sql} AS classificacao_final,
+                {con_code_sql} AS con_diages_codigo,
+                {con_label_sql} AS conclusao_diagnostica,
+                {con_group_sql} AS grupo_etiologico,
+                {criterio_code_sql} AS criterio_codigo,
+                {criterio_label_sql} AS criterio_confirmacao,
+                {evol_code_sql} AS evolucao_codigo,
+                {evol_label_sql} AS evolucao,
+                {agravo_sql} AS id_agravo,
+                {municipality_sql} AS municipio_notificacao,
+                {unit_sql} AS unidade_notificadora,
+                {municipality_res_sql} AS municipio_residencia,
+                {chronology_sql} AS alerta_cronologia
+            FROM {table.ref_sql}
+            {where_sql}
+        ), valid AS (
+            SELECT *
+            FROM base
+            WHERE chave_candidata IS NOT NULL
+        ), marcados AS (
+            SELECT
+                *,
+                COUNT(*) OVER (PARTITION BY chave_candidata) AS registros_mesma_chave_candidata
+            FROM valid
+        )
+        SELECT
+            ROW_NUMBER() OVER (
+                ORDER BY chave_candidata, data_primeiros_sintomas NULLS LAST,
+                         data_notificacao NULLS LAST, data_digitacao NULLS LAST,
+                         id_registro_fonte
+            ) AS ordem_exportacao,
+            *
+        FROM marcados
+        WHERE registros_mesma_chave_candidata > 1
+        ORDER BY ordem_exportacao
+    """
+    return run_query(table, sql, cache=False)
+
+
+def _overlap_scalar(value: object) -> Optional[object]:
+    """Converte ausências heterogêneas do pandas/SQL em ``None``."""
+    if value is None:
+        return None
+    try:
+        if bool(pd.isna(value)):
+            return None
+    except Exception:
+        pass
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if not cleaned or cleaned.upper() in {"NA", "N/A", "NAN", "NONE", "NULL", "<NA>"}:
+            return None
+        return cleaned
+    return value
+
+
+def _overlap_text(value: object) -> Optional[str]:
+    scalar = _overlap_scalar(value)
+    if scalar is None:
+        return None
+    return str(scalar).strip()
+
+
+def _overlap_name(value: object) -> Optional[str]:
+    text = _overlap_text(value)
+    if text is None:
+        return None
+    normalized = normalize_name(text)
+    return normalized or None
+
+
+def _overlap_code(value: object, *, pad2: bool = False) -> Optional[str]:
+    text = _overlap_text(value)
+    if text is None:
+        return None
+    text = re.sub(r"[\.,]0+$", "", text)
+    text = re.sub(r"[^0-9A-Z]", "", text.upper())
+    if not text:
+        return None
+    if pad2 and len(text) == 1:
+        text = "0" + text
+    return text
+
+
+def _overlap_year(value: object) -> Optional[int]:
+    scalar = _overlap_scalar(value)
+    if scalar is None:
+        return None
+    try:
+        year = int(float(str(scalar).replace(",", ".")))
+    except Exception:
+        return None
+    return year if 1800 <= year <= 2100 else None
+
+
+def _overlap_date(value: object) -> Optional[pd.Timestamp]:
+    scalar = _overlap_scalar(value)
+    if scalar is None:
+        return None
+    try:
+        if isinstance(scalar, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", scalar.strip()):
+            parsed = pd.to_datetime(scalar, format="%Y-%m-%d", errors="coerce")
+        elif isinstance(scalar, str) and re.fullmatch(r"\d{8}", scalar.strip()):
+            text = scalar.strip()
+            fmt = "%Y%m%d" if 1900 <= int(text[:4]) <= 2099 else "%d%m%Y"
+            parsed = pd.to_datetime(text, format=fmt, errors="coerce")
+        else:
+            parsed = pd.to_datetime(scalar, errors="coerce", dayfirst=True)
+    except Exception:
+        return None
+    if pd.isna(parsed):
+        return None
+    return pd.Timestamp(parsed).normalize()
+
+
+def _overlap_compare(
+    left: object,
+    right: object,
+    normalizer,
+) -> Optional[bool]:
+    left_norm = normalizer(left)
+    right_norm = normalizer(right)
+    if left_norm is None or right_norm is None:
+        return None
+    return bool(left_norm == right_norm)
+
+
+def _overlap_status_label(status: Optional[bool], *, normalized_name: bool = False) -> str:
+    if status is True:
+        return "Igual após normalização" if normalized_name else "Igual"
+    if status is False:
+        return "Diferente"
+    return "Não comparável"
+
+
+def _overlap_pair_definition(label: str) -> str:
+    definitions = {
+        "Duplicidade provável": (
+            "Identidade compatível e diferenças temporais curtas em número suficiente de campos, "
+            "sem mudança efetiva em CLASSI_FIN/CON_DIAGES."
+        ),
+        "Reuso de numeração provável — outro paciente": (
+            "NU_NOTIFIC repetido, mas NM_PACIENT, ANO_NASC ou CS_SEXO diverge entre os registros."
+        ),
+        "Reuso de numeração provável — outro atendimento": (
+            "NU_NOTIFIC repetido com grande distância temporal ou mudança efetiva em CLASSI_FIN/CON_DIAGES."
+        ),
+        "Repetição de nome provável — homônimo/outro paciente": (
+            "NM_PACIENT repetido, mas ANO_NASC ou CS_SEXO diverge entre os registros."
+        ),
+        "Repetição de nome provável — outro atendimento": (
+            "NM_PACIENT repetido com grande distância temporal ou mudança efetiva em CLASSI_FIN/CON_DIAGES."
+        ),
+        "Possível duplicidade — revisão manual": (
+            "As evidências não sustentam nem afastam suficientemente a duplicidade; revisar os registros originais."
+        ),
+        "Indeterminado — dados insuficientes": (
+            "Não há preenchimento suficiente dos critérios de identidade e/ou das datas comparáveis."
+        ),
+    }
+    return definitions.get(label, "Classificação multicritério para triagem e revisão manual.")
+
+
+def classify_sinan_overlap_pairs(
+    records: pd.DataFrame,
+    *,
+    candidate_type: str,
+    close_days: int,
+    distinct_days: int,
+    min_comparable_dates: int,
+    max_pairs: int,
+    max_pairs_per_key: int,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Compara pares da mesma chave candidata e aplica regras transparentes.
+
+    Hierarquia de decisão:
+    1. conflito de identidade (nome, ano de nascimento ou sexo, conforme a chave);
+    2. mudança efetiva de CLASSI_FIN ou CON_DIAGES;
+    3. grande distância temporal em qualquer dos cinco campos solicitados;
+    4. duplicidade provável somente com identidade completa e todas as datas
+       comparáveis dentro da janela curta;
+    5. demais situações seguem para revisão manual ou ficam indeterminadas.
+    """
+    close_days = max(0, int(close_days))
+    distinct_days = max(close_days + 1, int(distinct_days))
+    min_comparable_dates = max(1, min(len(SINAN_OVERLAP_DATE_FIELDS), int(min_comparable_dates)))
+    max_pairs = max(1, int(max_pairs))
+    max_pairs_per_key = max(1, int(max_pairs_per_key))
+
+    coverage_columns = [
+        "chaves_candidatas_repetidas",
+        "registros_candidatos",
+        "pares_teoricos",
+        "pares_classificados",
+        "pares_omitidos_por_limite",
+        "chaves_com_pares_limitados",
+        "limite_total_pares",
+        "limite_pares_por_chave",
+    ]
+    if records is None or records.empty:
+        return pd.DataFrame(), pd.DataFrame([{col: 0 for col in coverage_columns}])
+
+    work = records.copy()
+    if "chave_candidata" not in work.columns:
+        return pd.DataFrame(), pd.DataFrame([{col: 0 for col in coverage_columns}])
+
+    work = work[work["chave_candidata"].notna()].copy()
+    groups = [(str(key), group.copy()) for key, group in work.groupby("chave_candidata", sort=True, dropna=True)]
+    groups = [(key, group) for key, group in groups if len(group) > 1]
+    theoretical_pairs = int(sum((len(group) * (len(group) - 1)) // 2 for _key, group in groups))
+
+    pair_rows: List[Dict[str, object]] = []
+    limited_keys = 0
+    generated_total = 0
+
+    for key, group in groups:
+        sort_cols = [
+            col
+            for col in (
+                "data_primeiros_sintomas",
+                "data_notificacao",
+                "data_investigacao",
+                "data_internacao",
+                "data_digitacao",
+                "id_registro_fonte",
+            )
+            if col in group.columns
+        ]
+        if sort_cols:
+            group = group.sort_values(sort_cols, na_position="last", kind="stable")
+        rows = group.to_dict("records")
+        group_theoretical = (len(rows) * (len(rows) - 1)) // 2
+        group_generated = 0
+
+        for left_idx in range(len(rows) - 1):
+            if generated_total >= max_pairs or group_generated >= max_pairs_per_key:
+                break
+            left = rows[left_idx]
+            for right_idx in range(left_idx + 1, len(rows)):
+                if generated_total >= max_pairs or group_generated >= max_pairs_per_key:
+                    break
+                right = rows[right_idx]
+
+                name_status = _overlap_compare(left.get("nm_pacient"), right.get("nm_pacient"), _overlap_name)
+                nu_status = _overlap_compare(left.get("nu_notific"), right.get("nu_notific"), _overlap_text)
+                birth_status = _overlap_compare(left.get("ano_nascimento"), right.get("ano_nascimento"), _overlap_year)
+                sex_status = _overlap_compare(
+                    left.get("sexo"), right.get("sexo"), lambda value: (_overlap_code(value) or None)
+                )
+                classi_status = _overlap_compare(
+                    left.get("classi_fin_codigo"), right.get("classi_fin_codigo"), _overlap_code
+                )
+                con_status = _overlap_compare(
+                    left.get("con_diages_codigo"),
+                    right.get("con_diages_codigo"),
+                    lambda value: _overlap_code(value, pad2=True),
+                )
+
+                gaps: Dict[str, Optional[int]] = {}
+                for field_label, column_name in SINAN_OVERLAP_DATE_FIELDS:
+                    left_date = _overlap_date(left.get(column_name))
+                    right_date = _overlap_date(right.get(column_name))
+                    gaps[field_label] = (
+                        abs(int((right_date - left_date).days))
+                        if left_date is not None and right_date is not None
+                        else None
+                    )
+
+                comparable_gaps = {field: gap for field, gap in gaps.items() if gap is not None}
+                close_fields = [field for field, gap in comparable_gaps.items() if gap <= close_days]
+                distant_fields = [field for field, gap in comparable_gaps.items() if gap > distinct_days]
+                intermediate_fields = [
+                    field for field, gap in comparable_gaps.items() if close_days < gap <= distinct_days
+                ]
+                max_gap_field = None
+                max_gap = None
+                if comparable_gaps:
+                    max_gap_field, max_gap = max(comparable_gaps.items(), key=lambda item: (item[1], item[0]))
+
+                identity_conflicts: List[str] = []
+                if candidate_type == "notification" and name_status is False:
+                    identity_conflicts.append("NM_PACIENT")
+                if birth_status is False:
+                    identity_conflicts.append("ANO_NASC")
+                if sex_status is False:
+                    identity_conflicts.append("CS_SEXO")
+
+                investigation_conflicts: List[str] = []
+                if classi_status is False:
+                    investigation_conflicts.append("CLASSI_FIN")
+                if con_status is False:
+                    investigation_conflicts.append("CON_DIAGES")
+
+                required_identity_statuses: List[Optional[bool]] = [birth_status, sex_status]
+                if candidate_type == "notification":
+                    required_identity_statuses.insert(0, name_status)
+                identity_complete_and_equal = bool(required_identity_statuses) and all(
+                    status is True for status in required_identity_statuses
+                )
+                identity_compared = sum(status is not None for status in required_identity_statuses)
+                identity_equal = sum(status is True for status in required_identity_statuses)
+
+                dates_compared = len(comparable_gaps)
+                all_dates_close = (
+                    dates_compared >= min_comparable_dates and len(close_fields) == dates_compared
+                )
+                any_date_distant = bool(distant_fields)
+
+                # Para repetição de nome, NU_NOTIFIC igual é evidência adicional. Quando o
+                # número difere/está ausente, exigem-se pelo menos três datas próximas para
+                # classificar duplicidade provável, reduzindo falsos positivos por homônimo.
+                name_candidate_support = (
+                    candidate_type != "name"
+                    or nu_status is True
+                    or dates_compared >= max(3, min_comparable_dates)
+                )
+
+                if identity_conflicts:
+                    if candidate_type == "notification":
+                        classification = "Reuso de numeração provável — outro paciente"
+                    else:
+                        classification = "Repetição de nome provável — homônimo/outro paciente"
+                    broad_class = "Não duplicidade provável"
+                    main_reason = "Conflito de identidade em " + ", ".join(identity_conflicts) + "."
+                elif investigation_conflicts:
+                    if candidate_type == "notification":
+                        classification = "Reuso de numeração provável — outro atendimento"
+                    else:
+                        classification = "Repetição de nome provável — outro atendimento"
+                    broad_class = "Não duplicidade provável"
+                    main_reason = (
+                        "Mudança efetiva em "
+                        + ", ".join(investigation_conflicts)
+                        + "; os dois registros são tratados como atendimentos/classificações distintos."
+                    )
+                elif any_date_distant:
+                    if candidate_type == "notification":
+                        classification = "Reuso de numeração provável — outro atendimento"
+                    else:
+                        classification = "Repetição de nome provável — outro atendimento"
+                    broad_class = "Não duplicidade provável"
+                    main_reason = (
+                        f"Diferença temporal superior a {distinct_days} dias em "
+                        + ", ".join(distant_fields)
+                        + "."
+                    )
+                elif all_dates_close and identity_complete_and_equal and name_candidate_support:
+                    classification = "Duplicidade provável"
+                    broad_class = "Duplicidade provável"
+                    main_reason = (
+                        f"Identidade compatível e {dates_compared} campo(s) temporal(is) dentro de "
+                        f"{close_days} dia(s), sem mudança em CLASSI_FIN/CON_DIAGES."
+                    )
+                elif dates_compared == 0 and identity_compared == 0:
+                    classification = "Indeterminado — dados insuficientes"
+                    broad_class = "Revisão manual"
+                    main_reason = "Sem datas comparáveis e sem identidade demográfica suficiente."
+                elif dates_compared < min_comparable_dates:
+                    classification = "Indeterminado — dados insuficientes"
+                    broad_class = "Revisão manual"
+                    main_reason = (
+                        f"Somente {dates_compared} data(s) comparável(is); o mínimo configurado é "
+                        f"{min_comparable_dates}."
+                    )
+                else:
+                    classification = "Possível duplicidade — revisão manual"
+                    broad_class = "Revisão manual"
+                    if intermediate_fields:
+                        main_reason = (
+                            "Diferença temporal intermediária em "
+                            + ", ".join(intermediate_fields)
+                            + "; revisar o episódio original."
+                        )
+                    elif not identity_complete_and_equal:
+                        main_reason = "Datas próximas, porém ANO_NASC/CS_SEXO ou o campo complementar estão incompletos."
+                    elif candidate_type == "name" and not name_candidate_support:
+                        main_reason = "Nome e identidade compatíveis, mas NU_NOTIFIC difere e há poucas datas comparáveis."
+                    else:
+                        main_reason = "Evidências mistas ou incompletas; revisar manualmente."
+
+                priority = (
+                    "Alta"
+                    if classification == "Duplicidade provável"
+                    else "Média"
+                    if broad_class == "Revisão manual"
+                    else "Baixa"
+                )
+
+                temporal_evidence = "; ".join(
+                    f"{field}={gap} dia(s)" for field, gap in comparable_gaps.items()
+                ) or "Nenhuma das cinco datas pôde ser comparada"
+                identity_evidence = "; ".join(
+                    [
+                        f"NM_PACIENT={_overlap_status_label(name_status, normalized_name=True)}",
+                        f"ANO_NASC={_overlap_status_label(birth_status)}",
+                        f"CS_SEXO={_overlap_status_label(sex_status)}",
+                        f"NU_NOTIFIC={_overlap_status_label(nu_status)}",
+                    ]
+                )
+                investigation_evidence = "; ".join(
+                    [
+                        f"CLASSI_FIN={_overlap_status_label(classi_status)}",
+                        f"CON_DIAGES={_overlap_status_label(con_status)}",
+                    ]
+                )
+
+                pair_row: Dict[str, object] = {
+                    "classificacao_sobreposicao": classification,
+                    "classe_ampla": broad_class,
+                    "definicao_operacional": _overlap_pair_definition(classification),
+                    "prioridade_revisao": priority,
+                    "motivo_principal": main_reason,
+                    "chave_candidata": left.get("valor_candidato") or right.get("valor_candidato") or key,
+                    "chave_candidata_normalizada": key,
+                    "registros_na_chave": len(rows),
+                    "id_registro_a": left.get("id_registro_fonte"),
+                    "id_registro_b": right.get("id_registro_fonte"),
+                    "status_nm_pacient": _overlap_status_label(name_status, normalized_name=True),
+                    "status_nu_notific": _overlap_status_label(nu_status),
+                    "status_ano_nasc": _overlap_status_label(birth_status),
+                    "status_cs_sexo": _overlap_status_label(sex_status),
+                    "status_classi_fin": _overlap_status_label(classi_status),
+                    "status_con_diages": _overlap_status_label(con_status),
+                    "conflito_identidade": bool(identity_conflicts),
+                    "campos_identidade_divergentes": "; ".join(identity_conflicts) or "Nenhum",
+                    "mudanca_classificacao_etiologia": bool(investigation_conflicts),
+                    "campos_classificacao_etiologia_divergentes": (
+                        "; ".join(investigation_conflicts) or "Nenhum"
+                    ),
+                    "campos_identidade_comparados": identity_compared,
+                    "campos_identidade_concordantes": identity_equal,
+                    "datas_comparaveis": dates_compared,
+                    "datas_proximas": len(close_fields),
+                    "datas_intermediarias": len(intermediate_fields),
+                    "datas_distantes": len(distant_fields),
+                    "maior_diferenca_dias": max_gap,
+                    "campo_maior_diferenca": max_gap_field,
+                    "campos_temporais_proximos": "; ".join(close_fields) or "Nenhum",
+                    "campos_temporais_intermediarios": "; ".join(intermediate_fields) or "Nenhum",
+                    "campos_temporais_distantes": "; ".join(distant_fields) or "Nenhum",
+                    "evidencia_temporal": temporal_evidence,
+                    "evidencia_identidade": identity_evidence,
+                    "evidencia_classificacao_etiologia": investigation_evidence,
+                    "janela_curta_dias": close_days,
+                    "limite_outro_atendimento_dias": distinct_days,
+                    "minimo_datas_comparaveis": min_comparable_dates,
+                }
+                for field_label, _column_name in SINAN_OVERLAP_DATE_FIELDS:
+                    pair_row[f"dif_dias_{field_label.lower()}"] = gaps[field_label]
+
+                paired_columns = [
+                    "nu_notific",
+                    "nm_pacient",
+                    "ano_nascimento",
+                    "sexo",
+                    "data_notificacao",
+                    "data_digitacao",
+                    "data_investigacao",
+                    "data_internacao",
+                    "data_primeiros_sintomas",
+                    "classi_fin_codigo",
+                    "classificacao_final",
+                    "con_diages_codigo",
+                    "conclusao_diagnostica",
+                    "grupo_etiologico",
+                    "id_agravo",
+                    "municipio_notificacao",
+                    "unidade_notificadora",
+                    "municipio_residencia",
+                    "alerta_cronologia",
+                ]
+                for column in paired_columns:
+                    pair_row[f"{column}_a"] = left.get(column)
+                    pair_row[f"{column}_b"] = right.get(column)
+
+                pair_rows.append(pair_row)
+                generated_total += 1
+                group_generated += 1
+
+        if group_generated < group_theoretical:
+            limited_keys += 1
+
+    pairs = pd.DataFrame(pair_rows)
+    if not pairs.empty:
+        priority_order = {"Alta": 1, "Média": 2, "Baixa": 3}
+        broad_order = {"Duplicidade provável": 1, "Revisão manual": 2, "Não duplicidade provável": 3}
+        pairs["_ord_prioridade"] = pairs["prioridade_revisao"].map(priority_order).fillna(9)
+        pairs["_ord_classe"] = pairs["classe_ampla"].map(broad_order).fillna(9)
+        pairs = (
+            pairs.sort_values(
+                ["_ord_prioridade", "_ord_classe", "chave_candidata_normalizada", "id_registro_a", "id_registro_b"],
+                kind="stable",
+            )
+            .drop(columns=["_ord_prioridade", "_ord_classe"])
+            .reset_index(drop=True)
+        )
+        pairs.insert(0, "ordem_exportacao", np.arange(1, len(pairs) + 1))
+
+    coverage = pd.DataFrame(
+        [
+            {
+                "chaves_candidatas_repetidas": len(groups),
+                "registros_candidatos": int(len(work)),
+                "pares_teoricos": theoretical_pairs,
+                "pares_classificados": int(len(pairs)),
+                "pares_omitidos_por_limite": max(0, theoretical_pairs - int(len(pairs))),
+                "chaves_com_pares_limitados": limited_keys,
+                "limite_total_pares": max_pairs,
+                "limite_pares_por_chave": max_pairs_per_key,
+            }
+        ]
+    )
+    return pairs, coverage
+
+
+def summarize_sinan_overlap_pairs(
+    pairs: pd.DataFrame,
+    *,
+    theoretical_pairs: int,
+) -> pd.DataFrame:
+    if pairs is None or pairs.empty:
+        return pd.DataFrame(
+            columns=[
+                "classificacao_sobreposicao",
+                "pares",
+                "chaves_candidatas_distintas",
+                "pct_pares_classificados",
+                "pct_pares_teoricos",
+                "mediana_maior_diferenca_dias",
+                "max_maior_diferenca_dias",
+                "pares_com_conflito_identidade",
+                "pares_com_mudanca_classificacao_etiologia",
+                "definicao_operacional",
+            ]
+        )
+
+    summary = (
+        pairs.groupby("classificacao_sobreposicao", dropna=False)
+        .agg(
+            pares=("classificacao_sobreposicao", "size"),
+            chaves_candidatas_distintas=("chave_candidata_normalizada", "nunique"),
+            mediana_maior_diferenca_dias=("maior_diferenca_dias", "median"),
+            max_maior_diferenca_dias=("maior_diferenca_dias", "max"),
+            pares_com_conflito_identidade=("conflito_identidade", lambda values: int(pd.Series(values).fillna(False).sum())),
+            pares_com_mudanca_classificacao_etiologia=(
+                "mudanca_classificacao_etiologia",
+                lambda values: int(pd.Series(values).fillna(False).sum()),
+            ),
+        )
+        .reset_index()
+    )
+    total_classified = max(1, int(len(pairs)))
+    summary["pct_pares_classificados"] = (100.0 * summary["pares"] / total_classified).round(2)
+    summary["pct_pares_teoricos"] = np.where(
+        theoretical_pairs > 0,
+        (100.0 * summary["pares"] / theoretical_pairs).round(2),
+        np.nan,
+    )
+    summary["mediana_maior_diferenca_dias"] = summary["mediana_maior_diferenca_dias"].round(1)
+    summary["definicao_operacional"] = summary["classificacao_sobreposicao"].map(_overlap_pair_definition)
+    return summary.sort_values(["pares", "classificacao_sobreposicao"], ascending=[False, True]).reset_index(drop=True)
+
+
+def _sinan_overlap_simple_summary_table(
+    summary: pd.DataFrame,
+    *,
+    display_label: str,
+    normalized_names: bool,
+) -> pd.DataFrame:
+    if summary is None or summary.empty:
+        return pd.DataFrame()
+    row = summary.iloc[0]
+    interpretation_suffix = (
+        " Nomes são comparados após normalização de caixa e espaços."
+        if normalized_names
+        else ""
+    )
+    return pd.DataFrame(
+        [
+            {
+                "Indicador": "Registros avaliados",
+                "Valor": int(row.get("total_registros", 0) or 0),
+                "Interpretação": "Total após os filtros-base.",
+            },
+            {
+                "Indicador": f"{display_label} preenchido",
+                "Valor": int(row.get("registros_com_valor", 0) or 0),
+                "Interpretação": "Registros elegíveis para iniciar a triagem." + interpretation_suffix,
+            },
+            {
+                "Indicador": "Chaves candidatas repetidas",
+                "Valor": int(row.get("valores_com_sobreposicao", 0) or 0),
+                "Interpretação": f"Valores distintos de {display_label} presentes em dois ou mais registros.",
+            },
+            {
+                "Indicador": "Registros em chaves repetidas",
+                "Valor": int(row.get("registros_em_sobreposicao", 0) or 0),
+                "Interpretação": "Universo encaminhado à comparação multicritério par a par.",
+            },
+        ]
+    )
+
+
+def _render_sinan_overlap_pair_block(
+    table: LoadedTable,
+    base_where: str,
+    exprs: Dict[str, Optional[str]],
+    context_cols: Dict[str, Optional[str]],
+    *,
+    target_col: str,
+    candidate_type: str,
+    display_label: str,
+    file_slug: str,
+    classification_heading: str,
+    intro_caption: str,
+    close_days: int,
+    distinct_days: int,
+    min_comparable_dates: int,
+    max_pairs: int,
+    max_pairs_per_key: int,
+) -> None:
+    st.markdown(f"### Sobreposição de `{display_label}`")
+    st.caption(intro_caption)
+
+    target_group_sql = _sinan_overlap_group_expr(target_col, candidate_type)
+    summary = query_sinan_overlap_summary(
+        table,
+        target_col,
+        base_where,
+        target_expr_override=target_group_sql,
+    )
+    if summary.empty:
+        st.info(f"Sem registros para avaliar `{display_label}` com os filtros atuais.")
+        return
+
+    simple_table = _sinan_overlap_simple_summary_table(
+        summary,
+        display_label=display_label,
+        normalized_names=candidate_type == "name",
+    )
+    row = summary.iloc[0]
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Registros avaliados", f"{int(row['total_registros']):,}".replace(",", "."))
+    c2.metric(f"{display_label} preenchido", f"{int(row['registros_com_valor']):,}".replace(",", "."))
+    c3.metric("Chaves repetidas", f"{int(row['valores_com_sobreposicao']):,}".replace(",", "."))
+    pct = row.get("pct_registros_com_sobreposicao")
+    c4.metric(
+        "Registros em sobreposição",
+        f"{int(row['registros_em_sobreposicao']):,}".replace(",", "."),
+        None if pd.isna(pct) else f"{float(pct):.2f}%".replace(".", ","),
+    )
+    st.markdown("**Resumo da triagem pela chave candidata**")
+    copyable_dataframe(simple_table, width="stretch", hide_index=True)
+    download_button(
+        simple_table,
+        f"sinan_{file_slug}_triagem_chave_candidata_resumo.csv",
+        label="Baixar resumo da triagem",
+        max_rows=0,
+    )
+
+    records = query_sinan_overlap_candidate_records(
+        table,
+        target_col,
+        base_where,
+        exprs,
+        context_cols,
+        candidate_type=candidate_type,
+    )
+    if records.empty:
+        st.success(f"Não há `{display_label}` repetido no recorte atual.")
+        return
+
+    st.markdown(f"#### {classification_heading}")
+    st.caption(
+        "Cada linha da tabela de auditoria corresponde a um par de registros da mesma chave candidata. "
+        "A decisão usa, nesta ordem, conflitos de identidade (`NM_PACIENT` quando aplicável, `ANO_NASC`, `CS_SEXO`), "
+        "mudança efetiva em `CLASSI_FIN`/`CON_DIAGES` e diferenças em `DT_NOTIFIC`, `DT_DIGITA`, `DT_INVEST`, "
+        "`ATE_INTERN` e `DT_SIN_PRI`. Diferenças maiores aumentam a evidência de outro atendimento; valores ausentes "
+        "não são tratados como concordância."
+    )
+
+    pairs, coverage = classify_sinan_overlap_pairs(
+        records,
+        candidate_type=candidate_type,
+        close_days=close_days,
+        distinct_days=distinct_days,
+        min_comparable_dates=min_comparable_dates,
+        max_pairs=max_pairs,
+        max_pairs_per_key=max_pairs_per_key,
+    )
+    coverage_row = coverage.iloc[0] if not coverage.empty else pd.Series(dtype=object)
+    theoretical_pairs = int(coverage_row.get("pares_teoricos", 0) or 0)
+    classified_pairs = int(coverage_row.get("pares_classificados", 0) or 0)
+    omitted_pairs = int(coverage_row.get("pares_omitidos_por_limite", 0) or 0)
+
+    dup_pairs = int((pairs.get("classe_ampla") == "Duplicidade provável").sum()) if not pairs.empty else 0
+    nondup_pairs = int((pairs.get("classe_ampla") == "Não duplicidade provável").sum()) if not pairs.empty else 0
+    review_pairs = int((pairs.get("classe_ampla") == "Revisão manual").sum()) if not pairs.empty else 0
+    p1, p2, p3, p4, p5 = st.columns(5)
+    p1.metric("Pares teóricos", f"{theoretical_pairs:,}".replace(",", "."))
+    p2.metric("Pares classificados", f"{classified_pairs:,}".replace(",", "."))
+    p3.metric("Duplicidade provável", f"{dup_pairs:,}".replace(",", "."))
+    p4.metric("Não duplicidade provável", f"{nondup_pairs:,}".replace(",", "."))
+    p5.metric("Revisão manual", f"{review_pairs:,}".replace(",", "."))
+
+    st.markdown("**Cobertura da comparação par a par**")
+    copyable_dataframe(coverage, width="stretch", hide_index=True)
+    if omitted_pairs > 0:
+        st.warning(
+            f"Foram classificados {classified_pairs:,} de {theoretical_pairs:,} pares. "
+            f"{omitted_pairs:,} par(es) ficaram fora por causa dos limites de desempenho configurados. "
+            "A relação de registros candidatos abaixo permanece disponível para revisão."
+            .replace(",", ".")
+        )
+    download_button(
+        coverage,
+        f"sinan_{file_slug}_cobertura_comparacao_pares.csv",
+        label="Baixar cobertura da comparação",
+        max_rows=0,
+    )
+
+    if pairs.empty:
+        st.info("Não foi possível formar pares dentro dos limites configurados.")
+    else:
+        classification_summary = summarize_sinan_overlap_pairs(
+            pairs,
+            theoretical_pairs=theoretical_pairs,
+        )
+        st.markdown("**Resumo por classificação multicritério**")
+        st.caption(
+            "Percentuais sobre pares teóricos deixam explícita a cobertura quando há truncamento por desempenho; "
+            "percentuais sobre pares classificados descrevem apenas o conjunto efetivamente auditado."
+        )
+        copyable_dataframe(classification_summary, width="stretch", hide_index=True)
+        download_button(
+            classification_summary,
+            f"sinan_{file_slug}_resumo_classificacao_multicriterio.csv",
+            label="Baixar resumo por classificação",
+            max_rows=0,
+        )
+
+        st.markdown("**Pares classificados e evidências utilizadas**")
+        st.caption(
+            "A tabela preserva os valores dos dois registros, as diferenças em dias por campo, o maior intervalo "
+            "observado, os conflitos demográficos e as mudanças de classificação/etiologia que fundamentaram a decisão."
+        )
+        copyable_dataframe(pairs, width="stretch", hide_index=True)
+        download_button(
+            pairs,
+            f"sinan_{file_slug}_pares_classificados_multicriterio.csv",
+            label="Baixar CSV dos pares classificados",
+            max_rows=0,
+        )
+
+    st.markdown(f"#### Todos os registros envolvidos na sobreposição simples de `{display_label}`")
+    st.caption(
+        "Relação completa, com uma linha por registro candidato. Inclui os cinco campos temporais solicitados, "
+        "`CLASSI_FIN`, `CON_DIAGES`, `ANO_NASC`, `CS_SEXO` e os principais campos administrativos disponíveis."
+    )
+    copyable_dataframe(records, width="stretch", hide_index=True)
+    download_button(
+        records,
+        f"sinan_{file_slug}_todos_os_registros_candidatos.csv",
+        label="Baixar CSV completo dos registros candidatos",
+        max_rows=0,
+    )
+
+
+# -----------------------------------------------------------------------------
+# Compatibilidade com a auditoria administrativa anterior (v49r4).
+# As funções abaixo permanecem disponíveis para consultas legadas, mas a área
+# "Sobreposição NU_NOTIFIC / NM_PACIENT" da v50 chama exclusivamente a rotina
+# multicritério par a par definida acima.
+# -----------------------------------------------------------------------------
 @dataclass(frozen=True)
 class SinanNotificationKeySpec:
     """Especificação da chave administrativa de referência da notificação SINAN."""
@@ -10155,394 +11079,380 @@ def _sinan_overlap_reference_table(
     context_cols: Dict[str, Optional[str]],
     exprs: Dict[str, Optional[str]],
 ) -> pd.DataFrame:
-    """Expõe de forma transparente os campos usados na triagem e na revisão."""
+    """Documenta os campos, a disponibilidade e o efeito na regra multicritério."""
     detected = {str(col).upper() for col in columns}
     rows = [
-        ("Chave administrativa", "NU_NOTIFIC", "Número da notificação; campo-chave para identificar o registro."),
-        ("Chave administrativa", "DT_NOTIFIC", "Data de preenchimento da ficha; campo-chave."),
-        ("Chave administrativa", "ID_AGRAVO", "Código do agravo; campo-chave."),
-        ("Chave administrativa", "ID_MUNICIP", "Município da unidade notificadora; campo-chave."),
-        ("Contexto administrativo", "ID_UNIDADE", "Unidade notificadora/CNES; ajuda a reconhecer transferências ou notificações por serviços distintos."),
-        ("Identidade", "NM_PACIENT", "Nome completo do paciente; nomes iguais podem representar homônimos."),
-        ("Identidade", "DT_NASC", "Data de nascimento; reforça ou enfraquece a hipótese de ser a mesma pessoa."),
-        ("Identidade", "CS_SEXO", "Sexo; usado como verificação complementar de consistência."),
-        ("Identidade", "NM_MAE_PAC", "Nome da mãe; campo essencial e forte apoio à vinculação."),
-        ("Identidade", "ID_CNS_SUS", "Cartão SUS; identificador individual quando preenchido."),
-        ("Identidade", "FONETICA_N", "Primeiro e último nomes concatenados; apoio à comparação fonética de grafias próximas."),
-        ("Identidade", "SOUNDEX", "Código Soundex interno; apoio à vinculação quando o nome varia."),
-        ("Identidade", "ID_MN_RESI", "Município de residência; contexto complementar, não identificador isolado."),
-        ("Origem e fluxo", "DT_DIGITA", "Data da primeira inclusão; segundo o dicionário, não é atualizada após alterações."),
-        ("Origem e fluxo", "IDENT_MICR", "Código da instalação onde ocorreu a primeira inclusão do registro."),
-        ("Origem e fluxo", "CS_FLXRET", "Situação do fluxo de retorno do registro."),
-        ("Origem e fluxo", "FLXRECEBI", "Indica recebimento por fluxo de retorno."),
-        ("Origem e fluxo", "MIGRADO_W", "Indica origem em migração do Sinan Windows."),
-        ("Cronologia", "DT_SIN_PRI", "Data dos primeiros sintomas; deve ser menor ou igual a DT_NOTIFIC."),
-        ("Cronologia", "DT_INVEST", "Início da investigação; deve ser igual ou posterior a DT_NOTIFIC."),
-        ("Cronologia", "DT_ENCERRA", "Encerramento; deve ser igual ou posterior a DT_INVEST."),
-        ("Investigação", "CLASSI_FIN", "Classificação final do caso."),
-        ("Investigação", "CON_DIAGES", "Conclusão diagnóstica específica da meningite."),
-        ("Investigação", "CRITERIO", "Critério usado para confirmação."),
-        ("Investigação", "EVOLUCAO", "Desfecho do caso."),
+        (
+            "Chave inicial",
+            "NU_NOTIFIC",
+            context_cols.get("nu_notific"),
+            "Inicia a triagem por número repetido.",
+            "Agrupa os pares da seção de reuso de numeração.",
+        ),
+        (
+            "Chave inicial",
+            "NM_PACIENT",
+            context_cols.get("patient"),
+            "Inicia a triagem por nome repetido; a comparação normaliza caixa e espaços.",
+            "Agrupa os pares da seção de repetição de nome e compara a identidade na seção de NU_NOTIFIC.",
+        ),
+        (
+            "Identidade",
+            "ANO_NASC",
+            context_cols.get("birth_year") or context_cols.get("birth_date"),
+            "Ano de nascimento; quando ANO_NASC não existe, o ano de DT_NASC é usado como fallback.",
+            "Diferença com ambos preenchidos afasta duplicidade; igualdade é necessária para duplicidade provável.",
+        ),
+        (
+            "Identidade",
+            "CS_SEXO",
+            context_cols.get("sex"),
+            "Sexo do paciente.",
+            "Diferença com ambos preenchidos afasta duplicidade; igualdade é necessária para duplicidade provável.",
+        ),
+        (
+            "Cronologia",
+            "DT_NOTIFIC",
+            context_cols.get("date_notification"),
+            "Data de notificação.",
+            "Calcula diferença absoluta em dias entre os dois registros.",
+        ),
+        (
+            "Cronologia",
+            "DT_DIGITA",
+            context_cols.get("date_entry"),
+            "Data da primeira digitação/inclusão.",
+            "Calcula diferença absoluta em dias; intervalo grande favorece outro atendimento/registro.",
+        ),
+        (
+            "Cronologia",
+            "DT_INVEST",
+            context_cols.get("date_investigation"),
+            "Data de início da investigação.",
+            "Calcula diferença absoluta em dias entre os dois registros.",
+        ),
+        (
+            "Cronologia",
+            "ATE_INTERN",
+            context_cols.get("date_hospitalization"),
+            "Data da internação.",
+            "Calcula diferença absoluta em dias entre os dois registros.",
+        ),
+        (
+            "Cronologia",
+            "DT_SIN_PRI",
+            context_cols.get("date_symptom"),
+            "Data dos primeiros sintomas.",
+            "Calcula diferença absoluta em dias; é um dos marcadores centrais de novo episódio.",
+        ),
+        (
+            "Classificação/etiologia",
+            "CLASSI_FIN",
+            context_cols.get("classification_final"),
+            "Classificação final do caso.",
+            "Mudança entre dois valores preenchidos é evidência forte de não duplicidade.",
+        ),
+        (
+            "Classificação/etiologia",
+            "CON_DIAGES",
+            context_cols.get("diagnosis_conclusion"),
+            "Conclusão diagnóstica/etiológica específica.",
+            "Mudança entre dois valores preenchidos é evidência forte de outro atendimento/classificação.",
+        ),
+        (
+            "Contexto secundário",
+            "ID_AGRAVO",
+            context_cols.get("agravo"),
+            "Código do agravo.",
+            "Mantido na saída para auditoria; não substitui os critérios solicitados.",
+        ),
+        (
+            "Contexto secundário",
+            "ID_MUNICIP",
+            context_cols.get("municipality_notification"),
+            "Município de notificação.",
+            "Mantido na saída para reconhecer contextos administrativos distintos.",
+        ),
+        (
+            "Contexto secundário",
+            "ID_UNIDADE",
+            context_cols.get("notification_unit"),
+            "Unidade notificadora/CNES.",
+            "Mantido na saída para apoiar a revisão de transferências e renotificações.",
+        ),
+        (
+            "Contexto secundário",
+            "ID_MN_RESI",
+            context_cols.get("municipality_residence"),
+            "Município de residência.",
+            "Apoio contextual; não determina duplicidade isoladamente.",
+        ),
+        (
+            "Contexto secundário",
+            "DT_ENCERRA",
+            context_cols.get("date_closure"),
+            "Data de encerramento.",
+            "Mantida na relação completa e na verificação de coerência cronológica.",
+        ),
+        (
+            "Contexto secundário",
+            "CRITERIO",
+            context_cols.get("confirmation_criterion"),
+            "Critério de confirmação.",
+            "Mantido na saída para revisão, sem efeito automático na classificação principal.",
+        ),
+        (
+            "Contexto secundário",
+            "EVOLUCAO",
+            context_cols.get("outcome"),
+            "Evolução/desfecho.",
+            "Mantido na saída para revisão, sem efeito automático na classificação principal.",
+        ),
     ]
-    aliases = {
-        "NU_NOTIFIC": context_cols.get("nu_notific"),
-        "DT_NOTIFIC": context_cols.get("date_notification"),
-        "ID_AGRAVO": context_cols.get("agravo"),
-        "ID_MUNICIP": context_cols.get("municipality_notification"),
-        "ID_UNIDADE": context_cols.get("notification_unit"),
-        "NM_PACIENT": context_cols.get("patient"),
-        "DT_NASC": context_cols.get("birth_date"),
-        "CS_SEXO": context_cols.get("sex"),
-        "NM_MAE_PAC": context_cols.get("mother_name"),
-        "ID_CNS_SUS": context_cols.get("cns"),
-        "FONETICA_N": context_cols.get("phonetic_name"),
-        "SOUNDEX": context_cols.get("soundex"),
-        "ID_MN_RESI": context_cols.get("municipality_residence"),
-        "DT_DIGITA": context_cols.get("date_entry"),
-        "IDENT_MICR": context_cols.get("micro_identifier"),
-        "CS_FLXRET": context_cols.get("return_flow_status"),
-        "FLXRECEBI": context_cols.get("received_return_flow"),
-        "MIGRADO_W": context_cols.get("migrated_windows"),
-        "DT_SIN_PRI": context_cols.get("date_symptom"),
-        "DT_INVEST": context_cols.get("date_investigation"),
-        "DT_ENCERRA": context_cols.get("date_closure"),
-        "CLASSI_FIN": context_cols.get("classification_final"),
-        "CON_DIAGES": context_cols.get("diagnosis_conclusion"),
-        "CRITERIO": context_cols.get("confirmation_criterion"),
-        "EVOLUCAO": context_cols.get("outcome"),
-    }
-    out = []
-    for group, field, use in rows:
-        actual = aliases.get(field)
+    output_rows: List[Dict[str, object]] = []
+    for group, field, actual, role, effect in rows:
+        actual_text = str(actual) if actual else "—"
         is_detected = bool(actual and str(actual).upper() in detected)
-        out.append(
+        output_rows.append(
             {
                 "Grupo": group,
                 "Campo de referência": field,
-                "Coluna detectada": actual or "—",
+                "Coluna detectada": actual_text,
                 "Disponível": "Sim" if is_detected else "Não",
-                "Uso na auditoria": use,
+                "Papel na auditoria": role,
+                "Efeito na classificação": effect,
             }
         )
-    return pd.DataFrame(out)
+    return pd.DataFrame(output_rows)
 
 
 def render_sinan_overlap_tab(table: LoadedTable, base_where: str, exprs: Dict[str, Optional[str]]) -> None:
     st.caption(
-        "A aba separa duas perguntas: (1) se o número da notificação reaparece na mesma chave administrativa "
-        "do SINAN ou em outra; e (2) se os campos de identidade e investigação sustentam que os registros "
-        "representam a mesma pessoa e o mesmo episódio. A classificação é uma triagem auditável, não uma exclusão automática."
+        "A área usa `NU_NOTIFIC` e `NM_PACIENT` somente para formar conjuntos candidatos. A decisão é feita par a par "
+        "com `DT_NOTIFIC`, `DT_DIGITA`, `DT_INVEST`, `ATE_INTERN`, `DT_SIN_PRI`, `CLASSI_FIN`, `CON_DIAGES`, "
+        "`ANO_NASC` e `CS_SEXO`. O resultado é uma triagem auditável para revisão; não exclui registros automaticamente."
     )
     schema = schema_df(table)
     columns = schema["coluna"].astype(str).tolist() if "coluna" in schema.columns else []
 
-    nu_col = choose_candidate(columns, ["NU_NOTIFIC", "NUM_NOTIFIC", "NUNOTIFIC", "NU_NOTIF"])
-    dt_not_col = choose_candidate(columns, ["DT_NOTIFIC", "DT_NOTIFICACAO", "DATA_NOTIFICACAO"])
+    nu_col = choose_candidate(columns, ["NU_NOTIFIC", "NU_NOTFIC", "NUM_NOTIFIC", "NUNOTIFIC", "NU_NOTIF"])
+    nm_col = choose_candidate(columns, ["NM_PACIENT", "NOME_PACIENTE", "NM_PACIENTE", "PACIENTE"])
+    dt_not_col = choose_candidate(columns, ["DT_NOTIFIC", "DT_NOTIF", "DT_NOTIFICACAO", "DATA_NOTIFICACAO"])
+    dt_entry_col = choose_candidate(columns, ["DT_DIGITA", "DT_DIGIT", "DT_DIGITACAO", "DATA_DIGITACAO"])
+    dt_invest_col = choose_candidate(columns, ["DT_INVEST", "DT_INVESTIGACAO", "DATA_INVESTIGACAO"])
+    dt_hospitalization_col = choose_candidate(columns, ["ATE_INTERN", "DT_INTERN", "DT_INTERNACAO", "DATA_INTERNACAO"])
     dt_symptom_col = choose_candidate(columns, ["DT_SIN_PRI", "DT_SINTOMAS", "DATA_PRIMEIROS_SINTOMAS"])
     dt_closure_col = choose_candidate(columns, ["DT_ENCERRA", "DT_ENCERRAMENTO", "DATA_ENCERRAMENTO"])
-    nm_col = choose_candidate(columns, ["NM_PACIENT", "NOME_PACIENTE", "NM_PACIENTE", "PACIENTE"])
+    birth_year_col = choose_candidate(columns, ["ANO_NASC", "ANO_NASCIMENTO", "NU_ANO_NASC", "ANO_NASC_PAC"])
+    birth_col = choose_candidate(columns, ["DT_NASC", "DT_NASCIMENTO", "DATA_NASCIMENTO", "NASCIMENTO"])
+    sex_col = choose_candidate(columns, ["CS_SEXO", "SEXO"])
+    classi_col = choose_candidate(columns, ["CLASSI_FIN", "CLASSIFICACAO_FINAL"])
+    con_col = choose_candidate(columns, ["CON_DIAGES", "CONCLUSAO_DIAGNOSTICA"])
     agravo_col = choose_candidate(columns, ["ID_AGRAVO", "CO_CID", "AGRAVO", "CID"])
     muni_not_col = choose_candidate(columns, ["ID_MUNICIP", "CODMUNNOT", "MUN_NOT", "MUNIC_NOT"])
     unit_col = choose_candidate(columns, ["ID_UNIDADE", "CO_UNIDADE_NOTIFICACAO", "UNIDADE_NOTIFICADORA", "CNES_NOTIFICADOR"])
-    birth_col = choose_candidate(columns, ["DT_NASC", "DT_NASCIMENTO", "DATA_NASCIMENTO", "NASCIMENTO"])
-    sex_col = choose_candidate(columns, ["CS_SEXO", "SEXO"])
-    mother_col = choose_candidate(columns, ["NM_MAE_PAC", "NM_MAE", "NOME_MAE", "NOME_DA_MAE"])
-    cns_col = choose_candidate(columns, ["ID_CNS_SUS", "CNS", "CARTAO_SUS", "NU_CARTAO_SUS"])
-    phonetic_col = choose_candidate(columns, ["FONETICA_N", "CHAVE_FONETICA"])
-    soundex_col = choose_candidate(columns, ["SOUNDEX", "DS_SOUNDEX"])
     muni_res_col = choose_candidate(columns, ["ID_MN_RESI", "CODMUNRES", "MUNIC_RES", "MUN_RES"])
-    dt_invest_col = choose_candidate(columns, ["DT_INVEST", "DT_INVESTIGACAO", "DATA_INVESTIGACAO"])
-    dt_entry_col = choose_candidate(columns, ["DT_DIGITA", "DT_DIGITACAO", "DATA_DIGITACAO"])
-    micro_identifier_col = choose_candidate(columns, ["IDENT_MICR", "IDENTIFICADOR_MICRO"])
-    return_flow_col = choose_candidate(columns, ["CS_FLXRET", "FLUXO_RETORNO"])
-    received_return_flow_col = choose_candidate(columns, ["FLXRECEBI", "RECEBIDO_FLUXO_RETORNO"])
-    migrated_col = choose_candidate(columns, ["MIGRADO_W", "MIGRADO_WINDOWS"])
-    classi_col = choose_candidate(columns, ["CLASSI_FIN", "CLASSIFICACAO_FINAL"])
-    con_col = choose_candidate(columns, ["CON_DIAGES", "CONCLUSAO_DIAGNOSTICA"])
     criterio_col = choose_candidate(columns, ["CRITERIO", "CRITERIO_CONFIRMACAO"])
     evol_col = choose_candidate(columns, ["EVOLUCAO", "EVOLUCAO_CASO"])
 
     context_cols: Dict[str, Optional[str]] = {
         "nu_notific": nu_col,
+        "patient": nm_col,
         "date_notification": dt_not_col,
+        "date_entry": dt_entry_col,
+        "date_investigation": dt_invest_col,
+        "date_hospitalization": dt_hospitalization_col,
         "date_symptom": dt_symptom_col,
         "date_closure": dt_closure_col,
+        "birth_year": birth_year_col,
+        "birth_date": birth_col,
+        "sex": sex_col,
+        "classification_final": classi_col,
+        "diagnosis_conclusion": con_col,
         "agravo": agravo_col,
         "municipality_notification": muni_not_col,
         "notification_unit": unit_col,
-        "patient": nm_col,
-        "birth_date": birth_col,
-        "sex": sex_col,
-        "mother_name": mother_col,
-        "cns": cns_col,
-        "phonetic_name": phonetic_col,
-        "soundex": soundex_col,
         "municipality_residence": muni_res_col,
-        "date_investigation": dt_invest_col,
-        "date_entry": dt_entry_col,
-        "micro_identifier": micro_identifier_col,
-        "return_flow_status": return_flow_col,
-        "received_return_flow": received_return_flow_col,
-        "migrated_windows": migrated_col,
-        "classification_final": classi_col,
-        "diagnosis_conclusion": con_col,
         "confirmation_criterion": criterio_col,
         "outcome": evol_col,
     }
 
-    st.markdown("### Sobreposição de `NU_NOTIFIC`")
+    with st.expander("Parâmetros da classificação multicritério", expanded=True):
+        c1, c2, c3 = st.columns(3)
+        close_days = int(
+            c1.number_input(
+                "Janela curta que favorece duplicidade (dias)",
+                min_value=0,
+                max_value=365,
+                value=int(st.session_state.get("sinan_overlap_close_days", DEFAULT_SINAN_OVERLAP_CLOSE_DAYS)),
+                step=1,
+                key="sinan_overlap_close_days",
+                help="Todas as datas comparáveis devem ficar dentro desta janela para a classe Duplicidade provável.",
+            )
+        )
+        distinct_days_input = int(
+            c2.number_input(
+                "Diferença que favorece outro atendimento (dias)",
+                min_value=1,
+                max_value=3650,
+                value=int(st.session_state.get("sinan_overlap_distinct_days", DEFAULT_SINAN_OVERLAP_DISTINCT_DAYS)),
+                step=1,
+                key="sinan_overlap_distinct_days",
+                help="Basta uma das cinco datas exceder este limite para classificar outro atendimento provável, salvo conflito de identidade já detectado.",
+            )
+        )
+        min_dates = int(
+            c3.number_input(
+                "Mínimo de datas comparáveis para duplicidade provável",
+                min_value=1,
+                max_value=len(SINAN_OVERLAP_DATE_FIELDS),
+                value=int(st.session_state.get("sinan_overlap_min_dates", DEFAULT_SINAN_OVERLAP_MIN_DATES)),
+                step=1,
+                key="sinan_overlap_min_dates",
+            )
+        )
+        distinct_days = max(close_days + 1, distinct_days_input)
+        if distinct_days_input <= close_days:
+            st.warning(
+                f"O limite de outro atendimento precisa ser maior que a janela curta; nesta execução foi ajustado para {distinct_days} dias."
+            )
+        st.caption(
+            "As janelas temporais são parâmetros operacionais editáveis para triagem, não cortes oficiais do SINAN. "
+            "A tabela abaixo registra os valores usados em cada execução."
+        )
+
+        p1, p2 = st.columns(2)
+        max_pairs = int(
+            p1.number_input(
+                "Máximo total de pares classificados",
+                min_value=100,
+                max_value=1000000,
+                value=int(st.session_state.get("sinan_overlap_max_pairs", DEFAULT_SINAN_OVERLAP_MAX_PAIRS)),
+                step=1000,
+                key="sinan_overlap_max_pairs",
+                help="Protege memória e navegador em bases com muitos nomes ou números repetidos.",
+            )
+        )
+        max_pairs_per_key = int(
+            p2.number_input(
+                "Máximo de pares por NU_NOTIFIC/NM_PACIENT",
+                min_value=10,
+                max_value=100000,
+                value=int(
+                    st.session_state.get(
+                        "sinan_overlap_max_pairs_per_key",
+                        DEFAULT_SINAN_OVERLAP_MAX_PAIRS_PER_KEY,
+                    )
+                ),
+                step=100,
+                key="sinan_overlap_max_pairs_per_key",
+                help="Evita que um único nome muito frequente consuma toda a auditoria par a par.",
+            )
+        )
+
+        criteria_table = pd.DataFrame(
+            [
+                {
+                    "Ordem": 1,
+                    "Critério": "Identidade",
+                    "Campos": "NM_PACIENT (na sobreposição de NU_NOTIFIC), ANO_NASC e CS_SEXO",
+                    "Regra": "Diferença entre valores preenchidos classifica outro paciente/homônimo provável.",
+                },
+                {
+                    "Ordem": 2,
+                    "Critério": "Classificação/etiologia",
+                    "Campos": "CLASSI_FIN e CON_DIAGES",
+                    "Regra": "Mudança entre valores preenchidos classifica outro atendimento provável.",
+                },
+                {
+                    "Ordem": 3,
+                    "Critério": "Distância temporal longa",
+                    "Campos": "DT_NOTIFIC, DT_DIGITA, DT_INVEST, ATE_INTERN e DT_SIN_PRI",
+                    "Regra": f"Qualquer diferença > {distinct_days} dias favorece outro atendimento provável.",
+                },
+                {
+                    "Ordem": 4,
+                    "Critério": "Duplicidade provável",
+                    "Campos": "Identidade completa + datas comparáveis",
+                    "Regra": f"Exige identidade concordante e pelo menos {min_dates} datas; todas devem diferir no máximo {close_days} dias.",
+                },
+                {
+                    "Ordem": 5,
+                    "Critério": "Revisão manual",
+                    "Campos": "Dados intermediários, mistos ou incompletos",
+                    "Regra": "Não há decisão automática quando a evidência é insuficiente ou fica entre as duas janelas.",
+                },
+            ]
+        )
+        copyable_dataframe(criteria_table, width="stretch", hide_index=True)
+
     if not nu_col:
         st.warning("Não localizei o campo `NU_NOTIFIC` no SINAN carregado.")
     else:
-        key_spec = _sinan_nu_notific_composite_components(
-            nu_col,
-            exprs,
-            muni_not_col,
-            agravo_col,
-        )
-        composite_summary, key_desc = query_sinan_overlap_composite_summary(
+        _render_sinan_overlap_pair_block(
             table,
-            nu_col,
             base_where,
             exprs,
-            municipality_col=muni_not_col,
-            agravo_col=agravo_col,
+            context_cols,
+            target_col=nu_col,
+            candidate_type="notification",
+            display_label="NU_NOTIFIC",
+            file_slug="nu_notific",
+            classification_heading="Duplicidade provável × reuso de numeração",
+            intro_caption=(
+                "`NU_NOTIFIC` repetido apenas inicia a triagem. O número é comparado com `NM_PACIENT`, `ANO_NASC`, "
+                "`CS_SEXO`, as cinco datas e os campos de classificação/etiologia. Assim, a mesma numeração pode ser "
+                "separada em duplicidade provável, reuso por outro paciente, reuso por outro atendimento ou revisão manual."
+            ),
+            close_days=close_days,
+            distinct_days=distinct_days,
+            min_comparable_dates=min_dates,
+            max_pairs=max_pairs,
+            max_pairs_per_key=max_pairs_per_key,
         )
-        composite_details = pd.DataFrame()
-
-        st.markdown("#### Duplicidade provável × reuso de numeração")
-        detected_key = " + ".join(f"`{field}`" for field in key_desc)
-        missing_key = ", ".join(f"`{field}`" for field in key_spec.missing_official)
-        st.caption(
-            "Esta análise não depende de gráfico. O dicionário da notificação individual marca `NU_NOTIFIC`, "
-            "`DT_NOTIFIC`, `ID_AGRAVO` e `ID_MUNICIP` como campos-chave; o painel usa os componentes detectados "
-            f"no banco ({detected_key}). **Duplicidade provável** significa que a mesma chave aparece mais de uma "
-            "vez; **reuso de numeração** significa que o número reaparece em outra combinação administrativa. "
-            "Identificação do paciente, datas do episódio, investigação e campos internos de origem/fluxo são usados "
-            "como evidência adicional para priorizar a revisão, sem substituir a conferência do registro original."
-            + (f" A chave está parcial porque não foram detectados: {missing_key}." if missing_key else "")
-        )
-
-        if not key_spec.usable or composite_summary is None or composite_summary.empty:
-            missing_required = []
-            if not key_spec.dt_expr:
-                missing_required.append("DT_NOTIFIC")
-            if not key_spec.municipality_expr:
-                missing_required.append("ID_MUNICIP")
-            st.info(
-                "Não foi possível classificar duplicidade provável versus reuso de numeração porque faltam "
-                + ", ".join(f"`{field}`" for field in missing_required)
-                + ". A tabela de sobreposição simples permanece disponível abaixo."
-            )
-        else:
-            crow = composite_summary.iloc[0]
-            simples = int(crow.get("registros_sobrepostos_simples", 0) or 0)
-            duplicidade = int(crow.get("registros_duplicidade_provavel", 0) or 0)
-            reuso = int(crow.get("registros_reuso_numeracao", 0) or 0)
-            incompletos = int(crow.get("registros_com_chave_incompleta", 0) or 0)
-            if simples > 0:
-                composite_details, _ = query_sinan_overlap_composite_details(
-                    table,
-                    nu_col,
-                    base_where,
-                    exprs,
-                    municipality_col=muni_not_col,
-                    agravo_col=agravo_col,
-                    context_cols=context_cols,
-                )
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric(
-                "Registros com NU_NOTIFIC repetido",
-                f"{simples:,}".replace(",", "."),
-                help="Todas as linhas cujo NU_NOTIFIC aparece mais de uma vez.",
-            )
-            m2.metric(
-                "Duplicidade provável",
-                f"{duplicidade:,}".replace(",", "."),
-                help="Linhas em que a mesma chave administrativa aparece mais de uma vez.",
-            )
-            m3.metric(
-                "Reuso de numeração",
-                f"{reuso:,}".replace(",", "."),
-                help="Linhas em que NU_NOTIFIC se repete, mas a chave administrativa é diferente.",
-            )
-            m4.metric(
-                "Chave incompleta",
-                f"{incompletos:,}".replace(",", "."),
-                help="Linhas repetidas com algum componente disponível da chave sem preenchimento.",
-            )
-
-            summary_rows = pd.DataFrame(
-                [
-                    {
-                        "Indicador": "Registros com NU_NOTIFIC repetido",
-                        "Registros": simples,
-                        "Interpretação": "Universo da triagem; ainda não distingue duplicidade de reuso.",
-                    },
-                    {
-                        "Indicador": "Duplicidade provável",
-                        "Registros": duplicidade,
-                        "Interpretação": "Mesma chave administrativa repetida; revisar identidade e diferenças de investigação.",
-                    },
-                    {
-                        "Indicador": "Reuso de numeração",
-                        "Registros": reuso,
-                        "Interpretação": "NU_NOTIFIC igual em chave administrativa diferente; pode ser reuso legítimo, transferência, correção ou renotificação.",
-                    },
-                    {
-                        "Indicador": "Chave administrativa incompleta",
-                        "Registros": incompletos,
-                        "Interpretação": "A classificação exige revisão manual reforçada por ausência de componente da chave.",
-                    },
-                ]
-            )
-            st.markdown("**Resumo geral da triagem administrativa**")
-            copyable_dataframe(summary_rows, width="stretch", hide_index=True)
-            download_button(
-                summary_rows,
-                "sinan_nu_notific_duplicidade_reuso_resumo_geral.csv",
-                label="Baixar resumo geral da triagem",
-                max_rows=0,
-            )
-
-            if composite_details is None or composite_details.empty:
-                st.success("Não há registros repetidos para classificar pela chave administrativa no recorte atual.")
-            else:
-                class_order = ["Duplicidade provável", "Reuso de numeração"]
-                classification_summary = (
-                    composite_details.groupby("classificacao_sobreposicao", dropna=False)
-                    .agg(
-                        registros=("nu_notific", "size"),
-                        numeros_notificacao_distintos=("nu_notific", "nunique"),
-                        chaves_administrativas_distintas=("chave_administrativa", "nunique"),
-                        revisao_alta=("prioridade_revisao", lambda s: int((s == "Alta").sum())),
-                    )
-                    .reindex(class_order, fill_value=0)
-                    .rename_axis("classificacao_sobreposicao")
-                    .reset_index()
-                )
-                classification_summary["pct_registros_sobrepostos"] = np.where(
-                    simples > 0,
-                    (100.0 * classification_summary["registros"] / simples).round(2),
-                    np.nan,
-                )
-                definitions = {
-                    "Duplicidade provável": "A mesma chave administrativa aparece mais de uma vez.",
-                    "Reuso de numeração": "O NU_NOTIFIC reaparece, mas a chave administrativa difere.",
-                }
-                classification_summary["definicao_operacional"] = classification_summary[
-                    "classificacao_sobreposicao"
-                ].map(definitions)
-                st.markdown("**Resumo por classificação**")
-                st.caption(
-                    "A primeira tabela mostra o universo e as regras; esta segunda tabela distribui os registros nas "
-                    "duas classes e informa quantos receberam prioridade alta após a verificação de identidade."
-                )
-                copyable_dataframe(classification_summary, width="stretch", hide_index=True)
-                download_button(
-                    classification_summary,
-                    "sinan_nu_notific_duplicidade_reuso_resumo_por_classificacao.csv",
-                    label="Baixar resumo por classificação",
-                    max_rows=0,
-                )
-
-                st.markdown("**Registros classificados e evidências para revisão**")
-                st.caption(
-                    "Cada linha mantém a classificação administrativa e acrescenta evidências de identidade e contexto. "
-                    "`DT_NASC`, `CS_SEXO`, `NM_MAE_PAC` e `ID_CNS_SUS` são tratados como identificadores mais estáveis; "
-                    "`NM_PACIENT` e município de residência entram como apoio independente; `FONETICA_N` e `SOUNDEX`, "
-                    "por derivarem do nome, ficam disponíveis para conferência manual sem inflar o escore. Concordância só é "
-                    "contada quando o mesmo valor não nulo aparece em pelo menos dois registros. Unidade notificadora, "
-                    "datas, classificação final, conclusão diagnóstica, critério, evolução, primeira digitação e fluxo de "
-                    "retorno ajudam a diferenciar cópia, atualização, propagação, transferência, homônimo ou novo episódio. "
-                    "Nenhuma divergência, isoladamente, prova erro."
-                )
-                copyable_dataframe(composite_details, width="stretch", hide_index=True)
-                download_button(
-                    composite_details,
-                    "sinan_nu_notific_duplicidade_reuso_registros_auditados.csv",
-                    label="Baixar CSV completo dos registros classificados",
-                    max_rows=0,
-                )
-
-        st.markdown("#### Todos os registros envolvidos na sobreposição simples de `NU_NOTIFIC`")
-        duplicate_records = query_sinan_nu_notific_duplicate_records(
-            table,
-            nu_col,
-            base_where,
-            exprs,
-            context_cols=context_cols,
-        )
-        if duplicate_records.empty:
-            st.success("Não há `NU_NOTIFIC` repetido no recorte atual.")
-        else:
-            st.caption(
-                "Sem gráfico de barras e sem tabela agregada intermediária: esta é a relação completa, com uma linha "
-                "por registro e sem amostragem. Os campos adicionais permitem comparar identidade, contexto da "
-                "notificação, investigação, desfecho, origem/fluxo e coerência das datas."
-            )
-            copyable_dataframe(duplicate_records, width="stretch", hide_index=True)
-            download_button(
-                duplicate_records,
-                "sinan_sobreposicao_nu_notific_todos_os_registros.csv",
-                label="Baixar CSV completo de todos os registros repetidos",
-                max_rows=0,
-            )
-
-        with st.expander("Campos de referência usados na auditoria", expanded=False):
-            st.caption(
-                "A tabela abaixo documenta quais campos foram procurados e como entram na triagem. Campos de identidade, "
-                "investigação e origem/fluxo complementam a chave administrativa; nenhum deles, isoladamente, determina exclusão."
-            )
-            reference_df = _sinan_overlap_reference_table(columns, context_cols, exprs)
-            copyable_dataframe(reference_df, width="stretch", hide_index=True)
 
     st.markdown("---")
 
-    nm_extra_cols: List[Tuple[str, str]] = []
-    if nu_col:
-        nm_extra_cols.append((clean_str_expr(nu_col), "nu_notific"))
-    if birth_col:
-        nm_extra_cols.append((date_expr(birth_col), "data_nascimento"))
-    if sex_col:
-        nm_extra_cols.append((clean_code_expr(sex_col), "sexo"))
-    if mother_col:
-        nm_extra_cols.append((clean_str_expr(mother_col), "nome_mae"))
-    if cns_col:
-        nm_extra_cols.append((clean_str_expr(cns_col), "cartao_sus"))
-    if phonetic_col:
-        nm_extra_cols.append((clean_str_expr(phonetic_col), "chave_fonetica_nome"))
-    if soundex_col:
-        nm_extra_cols.append((clean_str_expr(soundex_col), "soundex_nome"))
-    if muni_res_col:
-        nm_extra_cols.append((clean_str_expr(muni_res_col), "municipio_residencia"))
-    if unit_col:
-        nm_extra_cols.append((clean_str_expr(unit_col), "unidade_notificadora"))
-    if exprs.get("dt_sin_pri"):
-        nm_extra_cols.append((exprs["dt_sin_pri"], "data_primeiros_sintomas"))
+    if not nm_col:
+        st.warning("Não localizei o campo `NM_PACIENT` no SINAN carregado.")
+    else:
+        _render_sinan_overlap_pair_block(
+            table,
+            base_where,
+            exprs,
+            context_cols,
+            target_col=nm_col,
+            candidate_type="name",
+            display_label="NM_PACIENT",
+            file_slug="nm_pacient",
+            classification_heading="Duplicidade provável x repetição de nome",
+            intro_caption=(
+                "A repetição de `NM_PACIENT` forma pares candidatos após normalização de caixa e espaços. Homônimos e "
+                "novos atendimentos são separados por `ANO_NASC`, `CS_SEXO`, `NU_NOTIFIC`, pelas cinco datas e por "
+                "mudanças em `CLASSI_FIN`/`CON_DIAGES`. NU_NOTIFIC igual reforça a hipótese de duplicidade; quando difere, "
+                "a classificação exige evidência temporal mais completa."
+            ),
+            close_days=close_days,
+            distinct_days=distinct_days,
+            min_comparable_dates=min_dates,
+            max_pairs=max_pairs,
+            max_pairs_per_key=max_pairs_per_key,
+        )
 
-    render_overlap_block(
-        table,
-        base_where,
-        exprs,
-        col_name="NM_PACIENT",
-        candidates=["NM_PACIENT", "NOME_PACIENTE", "NM_PACIENTE", "PACIENTE"],
-        value_label="nm_pacient",
-        display_label="NM_PACIENT",
-        file_slug="nm_pacient",
-        extra_cols=nm_extra_cols,
-        show_details_chart=False,
-        intro_caption=(
-            "A repetição de `NM_PACIENT` é apenas uma triagem de nomes iguais. Homônimos são esperados; por isso, "
-            "a tabela agrega os valores observados de `DT_NASC`, `CS_SEXO`, `NM_MAE_PAC`, `ID_CNS_SUS`, "
-            "`FONETICA_N`, `SOUNDEX`, `ID_MN_RESI`, `ID_UNIDADE`, datas e números de notificação quando esses campos existem."
-        ),
-        details_heading="**Nomes de pacientes repetidos e informações disponíveis para diferenciar homônimos:**",
-        details_caption=(
-            "O gráfico de barras “Principais NM_PACIENT com sobreposição” foi removido. A tabela e o CSV mantêm "
-            "os nomes repetidos e os campos de apoio à revisão."
-        ),
-    )
+    with st.expander("Campos de referência e efeito na classificação", expanded=False):
+        st.caption(
+            "A tabela documenta a coluna efetivamente detectada, inclusive os aliases `DT_NOTIF`/`DT_NOTIFIC`, "
+            "`DT_DIGIT`/`DT_DIGITA` e o fallback de `DT_NASC` quando `ANO_NASC` não estiver disponível."
+        )
+        reference_df = _sinan_overlap_reference_table(columns, context_cols, exprs)
+        copyable_dataframe(reference_df, width="stretch", hide_index=True)
+        download_button(
+            reference_df,
+            "sinan_sobreposicao_campos_referencia_multicriterio.csv",
+            label="Baixar tabela de campos e regras",
+            max_rows=0,
+        )
+
 
 
 def render_indicators_tab(table: LoadedTable, source: str, base_where: str, graph_where: str, exprs: Dict[str, Optional[str]]) -> None:
