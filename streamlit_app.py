@@ -10111,36 +10111,6 @@ def _render_sinan_overlap_pair_block(
 
     if pairs.empty:
         st.info("Não foi possível formar pares dentro dos limites configurados.")
-    else:
-        classification_summary = summarize_sinan_overlap_pairs(
-            pairs,
-            theoretical_pairs=theoretical_pairs,
-        )
-        st.markdown("**Resumo por classificação multicritério**")
-        st.caption(
-            "Percentuais sobre pares teóricos deixam explícita a cobertura quando há truncamento por desempenho; "
-            "percentuais sobre pares classificados descrevem apenas o conjunto efetivamente auditado."
-        )
-        copyable_dataframe(classification_summary, width="stretch", hide_index=True)
-        download_button(
-            classification_summary,
-            f"sinan_{file_slug}_resumo_classificacao_multicriterio.csv",
-            label="Baixar resumo por classificação",
-            max_rows=0,
-        )
-
-        st.markdown("**Pares classificados e evidências utilizadas**")
-        st.caption(
-            "A tabela preserva os valores dos dois registros, as diferenças em dias por campo, o maior intervalo "
-            "observado, os conflitos demográficos e as mudanças de classificação/etiologia que fundamentaram a decisão."
-        )
-        copyable_dataframe(pairs, width="stretch", hide_index=True)
-        download_button(
-            pairs,
-            f"sinan_{file_slug}_pares_classificados_multicriterio.csv",
-            label="Baixar CSV dos pares classificados",
-            max_rows=0,
-        )
 
     st.markdown(f"#### Todos os registros envolvidos na sobreposição simples de `{display_label}`")
     st.caption(
