@@ -7384,7 +7384,9 @@ def _copyable_table_payload(df: pd.DataFrame) -> Tuple[str, str]:
     """Gera versões HTML e TSV para colagem em Google Docs/editores."""
     if df is None or df.empty:
         return "", ""
-    out = df.copy()
+    # A saída do botão de cópia é textual. Convertemos antes para object porque
+    # dtypes anuláveis do pandas (Int64, Float64, boolean etc.) não aceitam "".
+    out = df.astype(object).copy()
     out = out.where(pd.notna(out), "")
     html_table = out.to_html(index=False, escape=True, border=1)
     tsv_table = out.to_csv(index=False, sep="\t", lineterminator="\n")
