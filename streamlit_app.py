@@ -68,7 +68,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-07-24-v50-sobreposicao-multicriterio"
+APP_VERSION = "2026-07-25-v50-sobreposicao-tabelas-classificacao"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos
@@ -10060,6 +10060,19 @@ def _render_sinan_overlap_pair_block(
         st.success(f"Não há `{display_label}` repetido no recorte atual.")
         return
 
+    st.markdown(f"#### Todos os registros envolvidos na sobreposição simples de `{display_label}`")
+    st.caption(
+        "Relação completa, com uma linha por registro candidato. Inclui os cinco campos temporais solicitados, "
+        "`CLASSI_FIN`, `CON_DIAGES`, `ANO_NASC`, `CS_SEXO` e os principais campos administrativos disponíveis."
+    )
+    copyable_dataframe(records, width="stretch", hide_index=True)
+    download_button(
+        records,
+        f"sinan_{file_slug}_todos_os_registros_candidatos.csv",
+        label="Baixar CSV completo dos registros candidatos",
+        max_rows=0,
+    )
+
     st.markdown(f"#### {classification_heading}")
     st.caption(
         "Cada linha da tabela de auditoria corresponde a um par de registros da mesma chave candidata. "
@@ -10093,37 +10106,50 @@ def _render_sinan_overlap_pair_block(
     p4.metric("Não duplicidade provável", f"{nondup_pairs:,}".replace(",", "."))
     p5.metric("Revisão manual", f"{review_pairs:,}".replace(",", "."))
 
-    st.markdown("**Cobertura da comparação par a par**")
-    copyable_dataframe(coverage, width="stretch", hide_index=True)
     if omitted_pairs > 0:
         st.warning(
             f"Foram classificados {classified_pairs:,} de {theoretical_pairs:,} pares. "
             f"{omitted_pairs:,} par(es) ficaram fora por causa dos limites de desempenho configurados. "
-            "A relação de registros candidatos abaixo permanece disponível para revisão."
+            "A relação completa dos registros candidatos permanece disponível acima para revisão."
             .replace(",", ".")
         )
-    download_button(
-        coverage,
-        f"sinan_{file_slug}_cobertura_comparacao_pares.csv",
-        label="Baixar cobertura da comparação",
-        max_rows=0,
-    )
 
     if pairs.empty:
         st.info("Não foi possível formar pares dentro dos limites configurados.")
+        return
 
-    st.markdown(f"#### Todos os registros envolvidos na sobreposição simples de `{display_label}`")
-    st.caption(
-        "Relação completa, com uma linha por registro candidato. Inclui os cinco campos temporais solicitados, "
-        "`CLASSI_FIN`, `CON_DIAGES`, `ANO_NASC`, `CS_SEXO` e os principais campos administrativos disponíveis."
+    classification_tables = (
+        (
+            "Duplicidade provável",
+            "duplicidade_provavel",
+            "Pares com maior evidência de representarem o mesmo atendimento ou uma duplicação do registro.",
+        ),
+        (
+            "Não duplicidade provável",
+            "nao_duplicidade_provavel",
+            "Pares com evidências de registros distintos, como conflito de identidade, mudança etiológica efetiva ou intervalo temporal compatível com outro atendimento.",
+        ),
+        (
+            "Revisão manual",
+            "revisao_manual",
+            "Pares em que os campos disponíveis não permitem concluir com segurança pela duplicidade ou pela não duplicidade.",
+        ),
     )
-    copyable_dataframe(records, width="stretch", hide_index=True)
-    download_button(
-        records,
-        f"sinan_{file_slug}_todos_os_registros_candidatos.csv",
-        label="Baixar CSV completo dos registros candidatos",
-        max_rows=0,
-    )
+
+    for class_label, class_slug, class_caption in classification_tables:
+        st.markdown(f"**Tabela — {class_label}**")
+        st.caption(class_caption)
+        class_df = pairs.loc[pairs["classe_ampla"].eq(class_label)].copy()
+        if class_df.empty:
+            st.info(f"Nenhum par foi classificado como “{class_label}” no recorte atual.")
+            continue
+        copyable_dataframe(class_df, width="stretch", hide_index=True)
+        download_button(
+            class_df,
+            f"sinan_{file_slug}_pares_{class_slug}.csv",
+            label=f"Baixar CSV — {class_label}",
+            max_rows=0,
+        )
 
 
 # -----------------------------------------------------------------------------
