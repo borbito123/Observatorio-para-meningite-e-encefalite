@@ -68,7 +68,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-07-25-v50-sobreposicao-tabelas-classificacao"
+APP_VERSION = "2026-07-26-v51-sobreposicao-tabelas-enxutas"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos
@@ -9991,6 +9991,78 @@ def _sinan_overlap_simple_summary_table(
     )
 
 
+SINAN_OVERLAP_CLASSIFICATION_COLUMNS_TO_HIDE: Tuple[str, ...] = (
+    # Identificadores técnicos e chave auxiliar.
+    "id_registro",
+    "id_registro_fonte",
+    "id_registro_a",
+    "id_registro_b",
+    "chave_candidata_normalizada",
+    # Colunas administrativas solicitadas para remoção.
+    "id_agravo_a",
+    "id_agravo_b",
+    "municipio_notificacao_a",
+    "municipio_notificacao_b",
+    "municipio_residencia_a",
+    "municipio_residencia_b",
+    "conflito_identidade",
+    "status_nm_pacient",
+    # Colunas de apoio/diagnóstico mostradas nos anexos.
+    "campos_identidade_comparados",
+    "campos_identidade_concordantes",
+    "datas_comparaveis",
+    "datas_proximas",
+    "datas_intermediarias",
+    "datas_distantes",
+    "maior_diferenca_dias",
+    "campo_maior_diferenca",
+    "campos_temporais_proximos",
+    "campos_temporais_intermediarios",
+    "campos_temporais_distantes",
+    "prioridade_revisao",
+    "classificacao_sobreposicao",
+    "classe_ampla",
+    "definicao_operacional",
+)
+
+
+def _prepare_sinan_overlap_classification_table(
+    class_df: pd.DataFrame,
+    *,
+    candidate_type: str,
+) -> pd.DataFrame:
+    """Aplica a seleção e a ordem final das três tabelas de classificação.
+
+    A transformação é apenas de apresentação/exportação: as colunas técnicas
+    continuam disponíveis no DataFrame ``pairs`` para métricas e regras internas.
+    """
+    if class_df is None or class_df.empty:
+        return pd.DataFrame() if class_df is None else class_df.copy()
+
+    prepared = class_df.drop(
+        columns=[
+            column
+            for column in SINAN_OVERLAP_CLASSIFICATION_COLUMNS_TO_HIDE
+            if column in class_df.columns
+        ],
+        errors="ignore",
+    ).copy()
+
+    repeated_label = "Nome repetido" if candidate_type == "name" else "NU_NOTIF repetido"
+    if "chave_candidata" in prepared.columns:
+        prepared = prepared.rename(columns={"chave_candidata": repeated_label})
+
+    # Mantém a ordem de exportação em primeiro lugar e posiciona a chave repetida
+    # imediatamente depois, conforme solicitado.
+    leading_columns = [
+        column
+        for column in ("ordem_exportacao", repeated_label)
+        if column in prepared.columns
+    ]
+    remaining_columns = [column for column in prepared.columns if column not in leading_columns]
+    return prepared.loc[:, leading_columns + remaining_columns]
+
+
 def _render_sinan_overlap_pair_block(
     table: LoadedTable,
     base_where: str,
@@ -10143,6 +10215,10 @@ def _render_sinan_overlap_pair_block(
         if class_df.empty:
             st.info(f"Nenhum par foi classificado como “{class_label}” no recorte atual.")
             continue
+        class_df = _prepare_sinan_overlap_classification_table(
+            class_df,
+            candidate_type=candidate_type,
+        )
         copyable_dataframe(class_df, width="stretch", hide_index=True)
         download_button(
             class_df,
