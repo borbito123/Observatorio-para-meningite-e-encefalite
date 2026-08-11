@@ -47,6 +47,10 @@ Link para a versão no streamlti: https://fgwybuegynhnli87zeyurr.streamlit.app/
 
 _Observação: Para contornar eventuais problemas de memória ou crashes do aplicativo, foram impostas algumas limitações que podem ser modificadas pelo usuário. No canto esquerdo da aba "Orientação" há a opção "desempenho e memória" que permite ajustar essas limitações._
 
+## Metodologia_
+
+Consulte esta seção para se familarizar com os CID-10 envolvidos em meningoencefalites e a tabela-resumo referente aos padrões liquóricos vigentes na literatura atual.
+
 ## _Gráficos incluídos_
 
 ### Para SINAN
