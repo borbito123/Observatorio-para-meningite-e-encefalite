@@ -35,7 +35,8 @@ Link: https://ee.kobotoolbox.org/x/ifAQUhNw.
 # Em construção - Painel Streamlit para análise do banco de dados = SINAN, SIM e CIHA
 
 Este app em Python foi feito para análise epidemiológica a partir de arquivos `.parquet ou .duckdb` do DATASUS, com foco nos três bancos de dados supracitados.
-Link para a versão no streamlti: https://fgwybuegynhnli87zeyurr.streamlit.app/
+
+Link para a versão mais atual do streamlit (acessível de qualquer dispositivo): https://fgwybuegynhnli87zeyurr.streamlit.app/
 
 ## _O que o app faz_
 
