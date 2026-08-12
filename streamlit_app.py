@@ -68,7 +68,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-08-11-v54-cid10-causa-basica-nao-basica-municipio-residencia"
+APP_VERSION = "2026-07-26-v52-sobreposicao-criterios-ampliados"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos
@@ -93,7 +93,6 @@ LETHALITY_RED = DEATH_RED
 LETHALITY_LABEL = "Letalidade — óbitos por meningite / confirmados"
 LETHALITY_KNOWN_EVOL_LABEL = "Letalidade — óbitos por meningite / confirmados com evolução conhecida"
 DARK_GRAY = "#4D4D4D"
-TOTAL_CASES_YELLOW = "#F2C230"
 COVID_CONTEXT_NOTE = (
     "Anotação de contexto 2020-2021: pandemia de COVID-19, reorganização assistencial, "
     "alteração da circulação de agentes respiratórios e possibilidade de subnotificação. "
@@ -412,7 +411,6 @@ TITLE_EXACT_FIXES = {
     "escolaridade — casos confirmados e descartados": "Escolaridade — casos confirmados e descartados",
     "ocorrência de hospitalização por meningite": "Ocorrência de hospitalização por meningite",
     "prevalência acumulada dos sinais e sintomas entre confirmados": "Prevalência acumulada dos sinais e sintomas entre confirmados",
-    "número de comunicantes por realização de quimioprofilaxia": "Número de comunicantes por realização de quimioprofilaxia",
     "vacinação informada como 'sim' por classificação final do caso": "Vacinação informada como “Sim” por classificação final do caso",
     "critério de confirmação entre casos confirmados": "Critério de confirmação entre casos confirmados",
     "classificação etiológica convertida para cid-10": "Classificação etiológica convertida para CID-10",
@@ -530,27 +528,6 @@ def style_plotly_figure(fig: go.Figure) -> go.Figure:
 def render_plotly_chart(fig: go.Figure) -> None:
     """Renderiza Plotly com configuração leve e consistente."""
     st.plotly_chart(style_plotly_figure(fig), width="stretch", config=PLOTLY_CONFIG)
-
-
-def horizontal_bar_chart_height(
-    n_categories: int,
-    *,
-    min_height: int = 420,
-    px_per_category: int = 34,
-    max_height: int = 1400,
-) -> int:
-    """Calcula uma altura dinâmica para gráficos de barra horizontal.
-
-    Gráficos de barra horizontal com muitas categorias (por exemplo, distribuição por
-    tipo de CID-10, que pode ter dezenas de categorias) ficam com barras espremidas
-    quando renderizados numa altura fixa — a ponto de ocultar os próprios rótulos de
-    referência das categorias. Esta função escala a altura do gráfico conforme o
-    número de categorias, respeitando um mínimo (gráficos com poucas categorias não
-    ficam baixos demais) e um máximo (evita gráficos absurdamente altos).
-    """
-    if n_categories <= 0:
-        return min_height
-    return int(min(max_height, max(min_height, px_per_category * n_categories + 160)))
 
 
 def _session_int(key: str, default: int) -> int:
@@ -1286,6 +1263,275 @@ SINAN_CLA_ME_ETI = {
     "77": "77 — Taenia solium",
 }
 
+# CLA_SOROGR vem do Quadro VI do dicionário SINAN NET Meningite (campo 53 —
+# habilitado quando CON_DIAGES = 01, 02 ou 03, isto é, casos confirmados de
+# Neisseria meningitidis).
+SINAN_CLA_SOROGR = {
+    "01": "01 — A",
+    "02": "02 — B",
+    "03": "03 — C",
+    "04": "04 — D",
+    "05": "05 — X",
+    "06": "06 — Y",
+    "07": "07 — Z",
+    "08": "08 — W135",
+    "09": "09 — 29E",
+}
+
+QUADROS_ETIOLOGICOS_SINAN: List[Dict[str, object]] = [
+    {
+        "numero": "I",
+        "titulo": "Quadro I — Lista de etiologias com critério de confirmação compatível (campo 51 — Se confirmado, especifique)",
+        "colunas": ["Código", "Etiologia", "Critérios de confirmação permitidos"],
+        "linhas": [
+            ["01", "Meningococcemia", "1, 2, 3, 4, 5, 7, 9, 10"],
+            ["02", "Meningite meningocócica", "1, 2, 3, 5, 7, 9, 10"],
+            ["03", "Meningite meningocócica com meningococcemia", "1, 2, 3, 4, 5, 7, 9, 10"],
+            ["04", "Meningite tuberculosa", "1, 4, 5, 6, 7, 9, 10"],
+            ["05", "Meningite por outras bactérias", "Ver Quadro II"],
+            ["06", "Meningite não especificada", "4, 6"],
+            ["07", "Meningite asséptica", "Ver Quadro III"],
+            ["08", "Meningite por outra etiologia", "1, 3, 5, 9, 10"],
+            ["09", "Meningite por Hemófilo", "1, 2, 3, 7, 9, 10"],
+            ["10", "Meningite por Pneumococo", "1, 3, 9, 10"],
+        ],
+    },
+    {
+        "numero": "II",
+        "titulo": "Quadro II — Meningites por outras bactérias (categoria 5 do campo 51; campo CLA_ME_BAC)",
+        "colunas": ["Código", "Bactéria", "Critério"],
+        "linhas": [
+            ["09", "Shigella sp", "1, 9"],
+            ["10", "Staphylococcus (aureus, sp, epidermidis)", "1, 9"],
+            ["11", "Salmonella sp", "1, 9"],
+            ["12", "Escherichia coli", "1, 9"],
+            ["13", "Klebsiella (sp, pneumoniae)", "1, 9"],
+            ["14", "Streptococcus (sp, pyogenes, agalactiae)", "1, 3, 9"],
+            ["15", "Enterococcus", "1, 9"],
+            ["16", "Pseudomonas (aeruginosa, sp)", "1, 9"],
+            ["18", "Serratia (marcescens, sp)", "1, 9"],
+            ["19", "Alcaligenes (sp, faecalis)", "1, 9"],
+            ["20", "Proteus (sp, vulgaris, mirabilis)", "1, 9"],
+            ["21", "Listeria monocytogenes", "1, 9"],
+            ["22", "Enterobacter (sp, cloacae)", "1, 9"],
+            ["23", "Acinetobacter (sp, baumannii)", "1, 9"],
+            ["26", "Neisseria sp", "1, 9"],
+            ["28", "Outras bactérias", "1, 9"],
+            ["45", "Treponema pallidum", "1, 9"],
+            ["46", "Rickettsiae", "1, 9"],
+            ["49", "Leptospira", "1, 9"],
+            ["81", "Bactéria não especificada", "4, 5, 6"],
+        ],
+    },
+    {
+        "numero": "III",
+        "titulo": "Quadro III — Agentes de meningite asséptica (categoria 7 do campo 51; campo CLA_ME_ASS)",
+        "colunas": ["Código", "Agente", "Critério"],
+        "linhas": [
+            ["75", "Não identificado", "4, 6"],
+            ["37", "Caxumba", "4, 7, 8, 9"],
+            ["38", "Sarampo", "7, 8, 9"],
+            ["39", "Herpes simples", "4, 7, 8, 9"],
+            ["40", "Varicela/Catapora/Herpes Zoster", "4, 7, 8, 9"],
+            ["41", "Rubéola", "7, 8, 9"],
+            ["55", "Influenza", "7, 8, 9"],
+            ["70", "Adenovírus", "7, 8, 9"],
+            ["56", "Echovírus", "7, 8, 9"],
+            ["63", "Coxsackie", "7, 8, 9"],
+            ["59", "Outros enterovírus", "7, 8, 9"],
+            ["71", "Vírus do Nilo Ocidental", "7, 8, 9"],
+            ["72", "Dengue", "7, 8, 9"],
+            ["73", "Outros arbovírus", "7, 8, 9"],
+            ["74", "Outros vírus", "7, 8, 9"],
+        ],
+    },
+    {
+        "numero": "IV",
+        "titulo": "Quadro IV — Meningites por outras etiologias (categoria 8 do campo 51; campo CLA_ME_ETI)",
+        "colunas": ["Código", "Etiologia"],
+        "linhas": [
+            ["42", "Outros fungos"],
+            ["43", "Cryptococcus/Torula"],
+            ["44", "Candida albicans, sp"],
+            ["47", "Tripanossoma cruzi"],
+            ["48", "Toxoplasma (gondii, sp)"],
+            ["50", "Cisticerco"],
+            ["52", "Outros parasitas"],
+            ["76", "Plasmodium sp"],
+            ["77", "Taenia solium"],
+            ["64", "Aspergillus"],
+        ],
+    },
+    {
+        "numero": "V",
+        "titulo": "Quadro V — Critérios de confirmação (campo CRITERIO)",
+        "colunas": ["Código", "Critério de confirmação"],
+        "linhas": [
+            ["01", "Cultura"],
+            ["02", "CIE"],
+            ["03", "Ag. Látex"],
+            ["04", "Clínico"],
+            ["05", "Bacterioscopia"],
+            ["06", "Quimiocitológico"],
+            ["07", "Clínico-epidemiológico"],
+            ["08", "Isolamento viral"],
+            ["09", "PCR"],
+            ["10", "Outros"],
+        ],
+    },
+    {
+        "numero": "VI",
+        "titulo": "Quadro VI — Sorogrupos de Neisseria meningitidis (campo CLA_SOROGR)",
+        "colunas": ["Código", "Sorogrupo"],
+        "linhas": [
+            ["01", "A"],
+            ["02", "B"],
+            ["03", "C"],
+            ["04", "D"],
+            ["05", "X"],
+            ["06", "Y"],
+            ["07", "Z"],
+            ["08", "W135"],
+            ["09", "29E"],
+        ],
+    },
+    {
+        "numero": "VII",
+        "titulo": "Quadro VII — Etiologias das meningites para resultado de Cultura (campo 49)",
+        "colunas": ["Código", "Agente etiológico"],
+        "linhas": [
+            ["61", "Não realizado"],
+            ["62", "Ignorado"],
+            ["01", "Neisseria meningitidis"],
+            ["06", "Haemophilus influenzae"],
+            ["07", "Streptococcus pneumoniae"],
+            ["28", "Outras bactérias"],
+            ["51", "Nenhum agente"],
+        ],
+    },
+    {
+        "numero": "VIII",
+        "titulo": "Quadro VIII — Etiologias das meningites para resultado de Bacterioscopia (campo 49)",
+        "colunas": ["Código", "Resultado"],
+        "linhas": [
+            ["61", "Não realizado"],
+            ["62", "Ignorado"],
+            ["32", "Bacilos Gram negativo"],
+            ["31", "Bacilos Gram positivo"],
+            ["30", "Bastonetes Gram negativo"],
+            ["29", "Bastonetes Gram positivo"],
+            ["36", "Cocobacilos"],
+            ["34", "Cocos Gram negativo"],
+            ["33", "Cocos Gram positivo"],
+            ["35", "Diplobacilos Gram negativo"],
+            ["03", "Diplococos Gram negativo"],
+            ["08", "Diplococos Gram positivo"],
+            ["28", "Outras bactérias"],
+            ["51", "Nenhum agente"],
+        ],
+    },
+    {
+        "numero": "IX",
+        "titulo": "Quadro IX — Etiologias das meningites para resultado de CIE (campo 49)",
+        "colunas": ["Código", "Agente etiológico"],
+        "linhas": [
+            ["61", "Não realizado"],
+            ["62", "Ignorado"],
+            ["01", "Neisseria meningitidis"],
+            ["06", "Haemophilus influenzae"],
+            ["51", "Nenhum agente"],
+        ],
+    },
+    {
+        "numero": "X",
+        "titulo": "Quadro X — Etiologias das meningites para resultado de Aglutinação pelo Látex (campo 49)",
+        "colunas": ["Código", "Agente etiológico"],
+        "linhas": [
+            ["61", "Não realizado"],
+            ["62", "Ignorado"],
+            ["01", "Neisseria meningitidis"],
+            ["43", "Criptococos"],
+            ["06", "Haemophilus influenzae"],
+            ["14", "Streptococcus (sp, piogênico, alfa-hemolítico, fecalis, agalactiae)"],
+            ["07", "Streptococcus pneumoniae"],
+            ["28", "Outras bactérias"],
+            ["51", "Nenhum agente"],
+        ],
+    },
+    {
+        "numero": "XI",
+        "titulo": "Quadro XI — Etiologias das meningites para resultado de Isolamento Viral (campo 49)",
+        "colunas": ["Código", "Agente etiológico"],
+        "linhas": [
+            ["75", "Não identificado"],
+            ["37", "Caxumba"],
+            ["38", "Sarampo"],
+            ["39", "Herpes simples"],
+            ["40", "Varicela/Catapora/Herpes Zoster"],
+            ["41", "Rubéola"],
+            ["55", "Influenza"],
+            ["70", "Adenovírus"],
+            ["56", "Echovírus"],
+            ["63", "Coxsackie"],
+            ["59", "Outros enterovírus"],
+            ["71", "Vírus do Nilo Ocidental"],
+            ["72", "Dengue"],
+            ["73", "Outros arbovírus"],
+            ["74", "Outros vírus"],
+        ],
+    },
+    {
+        "numero": "XII",
+        "titulo": "Quadro XII — Etiologias das meningites para resultado de PCR (campo 49)",
+        "colunas": ["Código", "Agente etiológico"],
+        "linhas": [
+            ["62", "Ignorado"],
+            ["37", "Caxumba"],
+            ["38", "Sarampo"],
+            ["39", "Herpes simples"],
+            ["40", "Varicela/Catapora/Herpes Zoster"],
+            ["41", "Rubéola"],
+            ["55", "Influenza"],
+            ["72", "Dengue"],
+            ["61", "Não realizado"],
+            ["75", "Não identificado"],
+            ["70", "Adenovírus"],
+            ["56", "Echovírus"],
+            ["63", "Coxsackie"],
+            ["59", "Outros enterovírus"],
+            ["71", "Vírus do Nilo Ocidental"],
+            ["73", "Outros arbovírus"],
+            ["74", "Outros vírus"],
+            ["01", "Neisseria meningitidis"],
+            ["06", "Haemophilus influenzae"],
+            ["07", "Streptococcus pneumoniae"],
+            ["28", "Outras bactérias"],
+            ["43", "Cryptococcus/Torula"],
+            ["42", "Outros fungos"],
+            ["48", "Toxoplasma (gondii, sp)"],
+            ["52", "Outros parasitas"],
+            ["51", "Nenhum agente"],
+        ],
+    },
+]
+# Fonte: Dicionário de Dados — SINAN NET — versão 5.0 (Meningite), Ministério da Saúde/SVS, anexos Quadros I a XII.
+
+
+def render_quadros_etiologicos_sinan() -> None:
+    """Quadros-anexo I a XII do Dicionário de Dados SINAN NET — Meningite, ocultos até o usuário abrir a aba."""
+    with st.expander("Quadros etiológicos presentes na ficha do SINAN", expanded=False):
+        st.caption(
+            "Anexos I a XII do Dicionário de Dados SINAN NET — Meningite (Ministério da Saúde), "
+            "usados para o preenchimento de CRITERIO, CON_DIAGES, CLA_ME_BAC, CLA_ME_ASS, CLA_ME_ETI e CLA_SOROGR na ficha de investigação."
+        )
+        quadro_tabs = st.tabs([f"Quadro {q['numero']}" for q in QUADROS_ETIOLOGICOS_SINAN])
+        for quadro_tab, quadro in zip(quadro_tabs, QUADROS_ETIOLOGICOS_SINAN):
+            with quadro_tab:
+                st.markdown(f"**{quadro['titulo']}**")
+                quadro_df = pd.DataFrame(quadro["linhas"], columns=quadro["colunas"])
+                copyable_dataframe(quadro_df, width="stretch", hide_index=True)
+
+
 SINAN_OTHER_BACTERIA_CID10_RULE_ROWS = [
     {
         "Cenário": "CON_DIAGES 05 + CLA_ME_BAC 11, 21, 45 ou 49; ou texto compatível com salmonela, listeriose, neurossífilis/sífilis ou leptospirose",
@@ -1530,18 +1776,6 @@ SINAN_SYMPTOM_FIELDS = [
     ("CLI_COMA", "Coma"),
     ("CLI_OUTRAS", "Outras manifestações"),
 ]
-
-# Rótulo do sintoma "Abaulamento de fontanela" (deve casar exatamente com o label usado
-# em SINAN_SYMPTOM_FIELDS acima) e idade máxima (em anos) até a qual a fontanela
-# costuma permanecer aberta, usada para restringir a curva anual desse sintoma.
-FONTANELA_SYMPTOM_LABEL = "Abaulamento de fontanela"
-FONTANELA_MAX_AGE_YEARS = 2
-FONTANELA_AGE_NOTE = (
-    "Observação clínica: a fontanela costuma permanecer aberta até, no máximo, 24 meses "
-    "(2 anos) de idade, deixando de ser um sintoma pertinente para avaliar casos que "
-    "ultrapassam essa idade. Por isso, a curva anual abaixo considera apenas os casos "
-    "com idade de até 2 anos."
-)
 
 SINAN_VACCINE_FIELDS = [
     ("ANT_AC", "Polissacarídica A/C"),
@@ -2100,6 +2334,35 @@ def sinan_expected_etiology_group_expr(con_code_sql: str, cla_me_eti_code_sql: O
             WHEN {con_code_sql} = '08' AND {eti_expr} IN ({fungal_codes}) THEN 'Fúngica'
             WHEN {con_code_sql} = '08' THEN 'Outra etiologia (não fúngica)'
             ELSE NULL
+        END
+    """
+
+
+def sinan_microorganism_label_expr(
+    con_code_sql: str,
+    cla_me_bac_label_sql: Optional[str],
+    cla_me_ass_label_sql: Optional[str],
+    cla_me_eti_label_sql: Optional[str],
+) -> str:
+    """Consolida, para casos confirmados, um único rótulo de microrganismo/agente
+    etiológico por registro, a partir de CON_DIAGES (campo 51) e dos campos
+    complementares CLA_ME_BAC (Quadro II), CLA_ME_ASS (Quadro III) e CLA_ME_ETI
+    (Quadro IV) do dicionário de dados do SINAN NET — Meningite. Usado apenas
+    para o ranking dos microrganismos mais prevalentes entre confirmados."""
+    bac_expr = cla_me_bac_label_sql or "NULL"
+    ass_expr = cla_me_ass_label_sql or "NULL"
+    eti_expr = cla_me_eti_label_sql or "NULL"
+    return f"""
+        CASE
+            WHEN {con_code_sql} IN ('01', '02', '03') THEN 'Neisseria meningitidis (meningococcemia/meningite meningocócica)'
+            WHEN {con_code_sql} = '04' THEN 'Mycobacterium tuberculosis (meningite tuberculosa)'
+            WHEN {con_code_sql} = '09' THEN 'Haemophilus influenzae'
+            WHEN {con_code_sql} = '10' THEN 'Streptococcus pneumoniae'
+            WHEN {con_code_sql} = '05' THEN COALESCE({bac_expr}, 'Meningite por outras bactérias — sem especificação/ignorado')
+            WHEN {con_code_sql} = '07' THEN COALESCE({ass_expr}, 'Meningite asséptica — sem especificação/ignorado')
+            WHEN {con_code_sql} = '08' THEN COALESCE({eti_expr}, 'Meningite por outra etiologia — sem especificação/ignorado')
+            WHEN {con_code_sql} = '06' THEN 'Meningite não especificada — agente não identificado'
+            ELSE 'Sem conclusão diagnóstica específica/ignorado'
         END
     """
 
@@ -3950,6 +4213,7 @@ class ColumnSelection:
     cla_me_bac_col: Optional[str] = None
     cla_me_ass_col: Optional[str] = None
     cla_me_eti_col: Optional[str] = None
+    cla_sorogr_col: Optional[str] = None
     sinan_auxiliary_cid10_cols: Optional[List[str]] = None
     evolucao_col: Optional[str] = None
     criterio_col: Optional[str] = None
@@ -4023,6 +4287,7 @@ def default_selections(source: str, columns: Sequence[str]) -> ColumnSelection:
         sel.cla_me_bac_col = choose_candidate(columns, ["CLA_ME_BAC", "CLASSIFICACAO_BACTERIA", "CLASS_BACTERIA"])
         sel.cla_me_ass_col = choose_candidate(columns, ["CLA_ME_ASS", "CLASSIFICACAO_ASSEPTICA", "CLASS_ASSEPTICA"])
         sel.cla_me_eti_col = choose_candidate(columns, ["CLA_ME_ETI", "CLASSIFICACAO_ETIOLOGIA", "CLASS_ETIOLOGIA"])
+        sel.cla_sorogr_col = choose_candidate(columns, ["CLA_SOROGR", "SOROGRUPO", "CO_SOROGRUPO", "CLASSIFICACAO_SOROGRUPO"])
         sel.sinan_auxiliary_cid10_cols = choose_candidates(columns, SINAN_AUXILIARY_CID10_CANDIDATES, max_items=12)
         sel.evolucao_col = choose_candidate(columns, ["EVOLUCAO"])
         sel.criterio_col = choose_candidate(columns, ["CRITERIO"])
@@ -4152,6 +4417,8 @@ def build_expressions(source: str, sel: ColumnSelection) -> Dict[str, Optional[s
         exprs["cla_me_ass_label"] = case_from_mapping(exprs["cla_me_ass_code"], SINAN_CLA_ME_ASS, "Sem agente viral/asséptico especificado") if exprs["cla_me_ass_code"] else None
         exprs["cla_me_eti_code"] = clean_code_expr(sel.cla_me_eti_col, pad2=True) if sel.cla_me_eti_col else None
         exprs["cla_me_eti_label"] = case_from_mapping(exprs["cla_me_eti_code"], SINAN_CLA_ME_ETI, "Sem outra etiologia especificada") if exprs["cla_me_eti_code"] else None
+        exprs["cla_sorogr_code"] = clean_code_expr(sel.cla_sorogr_col, pad2=True) if sel.cla_sorogr_col else None
+        exprs["cla_sorogr_label"] = case_from_mapping(exprs["cla_sorogr_code"], SINAN_CLA_SOROGR, "Sem sorogrupo especificado/ignorado") if exprs["cla_sorogr_code"] else None
         exprs["sinan_aux_text"] = text_concat_expr(sel.sinan_auxiliary_cid10_cols or [])
         if exprs["con_code"]:
             exprs["sinan_cid10_conversion_group"] = sinan_cid10_conversion_group_expr(exprs["con_code"], exprs.get("cla_me_bac_code"), exprs.get("sinan_aux_text"))
@@ -4198,13 +4465,14 @@ def build_expressions(source: str, sel: ColumnSelection) -> Dict[str, Optional[s
         exprs["causabas_o_cid"] = cid_extract_expr([sel.causabas_o_col] if sel.causabas_o_col else [])
         exprs["causabas_group"] = cid_group_expr(exprs["causabas_cid"]) if exprs["causabas_cid"] else None
         exprs["causabas_type"] = cid_type_expr(exprs["causabas_cid"]) if exprs["causabas_cid"] else None
-        non_basic_cid_cols = [c for c in sel.cid_cols if c and c != sel.causabas_col]
-        exprs["causabas_non_basic_cid"] = cid_extract_expr(non_basic_cid_cols) if non_basic_cid_cols else None
         exprs["lococor_label"] = case_from_mapping(clean_code_expr("LOCOCOR"), SIM_LOCOCOR, "Sem informação/ignorado") if "LOCOCOR" in [sel.municipality_event_col, sel.municipality_res_col] else None
         exprs["obitograv_code"] = clean_code_expr(sel.obitograv_col) if sel.obitograv_col else None
         exprs["obitograv_label"] = case_from_mapping(exprs["obitograv_code"], SIM_OBITOGRAV, "Sem informação/ignorado") if exprs.get("obitograv_code") else None
         exprs["obitopuerp_code"] = clean_code_expr(sel.obitopuerp_col) if sel.obitopuerp_col else None
         exprs["obitopuerp_label"] = case_from_mapping(exprs["obitopuerp_code"], SIM_OBITOPUERP, "Sem informação/ignorado") if exprs.get("obitopuerp_code") else None
+        # Colunas de causa não-básica (linhas da DO): excluem CAUSABAS, CAUSABAS_O, CB_PRE e ATESTADO
+        _sim_non_basic_candidates = {"LINHAA", "LINHAB", "LINHAC", "LINHAD", "LINHAII"}
+        exprs["sim_non_basic_cid_cols"] = [c for c in (sel.cid_cols or []) if c.upper() in _sim_non_basic_candidates]
     elif source == "CIHA":
         exprs["diag_princ_cid"] = cid_extract_expr([sel.diag_princ_col] if sel.diag_princ_col else [])
         exprs["diag_secun_cid"] = cid_extract_expr([sel.diag_secun_col] if sel.diag_secun_col else [])
@@ -4921,32 +5189,113 @@ def query_cid_distribution(table: LoadedTable, exprs: Dict[str, Optional[str]], 
     return df
 
 
-def query_sim_cause_cid_frequency(table: LoadedTable, cid_sql: Optional[str], where_sql: str) -> pd.DataFrame:
-    """Frequência de cada código CID-10 para um critério de causa específico no SIM.
+def query_sim_cid_freq_by_role(
+    table: LoadedTable,
+    role: str,
+    causabas_cid_expr: Optional[str],
+    non_basic_cols: List[str],
+    where_sql: str,
+    top_n: int = 20,
+) -> pd.DataFrame:
+    """Frequência de CID-10 no SIM por papel: causa básica (CAUSABAS) ou causa não-básica (LINHAA–LINHAII).
 
-    Usado tanto para causa básica (campo CAUSABAS) quanto para causa não-básica
-    (demais campos: CAUSABAS_O e as linhas da Declaração de Óbito — LINHAA–LINHAII,
-    ATESTADO, CB_PRE). Diferente de query_cid_distribution (que soma qualquer menção,
-    sem distinguir o critério), esta consulta agrega no nível do código CID-10
-    individual dentro de um único critério, para responder qual(is) CID-10 mais
-    aparecem naquele critério.
+    Parâmetros
+    ----------
+    role : "basica" para CAUSABAS; "nao_basica" para LINHAA–LINHAII.
+    causabas_cid_expr : expressão SQL que extrai o CID de CAUSABAS.
+    non_basic_cols : nomes das colunas das linhas da DO (LINHAA, LINHAB, …).
+    where_sql : cláusula WHERE já com os filtros ativos.
+    top_n : número de CID-10 a exibir individualmente; restantes → 'Outros CID'.
     """
-    if not cid_sql:
-        return pd.DataFrame()
-    sql = f"""
-        WITH base AS (
-            SELECT {cid_sql} AS cid10, {cid_type_expr(cid_sql)} AS tipo
-            FROM {table.ref_sql}
-            {where_sql}
-        )
-        SELECT cid10, tipo, COUNT(*) AS n
-        FROM base
-        WHERE cid10 IS NOT NULL
-        GROUP BY 1, 2
-        ORDER BY n DESC, cid10
-    """
-    df = run_query(table, sql)
-    if not df.empty:
+    top_n = max(1, int(top_n or 20))
+
+    if role == "basica":
+        if not causabas_cid_expr:
+            return pd.DataFrame()
+        cid_type = cid_type_expr(causabas_cid_expr)
+        sql = f"""
+            WITH base AS (
+                SELECT
+                    ({causabas_cid_expr}) AS cid,
+                    ({cid_type}) AS tipo
+                FROM {table.ref_sql}
+                {where_sql}
+                WHERE ({causabas_cid_expr}) IS NOT NULL
+            ), agg AS (
+                SELECT cid, tipo, COUNT(*) AS n
+                FROM base
+                GROUP BY cid, tipo
+            ), with_total AS (
+                SELECT cid, tipo, n, SUM(n) OVER () AS denominador
+                FROM agg
+            ), ranked AS (
+                SELECT *, ROW_NUMBER() OVER (ORDER BY n DESC, cid) AS rn
+                FROM with_total
+            ), final AS (
+                SELECT
+                    CASE WHEN rn <= {top_n} THEN cid ELSE 'Outros CID' END AS cid,
+                    CASE WHEN rn <= {top_n} THEN tipo ELSE 'Outros CID' END AS tipo,
+                    SUM(n) AS n,
+                    MAX(denominador) AS denominador,
+                    MIN(rn) AS ordem
+                FROM ranked
+                GROUP BY
+                    CASE WHEN rn <= {top_n} THEN cid ELSE 'Outros CID' END,
+                    CASE WHEN rn <= {top_n} THEN tipo ELSE 'Outros CID' END
+            )
+            SELECT cid, tipo, n, denominador,
+                   ROUND(100.0 * n / NULLIF(denominador, 0), 2) AS pct
+            FROM final
+            ORDER BY ordem, n DESC
+        """
+        df = run_query(table, sql)
+    else:  # nao_basica
+        if not non_basic_cols:
+            return pd.DataFrame()
+        union_parts = []
+        for col in non_basic_cols:
+            col_cid = cid_extract_expr_for_col(col)
+            col_type = cid_type_expr(col_cid)
+            union_parts.append(
+                f"SELECT ({col_cid}) AS cid, ({col_type}) AS tipo"
+                f" FROM {table.ref_sql} {where_sql}"
+                f" WHERE ({col_cid}) IS NOT NULL"
+            )
+        union_sql = "\n            UNION ALL\n            ".join(union_parts)
+        sql = f"""
+            WITH all_linhas AS (
+                {union_sql}
+            ), agg AS (
+                SELECT cid, tipo, COUNT(*) AS n
+                FROM all_linhas
+                WHERE cid IS NOT NULL
+                GROUP BY cid, tipo
+            ), with_total AS (
+                SELECT cid, tipo, n, SUM(n) OVER () AS denominador
+                FROM agg
+            ), ranked AS (
+                SELECT *, ROW_NUMBER() OVER (ORDER BY n DESC, cid) AS rn
+                FROM with_total
+            ), final AS (
+                SELECT
+                    CASE WHEN rn <= {top_n} THEN cid ELSE 'Outros CID' END AS cid,
+                    CASE WHEN rn <= {top_n} THEN tipo ELSE 'Outros CID' END AS tipo,
+                    SUM(n) AS n,
+                    MAX(denominador) AS denominador,
+                    MIN(rn) AS ordem
+                FROM ranked
+                GROUP BY
+                    CASE WHEN rn <= {top_n} THEN cid ELSE 'Outros CID' END,
+                    CASE WHEN rn <= {top_n} THEN tipo ELSE 'Outros CID' END
+            )
+            SELECT cid, tipo, n, denominador,
+                   ROUND(100.0 * n / NULLIF(denominador, 0), 2) AS pct
+            FROM final
+            ORDER BY ordem, n DESC
+        """
+        df = run_query(table, sql)
+
+    if not df.empty and "n" in df.columns and "denominador" in df.columns:
         df["pct"] = (df["n"] / df["n"].sum() * 100).round(2)
     return df
 
@@ -6809,41 +7158,30 @@ def _available_column_specs(columns: Sequence[str], specs: Sequence[Tuple[str, s
     return available
 
 
-SINTOMA_GRUPO_TOTAL = "Total de casos"
-SINTOMA_GRUPO_CONFIRMADOS = "Casos confirmados"
-SINTOMA_GRUPO_DESCARTADOS = "Casos descartados / sem classificação"
-SINTOMA_GRUPO_ORDER = [SINTOMA_GRUPO_TOTAL, SINTOMA_GRUPO_CONFIRMADOS, SINTOMA_GRUPO_DESCARTADOS]
+def query_sinan_symptom_prevalence(table: LoadedTable, exprs: Dict[str, Optional[str]], where_sql: str, symptom_specs: Sequence[Tuple[str, str]], group_filter: str = "Casos confirmados", age_max_years: Optional[int] = None) -> pd.DataFrame:
+    """Consulta prevalência de sintomas por ano.
 
-
-def query_sinan_symptom_prevalence(
-    table: LoadedTable,
-    exprs: Dict[str, Optional[str]],
-    where_sql: str,
-    symptom_specs: Sequence[Tuple[str, str]],
-    age_cap_symptom: Optional[str] = None,
-    age_cap_years: Optional[float] = None,
-) -> pd.DataFrame:
-    """Calcula a prevalência anual de sinais/sintomas, aberta por grupo de caso.
-
-    O resultado traz três recortes de população por ano/sintoma: total de casos,
-    casos confirmados e casos descartados/sem classificação — permitindo escolher
-    o denominador na curva anual sem recalcular a query.
-
-    Quando `age_cap_symptom`/`age_cap_years` são informados (usado para o
-    "Abaulamento de fontanela") e a expressão de idade (`exprs["age"]`) está
-    disponível, apenas os registros daquele sintoma específico são restritos à
-    idade máxima informada; os demais sintomas não são afetados.
+    group_filter: 'Total de casos', 'Casos confirmados' (padrão) ou 'Casos descartados / sem classificação'.
+    age_max_years: quando fornecido, restringe a análise a indivíduos com idade <= age_max_years anos.
     """
     dt = exprs.get("dt")
     classi = exprs.get("classi_code")
+    age_expr = exprs.get("age")
     if not (dt and classi and symptom_specs):
         return pd.DataFrame()
 
-    age_sql = exprs.get("age")
-    age_clause = ""
-    if age_cap_symptom and age_cap_years is not None and age_sql:
-        age_clause = f"AND (sintoma <> {qstr(age_cap_symptom)} OR (({age_sql}) IS NOT NULL AND ({age_sql}) <= {age_cap_years}))"
+    if group_filter == "Total de casos":
+        classi_filter = ""
+    elif group_filter == "Casos confirmados":
+        classi_filter = "AND classi = '1'"
+    else:  # Casos descartados / sem classificação
+        classi_filter = "AND (classi IS NULL OR classi <> '1')"
 
+    age_filter = ""
+    if age_max_years is not None and age_expr:
+        age_filter = f"AND {age_expr} IS NOT NULL AND {age_expr} <= {age_max_years}"
+
+    _include_age = age_max_years is not None and bool(age_expr)
     unions = []
     for col, label in symptom_specs:
         unions.append(
@@ -6852,10 +7190,14 @@ def query_sinan_symptom_prevalence(
                    {classi} AS classi,
                    {qstr(label)} AS sintoma,
                    {clean_code_expr(col)} AS sintoma_codigo
+                   {f', CAST({age_expr} AS DOUBLE) AS idade_anos' if _include_age else ''}
             FROM {table.ref_sql}
             {where_sql}
             """
         )
+
+    _age_where = f"AND idade_anos IS NOT NULL AND idade_anos <= {age_max_years}" if _include_age else ""
+    _base_age_col = ", idade_anos" if _include_age else ""
 
     sql = f"""
         WITH long AS (
@@ -6863,41 +7205,26 @@ def query_sinan_symptom_prevalence(
         ), base AS (
             SELECT EXTRACT(YEAR FROM dt) AS ano,
                    sintoma,
-                   sintoma_codigo,
-                   classi
+                   sintoma_codigo
+                   {_base_age_col}
             FROM long
             WHERE dt IS NOT NULL
-            {age_clause}
-        ), scoped AS (
-            SELECT ano, sintoma, sintoma_codigo,
-                   {qstr(SINTOMA_GRUPO_TOTAL)} AS grupo_caso, 1 AS ordem_grupo
-            FROM base
-            UNION ALL
-            SELECT ano, sintoma, sintoma_codigo,
-                   {qstr(SINTOMA_GRUPO_CONFIRMADOS)} AS grupo_caso, 2 AS ordem_grupo
-            FROM base
-            WHERE classi = '1'
-            UNION ALL
-            SELECT ano, sintoma, sintoma_codigo,
-                   {qstr(SINTOMA_GRUPO_DESCARTADOS)} AS grupo_caso, 3 AS ordem_grupo
-            FROM base
-            WHERE classi IS NULL OR classi <> '1'
+              {classi_filter}
+              {_age_where}
         ), agg AS (
             SELECT ano,
                    sintoma,
-                   grupo_caso,
-                   ordem_grupo,
-                   COUNT(*) AS casos,
+                   COUNT(*) AS confirmados,
                    COUNT(*) FILTER (WHERE sintoma_codigo = '1') AS sintoma_sim,
                    COUNT(*) FILTER (WHERE sintoma_codigo = '2') AS sintoma_nao,
                    COUNT(*) FILTER (WHERE sintoma_codigo IS NULL OR sintoma_codigo NOT IN ('1','2')) AS sintoma_ignorado
-            FROM scoped
-            GROUP BY 1, 2, 3, 4
+            FROM base
+            GROUP BY 1, 2
         )
         SELECT *,
-               {pct_expr('sintoma_sim', 'casos')} AS pct_sintoma_casos
+               {pct_expr('sintoma_sim', 'confirmados')} AS pct_sintoma_confirmados
         FROM agg
-        ORDER BY ano, sintoma, ordem_grupo
+        ORDER BY ano, sintoma
     """
     return run_query(table, sql)
 
@@ -6981,6 +7308,61 @@ def query_sinan_hospitalization_internment(
 #     (CON_DIAGES 02/03/09: formas meningocócicas e Haemophilus influenzae).
 # Assim, o usuário enxerga o efeito do denominador amplo sem confundir cobertura
 # de intervenção com casos em que a variável não deveria ser preenchida.
+def query_sinan_communicants_identified(
+    table: LoadedTable,
+    exprs: Dict[str, Optional[str]],
+    where_sql: str,
+    communicants_col: Optional[str],
+) -> pd.DataFrame:
+    """Média de comunicantes identificados por caso confirmado elegível.
+
+    Elegível: casos confirmados com CON_DIAGES em 01, 02, 03, 05 ou 09,
+    conforme a ficha de notificação do SINAN para meningite.
+    (01 meningococcemia, 02 meningite meningocócica, 03 meningite meningocócica
+    com meningococcemia, 05 meningite por outras bactérias, 09 meningite por
+    Haemophilus influenzae)
+    """
+    dt = exprs.get("dt")
+    classi = exprs.get("classi_code")
+    con_code = exprs.get("con_code")
+    if not (dt and classi and communicants_col):
+        return pd.DataFrame()
+
+    communicants = numeric_expr(communicants_col)
+    con_filter = (
+        f"AND {con_code} IN ('01', '02', '03', '05', '09')"
+        if con_code
+        else ""
+    )
+
+    sql = f"""
+        WITH base AS (
+            SELECT EXTRACT(YEAR FROM {dt}) AS ano,
+                   {communicants} AS comunicantes
+            FROM {table.ref_sql}
+            {where_sql}
+            WHERE {classi} = '1'
+              {con_filter}
+              AND {dt} IS NOT NULL
+        ), agg AS (
+            SELECT ano,
+                   COUNT(*) AS casos_elegiveis,
+                   COUNT(*) FILTER (WHERE comunicantes IS NOT NULL AND comunicantes >= 0) AS casos_com_comunicantes,
+                   SUM(CASE WHEN comunicantes IS NOT NULL AND comunicantes >= 0 THEN comunicantes ELSE 0 END) AS total_comunicantes,
+                   ROUND(
+                       SUM(CASE WHEN comunicantes IS NOT NULL AND comunicantes >= 0 THEN comunicantes ELSE 0 END)
+                       * 1.0 / NULLIF(COUNT(*), 0),
+                   2) AS media_comunicantes_por_caso
+            FROM base
+            GROUP BY 1
+        )
+        SELECT *
+        FROM agg
+        ORDER BY ano
+    """
+    return run_query(table, sql)
+
+
 def query_sinan_communicants_prophylaxis(
     table: LoadedTable,
     exprs: Dict[str, Optional[str]],
@@ -7076,11 +7458,6 @@ def query_sinan_vaccination_by_classification(table: LoadedTable, exprs: Dict[st
                    END AS grupo_classificacao,
                    vacina_codigo
             FROM long
-            UNION ALL
-            SELECT vacina,
-                   'Total de casos' AS grupo_classificacao,
-                   vacina_codigo
-            FROM long
         ), agg AS (
             SELECT vacina,
                    grupo_classificacao,
@@ -7097,10 +7474,9 @@ def query_sinan_vaccination_by_classification(table: LoadedTable, exprs: Dict[st
         FROM agg
         ORDER BY vacina,
                  CASE
-                    WHEN grupo_classificacao = 'Total de casos' THEN 0
-                    WHEN grupo_classificacao = 'Confirmados' THEN 1
-                    WHEN grupo_classificacao = 'Descartados' THEN 2
-                    ELSE 3
+                    WHEN grupo_classificacao = 'Confirmados' THEN 0
+                    WHEN grupo_classificacao = 'Descartados' THEN 1
+                    ELSE 2
                  END
     """
     return run_query(table, sql)
@@ -8778,55 +9154,6 @@ def render_temporal_tab(table: LoadedTable, source: str, graph_where: str, exprs
 
 
 
-# Limiar mínimo de célula para os gráficos estratificados do LCR (correção 5).
-# Abaixo deste n, a barra é exibida com opacidade reduzida em vez de ser tratada
-# como um padrão robusto — célula com n=1 ou n=2 pode virar uma barra de 100%
-# dentro do estrato e induzir leitura equivocada. Valor ajustável pelo usuário
-# na interface (ver `st.number_input` em render_sinan_lcr_indicators).
-SINAN_LCR_MIN_CELL_SIZE_DEFAULT = 5
-
-
-def sinan_lcr_apply_small_cell_opacity(
-    fig: go.Figure,
-    df: pd.DataFrame,
-    min_cell: int,
-    x_col: str = "faixa",
-    color_col: Optional[str] = None,
-) -> bool:
-    """Reduz a opacidade das barras cuja célula (n) fica abaixo de `min_cell`.
-
-    Funciona tanto para gráficos simples quanto para gráficos agrupados por
-    `color_col` (ex.: estrato), casando cada traço do Plotly com a linha
-    correspondente de `df` pelo valor de `x_col` (e de `color_col`, quando
-    aplicável). Retorna True se algum traço foi marcado como amostra pequena,
-    para permitir exibir um aviso condicional na interface.
-    """
-    if df.empty or "n" not in df.columns or x_col not in df.columns:
-        return False
-    has_small_cell = False
-    for trace in fig.data:
-        if color_col and color_col in df.columns:
-            subset = df[df[color_col] == trace.name]
-        else:
-            subset = df
-        if subset.empty:
-            continue
-        lookup = subset.drop_duplicates(subset=[x_col]).set_index(x_col)["n"]
-        opacities = []
-        for x_val in trace.x:
-            n_val = lookup.get(x_val)
-            # n=0 é faixa vazia (bin de referência sem ocorrência), não amostra
-            # pequena: mantém opacidade cheia e não dispara o aviso, que é
-            # reservado a células com 0 < n < min_cell (poucos casos reais).
-            if n_val is not None and 0 < n_val < min_cell:
-                opacities.append(0.35)
-                has_small_cell = True
-            else:
-                opacities.append(1.0)
-        trace.marker.opacity = opacities
-    return has_small_cell
-
-
 def render_sinan_lcr_indicators(table: LoadedTable, exprs: Dict[str, Optional[str]], base_where: str, graph_where: str) -> None:
     """Renderiza punção e parâmetros do LCR no bloco de principais indicadores."""
     def br_int(value: object) -> str:
@@ -8951,7 +9278,6 @@ def render_sinan_lcr_indicators(table: LoadedTable, exprs: Dict[str, Optional[st
     # recorte geral de filtros da página (graph_where), que misturava "sem
     # indicação clínica de puncionar" com "campo mal preenchido no SINAN".
     lcr_eligible_where = sinan_lcr_eligible_where(exprs, graph_where)
-    n_eligible_lcr = count_rows(table, lcr_eligible_where)
     quimio_summary = query_sinan_quimio_summary(table, exprs, lcr_eligible_where)
     if quimio_summary.empty:
         st.info(
@@ -8960,15 +9286,6 @@ def render_sinan_lcr_indicators(table: LoadedTable, exprs: Dict[str, Optional[st
         )
         render_quimio_classification_tab(table, exprs, base_where)
         return
-
-    st.caption(
-        f"Completude calculada sobre os {format_int_br(n_eligible_lcr)} registros do recorte atual com punção lombar "
-        "**e** exame quimiocitológico do LCR realizados — não sobre o total de casos filtrados na página. "
-        "Isso separa dois indicadores que antes apareciam misturados: a **cobertura da punção** sobre o total de "
-        "casos (gráfico 'Realização da Punção Laboratorial', acima) e a **completude de preenchimento** de cada "
-        "parâmetro entre quem já foi puncionado (tabela abaixo). Uma completude baixa aqui reflete falha de "
-        "registro, não falta de indicação clínica para puncionar."
-    )
 
     st.markdown("**Distribuição dos parâmetros quimiocitológicos do LCR**")
     st.caption(
@@ -9006,20 +9323,6 @@ def render_sinan_lcr_indicators(table: LoadedTable, exprs: Dict[str, Optional[st
         st.caption("Estratificação etária do LCR não disponível porque a coluna de idade não foi detectada.")
     if not interval_strat:
         st.caption("Estratificação por tempo sintoma-punção não disponível porque DT_SIN_PRI e/ou a data da punção não foram detectadas.")
-
-    # Correção 5: limiar mínimo de célula, ajustável pelo usuário. Cruzar as
-    # faixas clínicas com estratos gera subgrupos pequenos (n=1, n=2) que, sem
-    # aviso, podem virar uma barra de 100% e ser lida como padrão robusto.
-    min_cell_size = st.number_input(
-        "Alertar (opacidade reduzida) células estratificadas com menos de N registros",
-        min_value=1,
-        max_value=50,
-        value=SINAN_LCR_MIN_CELL_SIZE_DEFAULT,
-        step=1,
-        key="sinan_lcr_min_cell_size",
-        help="Só se aplica quando há estratificação ativa: células com n abaixo deste valor não são amostra "
-        "suficiente para leitura robusta e aparecem com opacidade reduzida nos gráficos abaixo.",
-    )
 
     def render_param_distribution(key: str, titulo: str, eixo_x: Optional[str] = None) -> None:
         expr = exprs.get(f"lab_{key}")
@@ -9071,22 +9374,7 @@ def render_sinan_lcr_indicators(table: LoadedTable, exprs: Dict[str, Optional[st
                 category_orders=category_orders,
             )
         fig_dist.update_xaxes(tickangle=-30)
-        # Correção 5: opacidade reduzida para células (faixa, ou faixa x estrato
-        # quando estratificado) com amostra abaixo do limiar definido pelo
-        # usuário, evitando que um n=1 ou n=2 seja lido como padrão robusto —
-        # mais crítico quando há estratificação, que multiplica o número de
-        # subgrupos e reduz o n de cada um.
-        is_stratified = bool(strat_sql and "estrato" in dist.columns)
-        has_small_cell = sinan_lcr_apply_small_cell_opacity(
-            fig_dist, dist, int(min_cell_size), x_col="faixa", color_col="estrato" if is_stratified else None,
-        )
         render_plotly_chart(fig_dist)
-        if has_small_cell:
-            st.caption(
-                f"⚠️ Barras com opacidade reduzida representam células com menos de {int(min_cell_size)} registros"
-                + (" no cruzamento faixa × estrato" if is_stratified else "")
-                + "; leitura pouco robusta, evite interpretar como padrão."
-            )
         # Correção (revisão v49): leitura clínica das faixas como texto estático,
         # não apenas no hover do Plotly. O hover se perde em captura de tela,
         # impressão ou PDF — justamente onde este painel costuma ser usado para
@@ -9119,21 +9407,6 @@ def render_sinan_lcr_indicators(table: LoadedTable, exprs: Dict[str, Optional[st
                 "Observação: a glicose liquórica deve ser comparada com a glicose sérica; idealmente, a glicemia sérica é colhida "
                 "e aferida junto da punção lombar. O gráfico usa LAB_GLICO absoluto porque o SINAN não traz, em geral, a glicemia pareada."
             )
-
-    render_param_distribution("glico", "Glicose", "Glicose do LCR (mg/dL)")
-    render_param_distribution("prot", "Proteínas", "Proteínas do LCR (mg/dL)")
-
-    st.markdown("**Distribuição dos glóbulos brancos no LCR**")
-    st.caption(
-        "Leucócitos são registrados como contagem absoluta (céls/mm³). Neutrófilos, linfócitos e eosinófilos são lidos como percentuais "
-        "em relação ao total de leucócitos. LAB_MONO é tratado com cautela: quando fica entre 0 e 100, pode ser lido como composição celular; "
-        "valores >100 são sinalizados como incompatíveis/ambíguos, pois o dicionário operacional apontou máximo 994."
-    )
-    render_param_distribution("leuco", "Leucócitos", "Leucócitos (céls/mm³)")
-    render_param_distribution("neutro", "Neutrófilos", "Neutrófilos (% dos leucócitos)")
-    render_param_distribution("linfo", "Linfócitos", "Linfócitos (% dos leucócitos)")
-    render_param_distribution("mono", "Monócitos", "Monócitos (LAB_MONO; % apenas quando 0-100)")
-    render_param_distribution("eosi", "Eosinófilos", "Eosinófilos (% dos leucócitos)")
 
     st.markdown("**Distribuição — aspecto do líquor (Ficha SINAN)**")
     st.caption(
@@ -9178,21 +9451,7 @@ def render_sinan_lcr_indicators(table: LoadedTable, exprs: Dict[str, Optional[st
                     category_orders={"categoria": SINAN_LAB_ASPECT_ORDER},
                 )
             fig_aspect.update_xaxes(tickangle=-30)
-            # Correção 5: mesmo aviso de célula pequena aplicado ao gráfico de
-            # aspecto do líquor, que o diagnóstico apontou como igualmente
-            # exposto a barras de 100% com n=1 ou n=2 quando estratificado.
-            is_stratified_aspect = bool(strat_sql and "estrato" in aspect_dist.columns)
-            has_small_cell_aspect = sinan_lcr_apply_small_cell_opacity(
-                fig_aspect, aspect_dist, int(min_cell_size), x_col="categoria",
-                color_col="estrato" if is_stratified_aspect else None,
-            )
             render_plotly_chart(fig_aspect)
-            if has_small_cell_aspect:
-                st.caption(
-                    f"⚠️ Barras com opacidade reduzida representam células com menos de {int(min_cell_size)} registros"
-                    + (" no cruzamento categoria × estrato" if is_stratified_aspect else "")
-                    + "; leitura pouco robusta, evite interpretar como padrão."
-                )
             if strat_sql and "estrato" in aspect_dist.columns:
                 render_interval_total(aspect_dist, value_col="n", by_col="estrato")
             else:
@@ -9202,43 +9461,20 @@ def render_sinan_lcr_indicators(table: LoadedTable, exprs: Dict[str, Optional[st
     else:
         st.info("LAB_ASPECT não foi detectado; não é possível gerar a distribuição do aspecto do líquor.")
 
-    st.markdown("**Resumo estatístico dos parâmetros quimiocitológicos do LCR**")
-    st.caption(
-        "O gráfico de valores médios foi removido. A tabela abaixo fica apenas como apoio para auditoria de preenchimento, "
-        "mediana, quartis, mínimos e máximos; para interpretação visual, prefira as distribuições por faixas clínicas acima. "
-        "'registros_avaliados' e 'pct_preenchido' agora usam como base apenas quem teve punção lombar e exame "
-        "quimiocitológico realizados (ver observação acima). A coluna 'n_acima_teto_plausibilidade' sinaliza — sem "
-        "descartar — valores acima de um teto clínico provisório por parâmetro; **os códigos sentinela e os tetos "
-        "de plausibilidade usados aqui ainda não foram confirmados junto ao dicionário de dados oficial do SINAN "
-        "e devem ser tratados como estimativas, não como valores validados.**"
-    )
-    copyable_dataframe(quimio_summary, width="stretch", hide_index=True)
-    download_button(quimio_summary, "sinan_quimiocitologico_liquor_resumo_parametros.csv")
+    render_param_distribution("glico", "Glicose", "Glicose do LCR (mg/dL)")
+    render_param_distribution("prot", "Proteínas", "Proteínas do LCR (mg/dL)")
 
-    with st.expander("Metadados e auditoria dos valores LAB_*", expanded=False):
-        metadata_df = sinan_lcr_metadata_dataframe([key for key, _, _ in sinan_quimio_param_exprs(exprs)])
-        if not metadata_df.empty:
-            st.markdown("**Cadastro operacional por parâmetro**")
-            st.caption("Este cadastro alimenta a tabela-resumo e os hovers dos gráficos de distribuição: unidade, tipo, faixa operacional, sentinelas, teto plausível, teto de sistema/truncamento e uso permitido.")
-            copyable_dataframe(metadata_df, width="stretch", hide_index=True)
-            download_button(metadata_df, "sinan_lcr_metadados_parametros.csv")
-        st.markdown("**Tabela longa de auditoria: valor bruto, valor limpo e flags**")
-        st.caption("Preserva valor bruto, valor limpo e flags separadas: sentinela/ausente, teto do sistema, acima do teto de plausibilidade e percentual incompatível. A prévia é limitada para proteger memória e navegador.")
-        audit_limit = st.number_input(
-            "Máximo de linhas da auditoria LCR",
-            min_value=100,
-            max_value=max(100, perf_int("perf_download_row_limit", DEFAULT_DOWNLOAD_ROW_LIMIT)),
-            value=min(5000, max(100, perf_int("perf_download_row_limit", DEFAULT_DOWNLOAD_ROW_LIMIT))),
-            step=100,
-            key="sinan_lcr_audit_long_limit",
-        )
-        if st.checkbox("Carregar prévia da auditoria LCR", value=False, key="sinan_lcr_load_audit_long"):
-            audit_long = query_sinan_lcr_numeric_audit_long(table, exprs, lcr_eligible_where, int(audit_limit))
-            if audit_long.empty:
-                st.info("Não há valores laboratoriais para auditar no recorte elegível atual.")
-            else:
-                copyable_dataframe(audit_long, width="stretch", hide_index=True)
-                download_button(audit_long, "sinan_lcr_auditoria_valores_brutos_limpos_flags.csv")
+    st.markdown("**Distribuição dos glóbulos brancos no LCR**")
+    st.caption(
+        "Leucócitos são registrados como contagem absoluta (céls/mm³). Neutrófilos, linfócitos e eosinófilos são lidos como percentuais "
+        "em relação ao total de leucócitos. LAB_MONO é tratado com cautela: quando fica entre 0 e 100, pode ser lido como composição celular; "
+        "valores >100 são sinalizados como incompatíveis/ambíguos, pois o dicionário operacional apontou máximo 994."
+    )
+    render_param_distribution("leuco", "Leucócitos", "Leucócitos (céls/mm³)")
+    render_param_distribution("neutro", "Neutrófilos", "Neutrófilos (% dos leucócitos)")
+    render_param_distribution("linfo", "Linfócitos", "Linfócitos (% dos leucócitos)")
+    render_param_distribution("mono", "Monócitos", "Monócitos (LAB_MONO; % apenas quando 0-100)")
+    render_param_distribution("eosi", "Eosinófilos", "Eosinófilos (% dos leucócitos)")
 
     render_quimio_classification_tab(table, exprs, base_where)
 
@@ -12581,101 +12817,177 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, grap
         if symptom_specs and exprs.get("classi_code") and exprs.get("dt"):
             sintomas = query_sinan_symptom_prevalence(table, exprs, base_where, symptom_specs)
             if not sintomas.empty:
-                sintomas_confirmados = sintomas[sintomas["grupo_caso"].eq(SINTOMA_GRUPO_CONFIRMADOS)]
                 sintomas_resumo = (
-                    sintomas_confirmados
+                    sintomas
                     .groupby("sintoma", dropna=False, as_index=False)
                     .agg(
-                        casos=("casos", "sum"),
+                        confirmados=("confirmados", "sum"),
                         sintoma_sim=("sintoma_sim", "sum"),
                         sintoma_nao=("sintoma_nao", "sum"),
                         sintoma_ignorado=("sintoma_ignorado", "sum"),
                     )
                 )
-                sintomas_resumo["pct_sintoma_casos"] = (100.0 * sintomas_resumo["sintoma_sim"] / sintomas_resumo["casos"].replace({0: np.nan})).round(2)
-                sintomas_resumo = sintomas_resumo.sort_values("pct_sintoma_casos", ascending=True)
-                sintomas_resumo["texto"] = [f"{br_pct(p)} (n={br_int(n)})" for p, n in zip(sintomas_resumo["pct_sintoma_casos"], sintomas_resumo["sintoma_sim"])]
+                sintomas_resumo["pct_sintoma_confirmados"] = (100.0 * sintomas_resumo["sintoma_sim"] / sintomas_resumo["confirmados"].replace({0: np.nan})).round(2)
+                sintomas_resumo = sintomas_resumo.sort_values("pct_sintoma_confirmados", ascending=True)
+                sintomas_resumo["texto"] = [f"{br_pct(p)} (n={br_int(n)})" for p, n in zip(sintomas_resumo["pct_sintoma_confirmados"], sintomas_resumo["sintoma_sim"])]
                 fig_sintomas_resumo = px.bar(
                     sintomas_resumo,
-                    x="pct_sintoma_casos",
+                    x="pct_sintoma_confirmados",
                     y="sintoma",
                     orientation="h",
                     text="texto",
                     title="Prevalência acumulada dos sinais e sintomas entre confirmados",
-                    labels={"pct_sintoma_casos": "% dos confirmados", "sintoma": "Sinal/sintoma"},
-                    hover_data={"texto": False, "sintoma_sim": True, "casos": True, "sintoma_nao": True, "sintoma_ignorado": True},
+                    labels={"pct_sintoma_confirmados": "% dos confirmados", "sintoma": "Sinal/sintoma"},
+                    hover_data={"texto": False, "sintoma_sim": True, "confirmados": True, "sintoma_nao": True, "sintoma_ignorado": True},
                 )
                 render_plotly_chart(fig_sintomas_resumo)
                 render_interval_total(sintomas_resumo, value_col="sintoma_sim", by_col="sintoma")
 
                 st.markdown("### Escolha o sintoma para se analisar a curva anual entre confirmados")
-                opcoes_sintomas = sorted(sintomas["sintoma"].dropna().unique().tolist())
+                _FONTANELA_LABEL = "Abaulamento de fontanela"
+                _sintoma_options_all = sorted(sintomas["sintoma"].dropna().unique().tolist())
+                _fontanela_default_idx = _sintoma_options_all.index(_FONTANELA_LABEL) if _FONTANELA_LABEL in _sintoma_options_all else 0
                 sintoma_sel = st.selectbox(
                     "Sintoma",
-                    options=opcoes_sintomas,
+                    options=_sintoma_options_all,
+                    index=_fontanela_default_idx,
                     key="sinan_indicadores_sintoma_prevalencia",
                     label_visibility="collapsed",
                 )
-                escopo_sel = st.radio(
-                    "Delimitar por",
-                    options=SINTOMA_GRUPO_ORDER,
+
+                _SINTOMA_GROUP_OPTIONS = ["Total de casos", "Casos confirmados", "Casos descartados / sem classificação"]
+                sintoma_group_sel = st.radio(
+                    "Grupo de casos para a curva anual de sintomas",
+                    _SINTOMA_GROUP_OPTIONS,
+                    index=1,
+                    key="sinan_sintoma_group_filter",
                     horizontal=True,
-                    key="sinan_indicadores_sintoma_prevalencia_escopo",
                 )
 
-                is_fontanela = sintoma_sel == FONTANELA_SYMPTOM_LABEL
-                if is_fontanela:
-                    st.info(FONTANELA_AGE_NOTE)
+                _IS_FONTANELA = sintoma_sel == _FONTANELA_LABEL
+                _AGE_MAX_FONTANELA = 2  # anos — fontanela fecha até ~24 meses
 
-                if is_fontanela and exprs.get("age"):
-                    fontanela_spec = next((spec for spec in symptom_specs if spec[1] == FONTANELA_SYMPTOM_LABEL), None)
-                    sintomas_fonte = (
-                        query_sinan_symptom_prevalence(
-                            table, exprs, base_where, [fontanela_spec],
-                            age_cap_symptom=FONTANELA_SYMPTOM_LABEL, age_cap_years=FONTANELA_MAX_AGE_YEARS,
-                        )
-                        if fontanela_spec else sintomas
-                    )
-                elif is_fontanela:
+                if _IS_FONTANELA:
                     st.caption(
-                        "Não foi possível identificar um campo de idade nesta base, então a curva abaixo não pôde ser "
-                        "restrita a até 2 anos; interprete com cautela para os casos com idade maior."
+                        "⚠️ **Observação sobre abaulamento de fontanela:** a fontanela anterior fecha fisiologicamente \
+até os 24 meses de idade. Por isso, o abaulamento de fontanela não é um sintoma pertinente para casos em indivíduos \
+com mais de 2 anos. Para garantir a validade epidemiológica deste indicador, a curva abaixo está restrita a \
+casos de indivíduos com até 2 anos (≤ 24 meses)."
                     )
-                    sintomas_fonte = sintomas
+
+                if _IS_FONTANELA and exprs.get("age"):
+                    sintomas_sel_df = query_sinan_symptom_prevalence(
+                        table, exprs, base_where,
+                        [(col, label) for col, label in symptom_specs if label == _FONTANELA_LABEL],
+                        group_filter=sintoma_group_sel,
+                        age_max_years=_AGE_MAX_FONTANELA,
+                    )
                 else:
-                    sintomas_fonte = sintomas
+                    sintomas_sel_df = query_sinan_symptom_prevalence(
+                        table, exprs, base_where,
+                        symptom_specs,
+                        group_filter=sintoma_group_sel,
+                    )
+                    sintomas_sel_df = sintomas_sel_df[sintomas_sel_df["sintoma"].eq(sintoma_sel)].copy()
 
-                sintomas_sel = sintomas_fonte[sintomas_fonte["sintoma"].eq(sintoma_sel) & sintomas_fonte["grupo_caso"].eq(escopo_sel)].copy()
-                sintomas_sel["texto"] = [f"{br_pct(p)} (n={br_int(n)})" for p, n in zip(sintomas_sel["pct_sintoma_casos"], sintomas_sel["sintoma_sim"])]
-                fig_sintoma = px.line(
-                    sintomas_sel,
-                    x="ano",
-                    y="pct_sintoma_casos",
-                    markers=True,
-                    text="texto",
-                    title=f"Prevalência anual de {sintoma_sel} — {escopo_sel.lower()}" + (" (até 2 anos)" if is_fontanela and exprs.get("age") else ""),
-                    labels={"ano": "Ano", "pct_sintoma_casos": "% do grupo selecionado", "sintoma_sim": "Casos com sintoma"},
-                    hover_data={"texto": False, "sintoma_sim": True, "casos": True, "sintoma_nao": True, "sintoma_ignorado": True},
-                )
-                fig_sintoma.update_traces(textposition="top center")
-                render_plotly_chart(fig_sintoma)
-                render_interval_total(sintomas_sel, value_col="sintoma_sim", denominator_col="casos", value_label="casos com sintoma", denominator_label="casos no grupo selecionado")
+                if not sintomas_sel_df.empty:
+                    _group_label_map = {
+                        "Total de casos": "total de casos",
+                        "Casos confirmados": "casos confirmados",
+                        "Casos descartados / sem classificação": "casos descartados / sem classificação",
+                    }
+                    _pct_label = f"% dos {_group_label_map.get(sintoma_group_sel, sintoma_group_sel)}"
+                    _age_suffix = " (≤ 2 anos)" if _IS_FONTANELA else ""
+                    sintomas_sel_df = sintomas_sel_df[sintomas_sel_df["sintoma"].eq(sintoma_sel)].copy() if not _IS_FONTANELA else sintomas_sel_df
+                    sintomas_sel_df["texto"] = [f"{br_pct(p)} (n={br_int(n)})" for p, n in zip(sintomas_sel_df["pct_sintoma_confirmados"], sintomas_sel_df["sintoma_sim"])]
+                    fig_sintoma = px.line(
+                        sintomas_sel_df,
+                        x="ano",
+                        y="pct_sintoma_confirmados",
+                        markers=True,
+                        text="texto",
+                        title=f"Prevalência anual de {sintoma_sel} — {_group_label_map.get(sintoma_group_sel, sintoma_group_sel)}{_age_suffix}",
+                        labels={"ano": "Ano", "pct_sintoma_confirmados": _pct_label, "sintoma_sim": "Casos com sintoma"},
+                        hover_data={"texto": False, "sintoma_sim": True, "confirmados": True, "sintoma_nao": True, "sintoma_ignorado": True},
+                    )
+                    fig_sintoma.update_traces(textposition="top center")
+                    render_plotly_chart(fig_sintoma)
+                    render_interval_total(sintomas_sel_df, value_col="sintoma_sim", denominator_col="confirmados", value_label="casos com sintoma", denominator_label=_group_label_map.get(sintoma_group_sel, "casos"))
+                else:
+                    st.info(f"Sem dados suficientes para o sintoma '{sintoma_sel}' com o grupo selecionado e os filtros ativos.")
 
-                copyable_dataframe(sintomas.drop(columns=["ordem_grupo"], errors="ignore"), width="stretch", hide_index=True)
-                download_button(sintomas.drop(columns=["ordem_grupo"], errors="ignore"), "sinan_prevalencia_sintomas_por_grupo_caso.csv")
+                copyable_dataframe(sintomas, width="stretch", hide_index=True)
+                download_button(sintomas, "sinan_prevalencia_sintomas_confirmados.csv")
         else:
             st.info("Para gerar a prevalência de sintomas, CLASSI_FIN, data e os campos clínicos CLI_* precisam existir no SINAN.")
 
+        # -------------------------------------------------------------------
+        # Gráfico: Número de comunicantes identificados (média por caso elegível)
+        # -------------------------------------------------------------------
+        if communicants_col and exprs.get("classi_code") and exprs.get("dt"):
+            comunicantes_ident = query_sinan_communicants_identified(table, exprs, base_where, communicants_col)
+            if not comunicantes_ident.empty:
+                st.markdown("**Média de comunicantes identificados por caso confirmado elegível**")
+                st.caption(
+                    "Conforme a ficha de notificação do SINAN para meningite, a busca ativa de comunicantes deve "
+                    "ser realizada apenas para casos confirmados com os seguintes diagnósticos (CON_DIAGES): "
+                    "**01 — meningococcemia**, **02 — meningite meningocócica**, "
+                    "**03 — meningite meningocócica com meningococcemia**, "
+                    "**05 — meningite por outras bactérias** e "
+                    "**09 — meningite por Haemophilus influenzae**. "
+                    "O gráfico abaixo está restrito a esses casos e apresenta, por ano, "
+                    "a média de comunicantes identificados por caso confirmado elegível "
+                    "(total de comunicantes / número de casos confirmados elegíveis)."
+                )
+                comunicantes_ident = comunicantes_ident.copy()
+                def _br_float_2dec(v: object) -> str:
+                    if pd.isna(v):
+                        return "—"
+                    return f"{float(v):.2f}".replace(".", ",")
+
+                comunicantes_ident["texto_media"] = [
+                    f"{_br_float_2dec(m)} ({br_int(t)} comunicantes / {br_int(c)} casos)"
+                    if not (pd.isna(m) or pd.isna(t) or pd.isna(c)) else "—"
+                    for m, t, c in zip(
+                        comunicantes_ident["media_comunicantes_por_caso"],
+                        comunicantes_ident["total_comunicantes"],
+                        comunicantes_ident["casos_elegiveis"],
+                    )
+                ]
+                fig_comu_ident = px.bar(
+                    comunicantes_ident,
+                    x="ano",
+                    y="media_comunicantes_por_caso",
+                    text="texto_media",
+                    title="Média de comunicantes identificados por caso confirmado elegível (CON_DIAGES 01, 02, 03, 05 ou 09)",
+                    labels={
+                        "ano": "Ano",
+                        "media_comunicantes_por_caso": "Média de comunicantes / caso elegível",
+                        "casos_elegiveis": "Casos elegíveis",
+                        "casos_com_comunicantes": "Casos com comunicantes informados",
+                        "total_comunicantes": "Total de comunicantes",
+                    },
+                    hover_data={
+                        "texto_media": False,
+                        "casos_elegiveis": True,
+                        "casos_com_comunicantes": True,
+                        "total_comunicantes": True,
+                    },
+                )
+                fig_comu_ident.update_traces(textposition="outside", cliponaxis=False)
+                render_plotly_chart(fig_comu_ident)
+                render_interval_total(comunicantes_ident, value_col="total_comunicantes", value_label="comunicantes identificados nos casos elegíveis")
+                copyable_dataframe(comunicantes_ident, width="stretch", hide_index=True)
+                download_button(comunicantes_ident, "sinan_media_comunicantes_identificados_elegiveis.csv")
+            else:
+                st.info("Sem dados suficientes para calcular a média de comunicantes identificados com os filtros ativos.")
+
         comunicantes = query_sinan_communicants_prophylaxis(table, exprs, base_where, communicants_col, prophylaxis_col)
         if not comunicantes.empty:
-            st.markdown("**Número de comunicantes por realização de quimioprofilaxia**")
-            st.caption("Segundo a estrutura do dicionário de dados do SINAN para meningite, `MED_NUCOMU` registra o número de comunicantes identificados e `MED_QUIMIO` informa se foi realizada quimioprofilaxia, codificada como Sim, Não ou Ignorado. O gráfico cruza o total de comunicantes registrados por ano com a situação de realização da quimioprofilaxia e inclui a série total de comunicantes.")
+            st.markdown("**Relação entre comunicantes e profilaxia**")
+            st.caption("Segundo a estrutura do dicionário de dados do SINAN para meningite, `MED_NUCOMU` registra o número de comunicantes identificados e `MED_QUIMIO` informa se foi realizada quimioprofilaxia, codificada como Sim, Não ou Ignorado.")
             if exprs.get("con_code"):
-                st.caption(
-                    "Correção do denominador: agora há duas visões — todos os registros do recorte e elegíveis operacionais "
-                    "para quimioprofilaxia de contatos (CON_DIAGES 02/03/09: formas meningocócicas e Haemophilus influenzae). "
-                    "Use a visão elegível para interpretação de cobertura; a visão todos serve como sensibilidade/auditoria do denominador amplo."
-                )
+                pass
             else:
                 st.caption(
                     "Observação: não foi possível criar a visão elegível (CON_DIAGES 02/03/09), porque CON_DIAGES não foi detectado. "
@@ -12695,39 +13007,31 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, grap
             else:
                 recorte_sel = default_recorte
                 comunicantes_plot_base = comunicantes.copy()
-            comunicantes_plot_base["serie"] = comunicantes_plot_base["quimioprofilaxia"].astype(str)
-            comunicantes_plot = comunicantes_plot_base.rename(columns={"comunicantes_total": "valor"}).copy()
-            total_comunicantes = (
-                comunicantes_plot_base
-                .groupby("ano", as_index=False)
-                .agg(
-                    valor=("total_comunicantes_ano", "max"),
-                    registros=("registros", "sum"),
-                    registros_com_comunicantes=("registros_com_comunicantes", "sum"),
-                    media_comunicantes=("media_comunicantes", "mean"),
-                    pct_comunicantes_ano=("pct_comunicantes_ano", "sum"),
-                )
-            )
-            total_comunicantes["serie"] = "Total de comunicantes"
-            comunicantes_plot = pd.concat([
-                comunicantes_plot[["ano", "serie", "valor", "registros", "registros_com_comunicantes", "media_comunicantes", "pct_comunicantes_ano"]],
-                total_comunicantes[["ano", "serie", "valor", "registros", "registros_com_comunicantes", "media_comunicantes", "pct_comunicantes_ano"]],
-            ], ignore_index=True)
-            comunicantes_plot["texto_comunicantes"] = [br_int(v) for v in comunicantes_plot["valor"]]
-            fig_comunicantes = px.line(
-                comunicantes_plot,
+            comunicantes_plot_base["quimioprofilaxia"] = comunicantes_plot_base["quimioprofilaxia"].astype(str)
+            comunicantes_plot_base["texto_status"] = [
+                count_pct_text(n, p)
+                for n, p in zip(comunicantes_plot_base["registros"], comunicantes_plot_base["pct_registros_ano"])
+            ]
+            fig_quimio_status = px.bar(
+                comunicantes_plot_base,
                 x="ano",
-                y="valor",
-                color="serie",
-                markers=True,
-                text="texto_comunicantes",
-                title="Número de comunicantes por realização de quimioprofilaxia",
-                labels={"ano": "Ano", "valor": "Comunicantes", "serie": "Quimioprofilaxia / total"},
-                hover_data={"texto_comunicantes": False, "registros": True, "registros_com_comunicantes": True, "media_comunicantes": True, "pct_comunicantes_ano": ":.2f"},
+                y="registros",
+                color="quimioprofilaxia",
+                barmode="group",
+                text="texto_status",
+                title="Realização da quimioprofilaxia entre os comunicantes",
+                labels={
+                    "ano": "Ano",
+                    "registros": "Registros",
+                    "quimioprofilaxia": "Situação da quimioprofilaxia",
+                    "pct_registros_ano": "% no ano",
+                },
+                hover_data={"texto_status": False, "pct_registros_ano": ":.2f", "comunicantes_total": True},
+                category_orders={"quimioprofilaxia": ["Sim", "Não", "Ignorado", "Sem informação"]},
             )
-            fig_comunicantes.update_traces(textposition="top center")
-            render_plotly_chart(fig_comunicantes)
-            render_interval_total(comunicantes_plot, value_col="valor", by_col="serie", value_label="comunicantes")
+            fig_quimio_status.update_traces(textposition="outside", cliponaxis=False)
+            render_plotly_chart(fig_quimio_status)
+            render_interval_total(comunicantes_plot_base, value_col="registros", by_col="quimioprofilaxia", value_label="registros de quimioprofilaxia")
             copyable_dataframe(comunicantes, width="stretch", hide_index=True)
             download_button(comunicantes, "sinan_comunicantes_quimioprofilaxia_todos_e_elegiveis.csv")
         else:
@@ -12738,9 +13042,33 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, grap
             st.markdown("**Vacinação por classificação final do caso**")
             vacinacao = vacinacao.copy()
             vacinacao["texto"] = [f"{br_pct(p)} (n={br_int(n)})" for p, n in zip(vacinacao["pct_vacinados_sim"], vacinacao["vacinados_sim"])]
+            # Calcula linha de total de casos (todas as classificações agrupadas)
+            total_vacina = (
+                vacinacao
+                .groupby("vacina", as_index=False)
+                .agg(
+                    denominador=("denominador", "sum"),
+                    vacinados_sim=("vacinados_sim", "sum"),
+                    vacinados_nao=("vacinados_nao", "sum"),
+                    vacinacao_ignorada=("vacinacao_ignorada", "sum"),
+                )
+            )
+            total_vacina["grupo_classificacao"] = "Total de casos"
+            total_vacina["pct_vacinados_sim"] = (
+                (total_vacina["vacinados_sim"] / total_vacina["denominador"].replace({0: np.nan}) * 100)
+                .round(2)
+            )
+            total_vacina["texto"] = [f"{br_pct(p)} (n={br_int(n)})" for p, n in zip(total_vacina["pct_vacinados_sim"], total_vacina["vacinados_sim"])]
+            vacinacao_plot = pd.concat([vacinacao, total_vacina], ignore_index=True)
             grupo_vacina_order = ["Total de casos", "Confirmados", "Descartados", "Sem classificação / ignorados"]
+            _vacina_color_map = {
+                "Total de casos": "#FFD700",
+                "Confirmados": "#1F77B4",
+                "Descartados": "#FF7F0E",
+                "Sem classificação / ignorados": "#7F7F7F",
+            }
             fig_vacinacao = px.bar(
-                vacinacao,
+                vacinacao_plot,
                 x="vacina",
                 y="pct_vacinados_sim",
                 color="grupo_classificacao",
@@ -12750,9 +13078,8 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, grap
                 labels={"vacina": "Vacina", "pct_vacinados_sim": "% com vacinação = Sim", "grupo_classificacao": "Classificação", "denominador": "Denominador"},
                 hover_data={"texto": False, "vacinados_sim": True, "vacinados_nao": True, "vacinacao_ignorada": True, "denominador": True},
                 category_orders={"grupo_classificacao": grupo_vacina_order},
-                color_discrete_map={"Total de casos": TOTAL_CASES_YELLOW},
+                color_discrete_map=_vacina_color_map,
             )
-            preserve_trace_colors(fig_vacinacao)
             fig_vacinacao.update_xaxes(tickangle=-30)
             render_plotly_chart(fig_vacinacao)
             render_interval_total(vacinacao, value_col="vacinados_sim", by_col="vacina", value_label="vacinados com informação = Sim")
@@ -13033,6 +13360,8 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, grap
 
 
 def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dict[str, Optional[str]], base_where: Optional[str] = None) -> None:
+    render_quadros_etiologicos_sinan()
+
     def br_int(value: object) -> str:
         if pd.isna(value):
             return "—"
@@ -13056,101 +13385,34 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
             st.warning("Não localizei campo CID-10 válido pela detecção automática para ativar esta análise.")
         else:
             cid_dist = add_text(cid_dist)
-            cid_dist_title = "Menção de CID-10 em relação aos óbitos" if source == "SIM" else "Distribuição por tipo CID-10"
-            fig = px.bar(
-                cid_dist,
-                x="n",
-                y="tipo",
-                orientation="h",
-                text="texto",
-                title=cid_dist_title,
-                labels={"tipo": "Tipo CID-10", "n": "Registros", "pct": "%"},
-                hover_data={"texto": False, "pct": ":.2f", "cids_encontrados": True, "campos_origem": True},
-            )
-            fig.update_layout(
-                yaxis={"categoryorder": "total ascending"},
-                height=horizontal_bar_chart_height(len(cid_dist)),
-            )
-            render_plotly_chart(fig)
             if source == "SIM":
-                st.caption(
-                    "Este gráfico conta qualquer menção de CID-10 de meningite/encefalite em CAUSABAS, CAUSABAS_O "
-                    "e nas linhas da Declaração de Óbito (LINHAA–LINHAII, ATESTADO, CB_PRE) — não apenas quando o "
-                    "agravo foi a causa básica do óbito. Para separar causa básica de causa não-básica, veja o "
-                    "gráfico estratificável abaixo."
+                fig = px.bar(
+                    cid_dist,
+                    x="tipo",
+                    y="n",
+                    text="texto",
+                    title="Menção de CID-10 em relação aos óbitos",
+                    labels={"tipo": "CID-10", "n": "Óbitos", "pct": "%"},
+                    hover_data={"texto": False, "pct": ":.2f", "cids_encontrados": True, "campos_origem": True},
                 )
+                fig.update_xaxes(tickangle=-40, automargin=True)
+                fig.update_layout(xaxis={"categoryorder": "total descending"})
+            else:
+                fig = px.bar(
+                    cid_dist,
+                    x="n",
+                    y="tipo",
+                    orientation="h",
+                    text="texto",
+                    title="Distribuição por tipo CID-10",
+                    labels={"tipo": "Tipo CID-10", "n": "Registros", "pct": "%"},
+                    hover_data={"texto": False, "pct": ":.2f", "cids_encontrados": True, "campos_origem": True},
+                )
+                fig.update_layout(yaxis={"categoryorder": "total ascending"})
+            render_plotly_chart(fig)
             render_interval_total(cid_dist, value_col="n")
             copyable_dataframe(cid_dist, width="stretch", hide_index=True)
             download_button(cid_dist, f"{source.lower()}_cid10_distribuicao.csv")
-
-            if source == "SIM":
-                st.markdown("### CID-10 mais frequentes por critério de causa")
-                sim_cause_criterion_options = [
-                    "CID-10 apenas como causa básica",
-                    "CID-10 aparecendo como causa não-básica",
-                ]
-                sim_cause_criterion = st.selectbox(
-                    "Critério de causa",
-                    sim_cause_criterion_options,
-                    key="sim_cid10_causa_criterio",
-                )
-                if sim_cause_criterion == "CID-10 apenas como causa básica":
-                    cause_cid_sql = exprs.get("causabas_cid")
-                    cause_field_note = "apenas o campo CAUSABAS (causa básica do óbito)"
-                    cause_missing_note = "Para gerar este gráfico, o campo CAUSABAS precisa existir no SIM e ser detectado automaticamente."
-                    cause_filename_suffix = "causa_basica"
-                    cause_col_label = "CID-10 (causa básica)"
-                else:
-                    cause_cid_sql = exprs.get("causabas_non_basic_cid")
-                    cause_field_note = (
-                        "os campos associados à causa não-básica (CAUSABAS_O e as linhas da Declaração de Óbito "
-                        "— LINHAA–LINHAII, ATESTADO, CB_PRE), excluindo CAUSABAS"
-                    )
-                    cause_missing_note = (
-                        "Para gerar este gráfico, ao menos um campo de causa não-básica (CAUSABAS_O, "
-                        "LINHAA–LINHAII, ATESTADO ou CB_PRE) precisa existir no SIM e ser detectado automaticamente."
-                    )
-                    cause_filename_suffix = "causa_nao_basica"
-                    cause_col_label = "CID-10 (causa não-básica)"
-
-                st.caption(
-                    f"Este gráfico usa {cause_field_note} e lista os códigos CID-10 de meningite/encefalite mais "
-                    "frequentes nesse critério, ordenados do mais para o menos frequente. Diferente do gráfico de "
-                    "menções no topo da página, aqui cada critério é contado separadamente: um óbito com o agravo "
-                    "tanto em CAUSABAS quanto em outro campo entra nos dois critérios, um de cada vez."
-                )
-                if not cause_cid_sql:
-                    st.info(cause_missing_note)
-                else:
-                    cause_dist = query_sim_cause_cid_frequency(table, cause_cid_sql, graph_where)
-                    if cause_dist.empty:
-                        st.info("Não há registros com CID-10 de meningite/encefalite detectado nesse critério no recorte atual.")
-                    else:
-                        cause_dist = add_text(cause_dist)
-                        fig_cause = px.bar(
-                            cause_dist,
-                            x="n",
-                            y="tipo",
-                            orientation="h",
-                            text="texto",
-                            title=sim_cause_criterion,
-                            labels={"tipo": "Tipo CID-10", "n": "Óbitos", "pct": "%"},
-                            hover_data={"texto": False, "pct": ":.2f", "cid10": True},
-                        )
-                        fig_cause.update_layout(
-                            yaxis={"categoryorder": "total ascending"},
-                            height=horizontal_bar_chart_height(len(cause_dist)),
-                        )
-                        render_plotly_chart(fig_cause)
-                        render_interval_total(cause_dist, value_col="n", value_label="óbitos")
-                        cause_display = cause_dist.rename(columns={
-                            "cid10": cause_col_label,
-                            "tipo": "Tipo CID-10",
-                            "n": "Óbitos",
-                            "pct": "%",
-                        })
-                        copyable_dataframe(cause_display, width="stretch", hide_index=True)
-                        download_button(cause_dist, f"sim_cid10_{cause_filename_suffix}_frequencia.csv")
 
             conv_adequacy = query_cid10_adequacy_conversion(table, exprs, graph_where)
             if not conv_adequacy.empty:
@@ -13181,10 +13443,7 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                             "campos_origem": True,
                         },
                     )
-                    fig_conv.update_layout(
-                        yaxis={"categoryorder": "total ascending"},
-                        height=horizontal_bar_chart_height(len(conv_adequacy_plot)),
-                    )
+                    fig_conv.update_layout(yaxis={"categoryorder": "total ascending"})
                     render_plotly_chart(fig_conv)
                     render_interval_total(conv_adequacy_plot, value_col="n")
                     st.caption(
@@ -13259,14 +13518,91 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                             labels={"tipo": "Tipo CID-10", "n": "Óbitos CIHA", "pct": "% dos óbitos"},
                             hover_data={"texto": False, "pct": ":.2f", "cids_encontrados": True, "campos_origem": True},
                         )
-                        fig_death.update_layout(
-                            yaxis={"categoryorder": "total ascending"},
-                            height=horizontal_bar_chart_height(len(death_cid)),
-                        )
+                        fig_death.update_layout(yaxis={"categoryorder": "total ascending"})
                         render_plotly_chart(fig_death)
                         render_interval_total(death_cid, value_col="n", value_label="óbitos CIHA")
                         copyable_dataframe(death_cid, width="stretch", hide_index=True)
                         download_button(death_cid, "ciha_obitos_cid10_distribuicao.csv")
+
+        if source == "SIM":
+            causabas_cid = exprs.get("causabas_cid")
+            non_basic_cols: List[str] = exprs.get("sim_non_basic_cid_cols") or []  # type: ignore[assignment]
+            has_causabas = bool(causabas_cid)
+            has_linhas = bool(non_basic_cols)
+            if has_causabas or has_linhas:
+                st.markdown("### CID-10 mais frequentes por papel na Declaração de Óbito")
+                st.caption(
+                    "Selecione abaixo se deseja ver os CID-10 mais frequentes como **causa básica** (campo CAUSABAS) "
+                    "ou como **causa não-básica** (linhas da Declaração de Óbito: LINHAA–LINHAII). "
+                    "Os percentuais usam como denominador o total de menções no papel selecionado, "
+                    "e não o total de óbitos — um mesmo óbito pode ter o mesmo CID em múltiplas linhas."
+                )
+                _role_opts_sim = []
+                if has_causabas:
+                    _role_opts_sim.append("CID-10 como causa básica (CAUSABAS)")
+                if has_linhas:
+                    _role_opts_sim.append("CID-10 como causa não-básica (LINHAA–LINHAII)")
+                _sim_cid_role_key = f"sim_cid_role_{id(table)}"
+                if st.session_state.get(_sim_cid_role_key) not in (None, *_role_opts_sim):
+                    st.session_state.pop(_sim_cid_role_key, None)
+                selected_role = st.radio(
+                    "Papel do CID-10 no atestado",
+                    _role_opts_sim,
+                    horizontal=True,
+                    key=_sim_cid_role_key,
+                )
+                _role_key = "basica" if "causa básica" in (selected_role or "") else "nao_basica"
+                role_df = query_sim_cid_freq_by_role(
+                    table,
+                    _role_key,
+                    causabas_cid,
+                    non_basic_cols,
+                    graph_where,
+                    top_n=20,
+                )
+                if role_df.empty:
+                    st.info("Sem dados suficientes para tabular CID-10 por papel com os filtros atuais.")
+                else:
+                    def _br_int_local(v: object) -> str:
+                        return "—" if pd.isna(v) else f"{int(v):,}".replace(",", ".")
+
+                    def _br_pct_local(v: object) -> str:
+                        return "—" if pd.isna(v) else f"{float(v):.2f}%".replace(".", ",")
+
+                    role_df["texto"] = [
+                        f"{_br_int_local(n)} ({_br_pct_local(p)})"
+                        for n, p in zip(role_df["n"], role_df["pct"])
+                    ]
+                    _role_title = (
+                        "CID-10 mais frequentes como causa básica do óbito (CAUSABAS)"
+                        if _role_key == "basica"
+                        else "CID-10 mais frequentes como causa não-básica (linhas da Declaração de Óbito)"
+                    )
+                    _n_label = "Óbitos" if _role_key == "basica" else "Menções"
+                    fig_role = px.bar(
+                        role_df,
+                        x="tipo",
+                        y="n",
+                        text="texto",
+                        title=_role_title,
+                        labels={"tipo": "CID-10", "n": _n_label, "pct": "% do total", "cid": "Código CID-10", "denominador": "Total de menções"},
+                        hover_data={"texto": False, "pct": ":.2f", "cid": True, "denominador": True},
+                    )
+                    fig_role.update_xaxes(tickangle=-40, automargin=True)
+                    fig_role.update_layout(xaxis={"categoryorder": "total descending"})
+                    render_plotly_chart(fig_role)
+                    render_interval_total(role_df, value_col="n", value_label=_n_label.lower())
+                    _role_export = role_df.drop(columns=["texto"], errors="ignore")
+                    copyable_dataframe(_role_export, width="stretch", hide_index=True)
+                    _fname_suffix = "causa_basica" if _role_key == "basica" else "causa_nao_basica"
+                    download_button(_role_export, f"sim_cid10_freq_{_fname_suffix}.csv")
+            else:
+                st.info(
+                    "Para gerar a análise de CID-10 por papel na Declaração de Óbito, "
+                    "é necessário que os campos CAUSABAS e/ou as linhas da DO (LINHAA–LINHAII) "
+                    "existam e sejam detectados automaticamente."
+                )
+
         return
 
     st.markdown("### Classificação específica do SINAN")
@@ -13279,6 +13615,11 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
     conversion_base_where = base_where if base_where is not None else graph_where
     confirmed_conversion_where = (
         append_clause(conversion_base_where, f"{exprs['classi_code']} = '1'")
+        if exprs.get("classi_code")
+        else conversion_base_where
+    )
+    discarded_conversion_where = (
+        append_clause(conversion_base_where, f"{exprs['classi_code']} <> '1'")
         if exprs.get("classi_code")
         else conversion_base_where
     )
@@ -13314,88 +13655,6 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
             render_interval_total(conclusao_df, value_col="n", value_label="casos confirmados")
             copyable_dataframe(conclusao_df, width="stretch", hide_index=True)
             download_button(conclusao_df, "sinan_conclusao_diagnostica_confirmados.csv")
-
-    if exprs.get("con_group"):
-        con_coverage_text = ""
-        con_coverage_df = pd.DataFrame()
-        if exprs.get("con_code"):
-            con_coverage_df = query_field_coverage(table, exprs["con_code"], confirmed_conversion_where)
-            con_coverage_text = coverage_subtitle_from_df(con_coverage_df)
-        df = query_category(table, exprs["con_group"], confirmed_conversion_where, top_n=40)
-        if not df.empty:
-            df = add_text(df)
-            fig = px.bar(
-                df,
-                x="n",
-                y="categoria",
-                orientation="h",
-                text="texto",
-                title="Classificação etiológica conforme o SINAN para os casos confirmados" + (f"<br><sup>{con_coverage_text}</sup>" if con_coverage_text else ""),
-                labels={"categoria": "Classificação etiológica conforme o SINAN", "n": "Casos confirmados", "pct": "%"},
-                hover_data={"texto": False, "pct": ":.2f"},
-            )
-            fig.update_layout(yaxis={"categoryorder": "total ascending"})
-            render_field_completeness_warning(con_coverage_df, "CON_DIAGES (classificação etiológica)")
-            render_plotly_chart(fig)
-            if con_coverage_text:
-                st.caption("CON_DIAGES — " + con_coverage_text)
-            render_interval_total(df, value_col="n", value_label="casos confirmados")
-            copyable_dataframe(df, width="stretch", hide_index=True)
-
-    if exprs.get("criterio_code"):
-        criterio_presenca = query_field_presence(
-            table,
-            exprs["criterio_code"],
-            confirmed_conversion_where,
-            present_label="Sim — critério informado",
-            absent_label="Não — sem critério informado",
-        )
-        if not criterio_presenca.empty:
-            criterio_presenca = add_text(criterio_presenca)
-            fig_criterio_presenca = px.bar(
-                criterio_presenca,
-                x="categoria",
-                y="n",
-                text="texto",
-                title="Presença de critério de confirmação entre casos confirmados",
-                labels={"categoria": "Critério de confirmação", "n": "Casos confirmados", "pct": "% dos confirmados"},
-                hover_data={"texto": False, "pct": ":.2f", "denominador": True},
-            )
-            render_plotly_chart(fig_criterio_presenca)
-            st.caption(
-                "Este gráfico mostra se o campo CRITERIO está informado entre os casos confirmados. "
-                "O gráfico seguinte detalha quais critérios foram registrados entre os preenchidos."
-            )
-            render_interval_total(criterio_presenca, value_col="n", value_label="casos confirmados")
-            copyable_dataframe(criterio_presenca, width="stretch", hide_index=True)
-            download_button(criterio_presenca, "sinan_presenca_criterio_confirmacao_confirmados.csv")
-
-    if exprs.get("criterio_label"):
-        criterio_coverage_text = ""
-        criterio_coverage_df = pd.DataFrame()
-        if exprs.get("criterio_code"):
-            criterio_coverage_df = query_field_coverage(table, exprs["criterio_code"], confirmed_conversion_where)
-            criterio_coverage_text = coverage_subtitle_from_df(criterio_coverage_df)
-        criterio_df = query_category(table, exprs["criterio_label"], confirmed_conversion_where, top_n=40)
-        if not criterio_df.empty:
-            criterio_df = add_text(criterio_df)
-            fig_criterio = px.bar(
-                criterio_df,
-                x="n",
-                y="categoria",
-                orientation="h",
-                text="texto",
-                title="Critério de confirmação entre casos confirmados" + (f"<br><sup>{criterio_coverage_text}</sup>" if criterio_coverage_text else ""),
-                labels={"categoria": "Critério", "n": "Casos confirmados", "pct": "%"},
-                hover_data={"texto": False, "pct": ":.2f"},
-            )
-            fig_criterio.update_layout(yaxis={"categoryorder": "total ascending"})
-            render_field_completeness_warning(criterio_coverage_df, "CRITERIO (critério de confirmação)")
-            render_plotly_chart(fig_criterio)
-            if criterio_coverage_text:
-                st.caption("CRITERIO — " + criterio_coverage_text)
-            render_interval_total(criterio_df, value_col="n", value_label="casos confirmados")
-            copyable_dataframe(criterio_df, width="stretch", hide_index=True)
 
     etio = query_sinan_etiology_lethality(table, exprs, conversion_base_where)
     if not etio.empty:
@@ -13439,6 +13698,269 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
         render_interval_total(etio, value_col="obitos_meningite", denominator_col="confirmados_evolucao_conhecida", value_label="óbitos por meningite", denominator_label="confirmados com evolução conhecida")
         copyable_dataframe(etio, width="stretch", hide_index=True)
         download_button(etio, "sinan_letalidade_por_etiologia.csv")
+
+    if exprs.get("criterio_code"):
+        _presenca_criterio_grupos = [
+            ("Total de casos", conversion_base_where),
+            ("Entre casos confirmados", confirmed_conversion_where),
+            ("Entre casos descartados", discarded_conversion_where),
+        ]
+        _presenca_criterio_frames = []
+        for _grupo_label, _grupo_where in _presenca_criterio_grupos:
+            _presenca_criterio_grupo_df = query_field_presence(
+                table,
+                exprs["criterio_code"],
+                _grupo_where,
+                present_label="Sim — critério informado",
+                absent_label="Não — sem critério informado",
+            )
+            if not _presenca_criterio_grupo_df.empty:
+                _presenca_criterio_grupo_df = _presenca_criterio_grupo_df.copy()
+                _presenca_criterio_grupo_df["grupo"] = _grupo_label
+                _presenca_criterio_frames.append(_presenca_criterio_grupo_df)
+        if _presenca_criterio_frames:
+            criterio_presenca = pd.concat(_presenca_criterio_frames, ignore_index=True)
+            criterio_presenca = add_text(criterio_presenca)
+            fig_criterio_presenca = px.bar(
+                criterio_presenca,
+                x="categoria",
+                y="n",
+                color="grupo",
+                barmode="group",
+                text="texto",
+                title="Presença de critério de confirmação",
+                labels={"categoria": "Critério de confirmação", "n": "Casos", "pct": "% do grupo", "grupo": "Grupo"},
+                category_orders={"grupo": ["Total de casos", "Entre casos confirmados", "Entre casos descartados"]},
+                hover_data={"texto": False, "pct": ":.2f", "denominador": True, "grupo": True},
+            )
+            render_plotly_chart(fig_criterio_presenca)
+            st.caption(
+                "Este gráfico compara a presença do campo CRITERIO entre o total de casos, os casos confirmados e os casos descartados/sem classificação; "
+                "o percentual é calculado sobre o total de cada grupo. O gráfico seguinte detalha quais critérios foram registrados entre os preenchidos, "
+                "conforme a estratificação selecionada abaixo."
+            )
+            render_interval_total(criterio_presenca, value_col="n", value_label="casos")
+            copyable_dataframe(criterio_presenca, width="stretch", hide_index=True)
+            download_button(criterio_presenca, "sinan_presenca_criterio_confirmacao_por_grupo.csv")
+
+    _criterio_where = conversion_base_where
+    _criterio_group_label = "total de casos"
+    criterio_strat_sel = "Total de casos"
+    if exprs.get("criterio_code") or exprs.get("criterio_label"):
+        _CRITERIO_STRAT_OPTIONS = ["Total de casos", "Casos confirmados", "Casos descartados / sem classificação"]
+        criterio_strat_sel = st.radio(
+            "Estratificação do critério de confirmação",
+            _CRITERIO_STRAT_OPTIONS,
+            index=0,
+            key="sinan_criterio_strat",
+            horizontal=True,
+        )
+        if criterio_strat_sel == "Total de casos":
+            _criterio_where = conversion_base_where
+            _criterio_group_label = "total de casos"
+        elif criterio_strat_sel == "Casos confirmados":
+            _criterio_where = confirmed_conversion_where
+            _criterio_group_label = "casos confirmados"
+        else:
+            _criterio_where = discarded_conversion_where
+            _criterio_group_label = "casos descartados / sem classificação"
+
+    if exprs.get("criterio_label"):
+        criterio_coverage_text = ""
+        criterio_coverage_df = pd.DataFrame()
+        if exprs.get("criterio_code"):
+            criterio_coverage_df = query_field_coverage(table, exprs["criterio_code"], _criterio_where)
+            criterio_coverage_text = coverage_subtitle_from_df(criterio_coverage_df)
+        criterio_df = query_category(table, exprs["criterio_label"], _criterio_where, top_n=40)
+        if not criterio_df.empty:
+            criterio_df = add_text(criterio_df)
+            fig_criterio = px.bar(
+                criterio_df,
+                x="n",
+                y="categoria",
+                orientation="h",
+                text="texto",
+                title="Critério de confirmação — " + _criterio_group_label + (f"<br><sup>{criterio_coverage_text}</sup>" if criterio_coverage_text else ""),
+                labels={"categoria": "Critério", "n": "Casos", "pct": "%"},
+                hover_data={"texto": False, "pct": ":.2f"},
+            )
+            fig_criterio.update_layout(yaxis={"categoryorder": "total ascending"})
+            render_field_completeness_warning(criterio_coverage_df, "CRITERIO (critério de confirmação)")
+            render_plotly_chart(fig_criterio)
+            if criterio_coverage_text:
+                st.caption("CRITERIO — " + criterio_coverage_text)
+            render_interval_total(criterio_df, value_col="n", value_label="casos")
+            copyable_dataframe(criterio_df, width="stretch", hide_index=True)
+
+    st.markdown("### Especificação da meningite")
+    if not exprs.get("con_code"):
+        st.info(
+            "Campo CON_DIAGES não detectado na base atual: não é possível localizar as classificações do "
+            "campo 51 (Se confirmado, especifique) para montar os gráficos de especificação da meningite."
+        )
+    else:
+        st.info(
+            "Detalha, entre os casos confirmados, os agentes específicos registrados nos campos complementares "
+            "do campo 51 — CLA_ME_BAC (Quadro II), CLA_ME_ASS (Quadro III) e CLA_ME_ETI (Quadro IV) — e no campo 53 "
+            "— CLA_SOROGR (Quadro VI) — do dicionário de dados do SINAN NET Meningite. Cada barra é um possível "
+            "organismo/agente da ficha de investigação; o percentual do grupo é calculado sobre o subtotal daquela "
+            "classificação específica de CON_DIAGES e o percentual dos confirmados é calculado sobre o total geral "
+            "de casos confirmados do recorte."
+        )
+
+        total_confirmados_especificacao = count_rows(table, confirmed_conversion_where)
+
+        def render_especificacao_chart(
+            titulo: str,
+            con_filter_codes: Sequence[str],
+            label_expr: Optional[str],
+            label_code_expr: Optional[str],
+            campo_nome: str,
+            csv_name: str,
+        ) -> None:
+            if not label_expr:
+                st.caption(f"{titulo}: campo complementar não detectado na base atual.")
+                return
+            codes_sql_list = ", ".join(qstr(c) for c in con_filter_codes)
+            where_grupo = append_clause(confirmed_conversion_where, f"{exprs['con_code']} IN ({codes_sql_list})")
+            grupo_total = count_rows(table, where_grupo)
+            if grupo_total <= 0:
+                st.caption(f"{titulo}: nenhum caso confirmado com CON_DIAGES em ({', '.join(con_filter_codes)}) no recorte atual.")
+                return
+            especif_df = query_category(table, label_expr, where_grupo, top_n=40)
+            if especif_df.empty:
+                return
+            especif_df = especif_df.copy()
+            especif_df["pct_confirmados"] = (
+                (especif_df["n"] / total_confirmados_especificacao * 100).round(2)
+                if total_confirmados_especificacao
+                else None
+            )
+            especif_df["texto"] = [
+                f"{br_int(n)} ({br_pct(pct_g)} do grupo; {br_pct(pct_c)} dos confirmados)"
+                for n, pct_g, pct_c in zip(especif_df["n"], especif_df["pct"], especif_df["pct_confirmados"])
+            ]
+            coverage_df = query_field_coverage(table, label_code_expr, where_grupo) if label_code_expr else pd.DataFrame()
+            coverage_text = coverage_subtitle_from_df(coverage_df) if not coverage_df.empty else ""
+            fig_especif = px.bar(
+                especif_df,
+                x="n",
+                y="categoria",
+                orientation="h",
+                text="texto",
+                title=titulo + (f"<br><sup>{coverage_text}</sup>" if coverage_text else ""),
+                labels={
+                    "categoria": campo_nome,
+                    "n": "Casos",
+                    "pct": "% do grupo",
+                    "pct_confirmados": "% dos confirmados",
+                },
+                hover_data={"texto": False, "pct": ":.2f", "pct_confirmados": ":.2f"},
+            )
+            fig_especif.update_layout(yaxis={"categoryorder": "total ascending"})
+            if not coverage_df.empty:
+                render_field_completeness_warning(coverage_df, campo_nome)
+            render_plotly_chart(fig_especif)
+            st.caption(
+                f"Grupo de referência: {br_int(grupo_total)} caso(s) confirmado(s) com CON_DIAGES em "
+                f"({', '.join(con_filter_codes)}). % do grupo é calculado sobre esse subtotal; % dos confirmados é "
+                f"calculado sobre o total de {br_int(total_confirmados_especificacao)} caso(s) confirmado(s) do recorte."
+            )
+            render_interval_total(especif_df, value_col="n", value_label="casos")
+            copyable_dataframe(especif_df, width="stretch", hide_index=True)
+            download_button(especif_df, csv_name)
+
+        render_especificacao_chart(
+            "Especificação de meningite por outras bactérias",
+            ["05"],
+            exprs.get("cla_me_bac_label"),
+            exprs.get("cla_me_bac_code"),
+            "Bactéria (CLA_ME_BAC — Quadro II)",
+            "sinan_especificacao_outras_bacterias.csv",
+        )
+        render_especificacao_chart(
+            "Especificação de meningite asséptica",
+            ["07"],
+            exprs.get("cla_me_ass_label"),
+            exprs.get("cla_me_ass_code"),
+            "Agente (CLA_ME_ASS — Quadro III)",
+            "sinan_especificacao_meningite_asseptica.csv",
+        )
+        render_especificacao_chart(
+            "Especificação de meningite por outras etiologias",
+            ["08"],
+            exprs.get("cla_me_eti_label"),
+            exprs.get("cla_me_eti_code"),
+            "Etiologia (CLA_ME_ETI — Quadro IV)",
+            "sinan_especificacao_outras_etiologias.csv",
+        )
+        render_especificacao_chart(
+            "Especificação de sorogrupos de Neisseria meningitidis",
+            ["01", "02", "03"],
+            exprs.get("cla_sorogr_label"),
+            exprs.get("cla_sorogr_code"),
+            "Sorogrupo (CLA_SOROGR — Quadro VI)",
+            "sinan_especificacao_sorogrupos_nmeningitidis.csv",
+        )
+
+        st.markdown("#### Microrganismos mais prevalentes entre os casos confirmados")
+        st.caption(
+            "Consolida, para cada caso confirmado, um único agente etiológico a partir de CON_DIAGES e — quando "
+            "aplicável — dos campos complementares CLA_ME_BAC, CLA_ME_ASS e CLA_ME_ETI, conforme a ficha de "
+            "investigação do SINAN."
+        )
+        top_n_micro = st.number_input(
+            "Número de microrganismos/agentes mais prevalentes a exibir (N)",
+            min_value=1,
+            max_value=100,
+            value=10,
+            step=1,
+            key="sinan_top_n_microorganismos",
+        )
+        micro_label_expr = sinan_microorganism_label_expr(
+            exprs["con_code"],
+            exprs.get("cla_me_bac_label"),
+            exprs.get("cla_me_ass_label"),
+            exprs.get("cla_me_eti_label"),
+        )
+        micro_df = query_category(table, micro_label_expr, confirmed_conversion_where, top_n=int(top_n_micro))
+        if micro_df.empty:
+            st.warning("Não há casos confirmados suficientes para compor o ranking de microrganismos no recorte atual.")
+        else:
+            micro_df = micro_df.copy()
+            micro_df["pct_confirmados"] = (
+                (micro_df["n"] / total_confirmados_especificacao * 100).round(2)
+                if total_confirmados_especificacao
+                else None
+            )
+            micro_df["texto"] = [
+                f"{br_int(n)} ({br_pct(pct_c)} dos confirmados)"
+                for n, pct_c in zip(micro_df["n"], micro_df["pct_confirmados"])
+            ]
+            fig_micro = px.bar(
+                micro_df,
+                x="n",
+                y="categoria",
+                orientation="h",
+                text="texto",
+                title=f"Top {int(top_n_micro)} microrganismos/agentes mais prevalentes entre os casos confirmados",
+                labels={
+                    "categoria": "Microrganismo/agente etiológico",
+                    "n": "Casos confirmados",
+                    "pct_confirmados": "% dos confirmados",
+                },
+                hover_data={"texto": False, "pct_confirmados": ":.2f"},
+            )
+            fig_micro.update_layout(yaxis={"categoryorder": "total ascending"})
+            render_plotly_chart(fig_micro)
+            st.caption(
+                f"Ranking dos {int(top_n_micro)} microrganismo(s)/agente(s) mais frequentes entre "
+                f"{br_int(total_confirmados_especificacao)} caso(s) confirmado(s) do recorte atual. O percentual de "
+                "cada barra é calculado sobre o total geral de confirmados, não apenas sobre os N exibidos."
+            )
+            render_interval_total(micro_df, value_col="n", value_label="casos confirmados")
+            copyable_dataframe(micro_df, width="stretch", hide_index=True)
+            download_button(micro_df, "sinan_top_microrganismos_confirmados.csv")
 
     meningococcemia_isolada_total = (
         count_rows(table, append_clause(confirmed_conversion_where, f"{exprs['con_code']} = '01'"))
@@ -13549,22 +14071,20 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
     education = exprs.get("education")
     demography_case_base_where = base_where if (source == "SINAN" and base_where is not None) else graph_where
     outcome_demography_where = base_where if base_where is not None else graph_where
-    sinan_case_filter_options = ["Casos confirmados", "Casos descartados / sem classificação"]
-    # A distribuição por faixa etária é exibida naturalmente pelo total de casos, sem
-    # distinguir confirmados de descartados/sem classificação; por isso seu botão de
-    # estratificação tem uma terceira opção ("Total"), usada como padrão.
-    sinan_age_distribution_filter_options = ["Total", "Casos confirmados", "Casos descartados / sem classificação"]
+    sinan_case_filter_options = ["Total de casos", "Casos confirmados", "Casos descartados / sem classificação"]
 
     def sinan_case_filter_where(selection: str) -> str:
         if not (source == "SINAN" and classi_code):
             return graph_where
-        if selection == "Total":
-            return graph_where
+        if selection == "Total de casos":
+            return demography_case_base_where
         if selection == "Casos confirmados":
             return append_clause(demography_case_base_where, f"{classi_code} = '1'")
         return append_clause(demography_case_base_where, f"({classi_code} IS NULL OR {classi_code} <> '1')")
 
     def sinan_case_filter_suffix(selection: Optional[str]) -> str:
+        if selection == "Total de casos":
+            return "total"
         if selection == "Casos confirmados":
             return "confirmados"
         if selection == "Casos descartados / sem classificação":
@@ -13572,7 +14092,7 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
         return ""
 
     def sinan_case_filter_title(selection: Optional[str]) -> str:
-        if not selection or selection == "Total":
+        if not selection:
             return ""
         return " — " + selection.lower()
 
@@ -13914,24 +14434,12 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
         copyable_dataframe(df, width="stretch", hide_index=True)
         download_button(df, f"{source.lower()}_{safe_filename(label)}.csv")
 
-    def render_municipality_charts(kind: str) -> None:
-        """Gráficos de Top 15 + Outros municípios.
-
-        kind="res" usa o município de residência; kind="event" usa o município de
-        ocorrência/atendimento/notificação. Ambos seguem o mesmo tratamento (Top 15 +
-        Outros municípios) e, no SINAN, a mesma estratificação por Total/Confirmados/
-        Descartados/Sem classificação já usada nos demais gráficos desta seção.
-        """
-        if kind == "res":
-            mun_expr = exprs.get("mun_res_label") or exprs.get("mun_res")
-            mun_label = "Município de residência"
-        else:
-            mun_expr = exprs.get("mun_event_label") or exprs.get("mun_event")
-            mun_label = "Município de ocorrência/atendimento/notificação"
-        if not mun_expr:
+    def render_municipality_charts() -> None:
+        mun_event_expr = exprs.get("mun_event_label") or exprs.get("mun_event")
+        mun_res_expr = exprs.get("mun_res_label") or exprs.get("mun_res")
+        if not mun_event_expr and not mun_res_expr:
             return
         top_municipios = 15
-        st.markdown(f"### {mun_label}")
         st.caption("Nos gráficos de município, são exibidos os 15 principais códigos IBGE; todas as demais categorias são somadas em 'Outros municípios'. Assim, percentual e denominador continuam representando 100% dos dados filtrados.")
 
         if source == "SINAN" and classi_code:
@@ -13948,28 +14456,38 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
         else:
             mun_specs = [("Total", graph_where, "total")]
 
-        for group_label, where_sql, suffix in mun_specs:
-            df = query_municipality_top(table, mun_expr, where_sql, top_n=top_municipios)
-            if df.empty:
-                continue
-            df = add_text(df)
-            title = f"{mun_label} — {group_label} — Top {top_municipios} + Outros municípios" if len(mun_specs) > 1 else f"{mun_label} — Top {top_municipios} + Outros municípios"
-            fig = px.bar(
-                df,
-                x="n",
-                y="categoria",
-                orientation="h",
-                text="texto",
-                title=title,
-                labels={"categoria": mun_label, "n": "Registros", "pct": "%", "denominador": "Denominador"},
-                hover_data={"texto": False, "pct": ":.2f", "denominador": True},
-            )
-            fig.update_layout(yaxis={"categoryorder": "array", "categoryarray": df["categoria"].tolist()[::-1]})
-            render_plotly_chart(fig)
-            render_interval_total(df, value_col="n")
-            copyable_dataframe(df, width="stretch", hide_index=True)
-            filename = f"{source.lower()}_{safe_filename(mun_label)}_{suffix}_top{top_municipios}_outros.csv"
-            download_button(df, filename)
+        def _render_mun_block(mun_expr: str, mun_label: str, slug: str) -> None:
+            for group_label, where_sql, suffix in mun_specs:
+                df = query_municipality_top(table, mun_expr, where_sql, top_n=top_municipios)
+                if df.empty:
+                    continue
+                df = add_text(df)
+                title = (
+                    f"{mun_label} — {group_label} — Top {top_municipios} + Outros municípios"
+                    if len(mun_specs) > 1
+                    else f"{mun_label} — Top {top_municipios} + Outros municípios"
+                )
+                fig = px.bar(
+                    df,
+                    x="n",
+                    y="categoria",
+                    orientation="h",
+                    text="texto",
+                    title=title,
+                    labels={"categoria": mun_label, "n": "Registros", "pct": "%", "denominador": "Denominador"},
+                    hover_data={"texto": False, "pct": ":.2f", "denominador": True},
+                )
+                fig.update_layout(yaxis={"categoryorder": "array", "categoryarray": df["categoria"].tolist()[::-1]})
+                render_plotly_chart(fig)
+                render_interval_total(df, value_col="n")
+                filename = f"{source.lower()}_{slug}_{suffix}_top{top_municipios}_outros.csv"
+                download_button(df, filename)
+
+        if mun_res_expr:
+            _render_mun_block(mun_res_expr, "Município de residência", "municipio_residencia")
+
+        if mun_event_expr:
+            _render_mun_block(mun_event_expr, "Município de ocorrência/atendimento/notificação", "municipio_ocorrencia")
 
     if not age and not sex and not race:
         st.warning("Configure idade, sexo ou raça/cor para gerar os gráficos demográficos. As categorias territoriais ainda podem ser exibidas abaixo.")
@@ -13980,7 +14498,8 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
         if age:
             age_selection = st.selectbox(
                 "Grupo de casos para a distribuição por faixa etária",
-                sinan_age_distribution_filter_options,
+                sinan_case_filter_options,
+                index=0,
                 key="sinan_age_distribution_case_filter",
             )
             render_age_distribution_chart(sinan_case_filter_where(age_selection), age_selection)
@@ -14043,8 +14562,7 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
 
         render_sinan_education_chart()
 
-        render_municipality_charts("res")
-        render_municipality_charts("event")
+        render_municipality_charts()
 
     else:
         # SIM/CIHA: sexo, depois pirâmide etária por sexo, depois raça/cor, depois distribuição
@@ -14065,8 +14583,7 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
             else:
                 render_ciha_education_chart()
 
-        render_municipality_charts("res")
-        render_municipality_charts("event")
+        render_municipality_charts()
 
 
 def render_quality_tab(table: LoadedTable, source: str, base_where: str, exprs: Dict[str, Optional[str]]) -> None:
@@ -14270,7 +14787,7 @@ def render_source(source: str) -> Optional[Dict[str, object]]:
     analysis_sections = [
         "Principais indicadores epidemiológicos",
         "Temporal",
-        "Análise epidemiológica e CID-10",
+        "Análise etiológica e CID-10",
         "Demografia e território",
     ]
     if source == "SINAN":
@@ -14295,7 +14812,7 @@ def render_source(source: str) -> Optional[Dict[str, object]]:
         render_indicators_tab(table, source, base_where, graph_where, exprs)
     elif selected_section == "Temporal":
         render_temporal_tab(table, source, graph_where, exprs)
-    elif selected_section == "Análise epidemiológica e CID-10":
+    elif selected_section == "Análise etiológica e CID-10":
         render_cid_tab(table, source, graph_where, exprs, base_where=base_where)
     elif selected_section == "Demografia e território":
         render_demography_tab(table, source, graph_where, exprs, base_where=base_where)
@@ -14470,7 +14987,7 @@ def render_methodology():
     st.markdown(
         """
         1. Comece pela aba **Principais indicadores epidemiológicos** do SINAN para separar total de notificações, confirmados, descartados e sem classificação/ignorados.
-        2. Use **Análise epidemiológica e CID-10** para comparar o CID bruto com a classificação específica. No SINAN, dê prioridade a `CON_DIAGES`, `CLA_ME_BAC`, `CLA_ME_ASS` e `CLA_ME_ETI`.
+        2. Use **Análise etiológica e CID-10** para comparar o CID bruto com a classificação específica. No SINAN, dê prioridade a `CON_DIAGES`, `CLA_ME_BAC`, `CLA_ME_ASS` e `CLA_ME_ETI`.
         3. Use **Temporal** para verificar queda, recuperação e sazonalidade.
         4. Use **Demografia e território** para levantar hipóteses por idade, sexo, residência e atendimento.
         5. Use **Prévia** para inspecionar casos filtrados e exportar a planilha completa quando necessário.
