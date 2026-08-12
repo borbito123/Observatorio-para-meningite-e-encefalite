@@ -68,7 +68,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-07-26-v52-sobreposicao-criterios-ampliados"
+APP_VERSION = "2026-08-11-v54-cid10-causa-basica-nao-basica-municipio-residencia"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos
@@ -93,6 +93,7 @@ LETHALITY_RED = DEATH_RED
 LETHALITY_LABEL = "Letalidade — óbitos por meningite / confirmados"
 LETHALITY_KNOWN_EVOL_LABEL = "Letalidade — óbitos por meningite / confirmados com evolução conhecida"
 DARK_GRAY = "#4D4D4D"
+TOTAL_CASES_YELLOW = "#F2C230"
 COVID_CONTEXT_NOTE = (
     "Anotação de contexto 2020-2021: pandemia de COVID-19, reorganização assistencial, "
     "alteração da circulação de agentes respiratórios e possibilidade de subnotificação. "
@@ -409,7 +410,7 @@ TITLE_EXACT_FIXES = {
     "total de notificações, confirmados, descartados e sem classificação / ignorados": "Total de notificações, confirmados, descartados e sem classificação/ignorados",
     "distribuição por escolaridade": "Distribuição por escolaridade",
     "escolaridade — casos confirmados e descartados": "Escolaridade — casos confirmados e descartados",
-    "ocorrência de hospitalização por definição de caso": "Ocorrência de hospitalização por definição de caso",
+    "ocorrência de hospitalização por meningite": "Ocorrência de hospitalização por meningite",
     "prevalência acumulada dos sinais e sintomas entre confirmados": "Prevalência acumulada dos sinais e sintomas entre confirmados",
     "número de comunicantes por realização de quimioprofilaxia": "Número de comunicantes por realização de quimioprofilaxia",
     "vacinação informada como 'sim' por classificação final do caso": "Vacinação informada como “Sim” por classificação final do caso",
@@ -529,6 +530,27 @@ def style_plotly_figure(fig: go.Figure) -> go.Figure:
 def render_plotly_chart(fig: go.Figure) -> None:
     """Renderiza Plotly com configuração leve e consistente."""
     st.plotly_chart(style_plotly_figure(fig), width="stretch", config=PLOTLY_CONFIG)
+
+
+def horizontal_bar_chart_height(
+    n_categories: int,
+    *,
+    min_height: int = 420,
+    px_per_category: int = 34,
+    max_height: int = 1400,
+) -> int:
+    """Calcula uma altura dinâmica para gráficos de barra horizontal.
+
+    Gráficos de barra horizontal com muitas categorias (por exemplo, distribuição por
+    tipo de CID-10, que pode ter dezenas de categorias) ficam com barras espremidas
+    quando renderizados numa altura fixa — a ponto de ocultar os próprios rótulos de
+    referência das categorias. Esta função escala a altura do gráfico conforme o
+    número de categorias, respeitando um mínimo (gráficos com poucas categorias não
+    ficam baixos demais) e um máximo (evita gráficos absurdamente altos).
+    """
+    if n_categories <= 0:
+        return min_height
+    return int(min(max_height, max(min_height, px_per_category * n_categories + 160)))
 
 
 def _session_int(key: str, default: int) -> int:
@@ -1508,6 +1530,18 @@ SINAN_SYMPTOM_FIELDS = [
     ("CLI_COMA", "Coma"),
     ("CLI_OUTRAS", "Outras manifestações"),
 ]
+
+# Rótulo do sintoma "Abaulamento de fontanela" (deve casar exatamente com o label usado
+# em SINAN_SYMPTOM_FIELDS acima) e idade máxima (em anos) até a qual a fontanela
+# costuma permanecer aberta, usada para restringir a curva anual desse sintoma.
+FONTANELA_SYMPTOM_LABEL = "Abaulamento de fontanela"
+FONTANELA_MAX_AGE_YEARS = 2
+FONTANELA_AGE_NOTE = (
+    "Observação clínica: a fontanela costuma permanecer aberta até, no máximo, 24 meses "
+    "(2 anos) de idade, deixando de ser um sintoma pertinente para avaliar casos que "
+    "ultrapassam essa idade. Por isso, a curva anual abaixo considera apenas os casos "
+    "com idade de até 2 anos."
+)
 
 SINAN_VACCINE_FIELDS = [
     ("ANT_AC", "Polissacarídica A/C"),
@@ -4164,6 +4198,8 @@ def build_expressions(source: str, sel: ColumnSelection) -> Dict[str, Optional[s
         exprs["causabas_o_cid"] = cid_extract_expr([sel.causabas_o_col] if sel.causabas_o_col else [])
         exprs["causabas_group"] = cid_group_expr(exprs["causabas_cid"]) if exprs["causabas_cid"] else None
         exprs["causabas_type"] = cid_type_expr(exprs["causabas_cid"]) if exprs["causabas_cid"] else None
+        non_basic_cid_cols = [c for c in sel.cid_cols if c and c != sel.causabas_col]
+        exprs["causabas_non_basic_cid"] = cid_extract_expr(non_basic_cid_cols) if non_basic_cid_cols else None
         exprs["lococor_label"] = case_from_mapping(clean_code_expr("LOCOCOR"), SIM_LOCOCOR, "Sem informação/ignorado") if "LOCOCOR" in [sel.municipality_event_col, sel.municipality_res_col] else None
         exprs["obitograv_code"] = clean_code_expr(sel.obitograv_col) if sel.obitograv_col else None
         exprs["obitograv_label"] = case_from_mapping(exprs["obitograv_code"], SIM_OBITOGRAV, "Sem informação/ignorado") if exprs.get("obitograv_code") else None
@@ -4878,6 +4914,36 @@ def query_cid_distribution(table: LoadedTable, exprs: Dict[str, Optional[str]], 
         FROM base
         GROUP BY 1, 2
         ORDER BY n DESC, grupo
+    """
+    df = run_query(table, sql)
+    if not df.empty:
+        df["pct"] = (df["n"] / df["n"].sum() * 100).round(2)
+    return df
+
+
+def query_sim_cause_cid_frequency(table: LoadedTable, cid_sql: Optional[str], where_sql: str) -> pd.DataFrame:
+    """Frequência de cada código CID-10 para um critério de causa específico no SIM.
+
+    Usado tanto para causa básica (campo CAUSABAS) quanto para causa não-básica
+    (demais campos: CAUSABAS_O e as linhas da Declaração de Óbito — LINHAA–LINHAII,
+    ATESTADO, CB_PRE). Diferente de query_cid_distribution (que soma qualquer menção,
+    sem distinguir o critério), esta consulta agrega no nível do código CID-10
+    individual dentro de um único critério, para responder qual(is) CID-10 mais
+    aparecem naquele critério.
+    """
+    if not cid_sql:
+        return pd.DataFrame()
+    sql = f"""
+        WITH base AS (
+            SELECT {cid_sql} AS cid10, {cid_type_expr(cid_sql)} AS tipo
+            FROM {table.ref_sql}
+            {where_sql}
+        )
+        SELECT cid10, tipo, COUNT(*) AS n
+        FROM base
+        WHERE cid10 IS NOT NULL
+        GROUP BY 1, 2
+        ORDER BY n DESC, cid10
     """
     df = run_query(table, sql)
     if not df.empty:
@@ -6743,11 +6809,40 @@ def _available_column_specs(columns: Sequence[str], specs: Sequence[Tuple[str, s
     return available
 
 
-def query_sinan_symptom_prevalence(table: LoadedTable, exprs: Dict[str, Optional[str]], where_sql: str, symptom_specs: Sequence[Tuple[str, str]]) -> pd.DataFrame:
+SINTOMA_GRUPO_TOTAL = "Total de casos"
+SINTOMA_GRUPO_CONFIRMADOS = "Casos confirmados"
+SINTOMA_GRUPO_DESCARTADOS = "Casos descartados / sem classificação"
+SINTOMA_GRUPO_ORDER = [SINTOMA_GRUPO_TOTAL, SINTOMA_GRUPO_CONFIRMADOS, SINTOMA_GRUPO_DESCARTADOS]
+
+
+def query_sinan_symptom_prevalence(
+    table: LoadedTable,
+    exprs: Dict[str, Optional[str]],
+    where_sql: str,
+    symptom_specs: Sequence[Tuple[str, str]],
+    age_cap_symptom: Optional[str] = None,
+    age_cap_years: Optional[float] = None,
+) -> pd.DataFrame:
+    """Calcula a prevalência anual de sinais/sintomas, aberta por grupo de caso.
+
+    O resultado traz três recortes de população por ano/sintoma: total de casos,
+    casos confirmados e casos descartados/sem classificação — permitindo escolher
+    o denominador na curva anual sem recalcular a query.
+
+    Quando `age_cap_symptom`/`age_cap_years` são informados (usado para o
+    "Abaulamento de fontanela") e a expressão de idade (`exprs["age"]`) está
+    disponível, apenas os registros daquele sintoma específico são restritos à
+    idade máxima informada; os demais sintomas não são afetados.
+    """
     dt = exprs.get("dt")
     classi = exprs.get("classi_code")
     if not (dt and classi and symptom_specs):
         return pd.DataFrame()
+
+    age_sql = exprs.get("age")
+    age_clause = ""
+    if age_cap_symptom and age_cap_years is not None and age_sql:
+        age_clause = f"AND (sintoma <> {qstr(age_cap_symptom)} OR (({age_sql}) IS NOT NULL AND ({age_sql}) <= {age_cap_years}))"
 
     unions = []
     for col, label in symptom_specs:
@@ -6768,24 +6863,41 @@ def query_sinan_symptom_prevalence(table: LoadedTable, exprs: Dict[str, Optional
         ), base AS (
             SELECT EXTRACT(YEAR FROM dt) AS ano,
                    sintoma,
-                   sintoma_codigo
+                   sintoma_codigo,
+                   classi
             FROM long
             WHERE dt IS NOT NULL
-              AND classi = '1'
+            {age_clause}
+        ), scoped AS (
+            SELECT ano, sintoma, sintoma_codigo,
+                   {qstr(SINTOMA_GRUPO_TOTAL)} AS grupo_caso, 1 AS ordem_grupo
+            FROM base
+            UNION ALL
+            SELECT ano, sintoma, sintoma_codigo,
+                   {qstr(SINTOMA_GRUPO_CONFIRMADOS)} AS grupo_caso, 2 AS ordem_grupo
+            FROM base
+            WHERE classi = '1'
+            UNION ALL
+            SELECT ano, sintoma, sintoma_codigo,
+                   {qstr(SINTOMA_GRUPO_DESCARTADOS)} AS grupo_caso, 3 AS ordem_grupo
+            FROM base
+            WHERE classi IS NULL OR classi <> '1'
         ), agg AS (
             SELECT ano,
                    sintoma,
-                   COUNT(*) AS confirmados,
+                   grupo_caso,
+                   ordem_grupo,
+                   COUNT(*) AS casos,
                    COUNT(*) FILTER (WHERE sintoma_codigo = '1') AS sintoma_sim,
                    COUNT(*) FILTER (WHERE sintoma_codigo = '2') AS sintoma_nao,
                    COUNT(*) FILTER (WHERE sintoma_codigo IS NULL OR sintoma_codigo NOT IN ('1','2')) AS sintoma_ignorado
-            FROM base
-            GROUP BY 1, 2
+            FROM scoped
+            GROUP BY 1, 2, 3, 4
         )
         SELECT *,
-               {pct_expr('sintoma_sim', 'confirmados')} AS pct_sintoma_confirmados
+               {pct_expr('sintoma_sim', 'casos')} AS pct_sintoma_casos
         FROM agg
-        ORDER BY ano, sintoma
+        ORDER BY ano, sintoma, ordem_grupo
     """
     return run_query(table, sql)
 
@@ -6964,6 +7076,11 @@ def query_sinan_vaccination_by_classification(table: LoadedTable, exprs: Dict[st
                    END AS grupo_classificacao,
                    vacina_codigo
             FROM long
+            UNION ALL
+            SELECT vacina,
+                   'Total de casos' AS grupo_classificacao,
+                   vacina_codigo
+            FROM long
         ), agg AS (
             SELECT vacina,
                    grupo_classificacao,
@@ -6980,9 +7097,10 @@ def query_sinan_vaccination_by_classification(table: LoadedTable, exprs: Dict[st
         FROM agg
         ORDER BY vacina,
                  CASE
-                    WHEN grupo_classificacao = 'Confirmados' THEN 0
-                    WHEN grupo_classificacao = 'Descartados' THEN 1
-                    ELSE 2
+                    WHEN grupo_classificacao = 'Total de casos' THEN 0
+                    WHEN grupo_classificacao = 'Confirmados' THEN 1
+                    WHEN grupo_classificacao = 'Descartados' THEN 2
+                    ELSE 3
                  END
     """
     return run_query(table, sql)
@@ -12448,7 +12566,7 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, grap
                 color="grupo_caso",
                 barmode="group",
                 text="texto",
-                title="Ocorrência de hospitalização por definição de caso",
+                title="Ocorrência de hospitalização por meningite",
                 labels={"ano": "Ano", "pct": "% no grupo", "grupo_caso": "Grupo", "n": "Registros", "denominador": "Denominador"},
                 hover_data={"texto": False, "n": True, "denominador": True},
                 category_orders={"grupo_caso": grupo_hosp_order},
@@ -12463,28 +12581,29 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, grap
         if symptom_specs and exprs.get("classi_code") and exprs.get("dt"):
             sintomas = query_sinan_symptom_prevalence(table, exprs, base_where, symptom_specs)
             if not sintomas.empty:
+                sintomas_confirmados = sintomas[sintomas["grupo_caso"].eq(SINTOMA_GRUPO_CONFIRMADOS)]
                 sintomas_resumo = (
-                    sintomas
+                    sintomas_confirmados
                     .groupby("sintoma", dropna=False, as_index=False)
                     .agg(
-                        confirmados=("confirmados", "sum"),
+                        casos=("casos", "sum"),
                         sintoma_sim=("sintoma_sim", "sum"),
                         sintoma_nao=("sintoma_nao", "sum"),
                         sintoma_ignorado=("sintoma_ignorado", "sum"),
                     )
                 )
-                sintomas_resumo["pct_sintoma_confirmados"] = (100.0 * sintomas_resumo["sintoma_sim"] / sintomas_resumo["confirmados"].replace({0: np.nan})).round(2)
-                sintomas_resumo = sintomas_resumo.sort_values("pct_sintoma_confirmados", ascending=True)
-                sintomas_resumo["texto"] = [f"{br_pct(p)} (n={br_int(n)})" for p, n in zip(sintomas_resumo["pct_sintoma_confirmados"], sintomas_resumo["sintoma_sim"])]
+                sintomas_resumo["pct_sintoma_casos"] = (100.0 * sintomas_resumo["sintoma_sim"] / sintomas_resumo["casos"].replace({0: np.nan})).round(2)
+                sintomas_resumo = sintomas_resumo.sort_values("pct_sintoma_casos", ascending=True)
+                sintomas_resumo["texto"] = [f"{br_pct(p)} (n={br_int(n)})" for p, n in zip(sintomas_resumo["pct_sintoma_casos"], sintomas_resumo["sintoma_sim"])]
                 fig_sintomas_resumo = px.bar(
                     sintomas_resumo,
-                    x="pct_sintoma_confirmados",
+                    x="pct_sintoma_casos",
                     y="sintoma",
                     orientation="h",
                     text="texto",
                     title="Prevalência acumulada dos sinais e sintomas entre confirmados",
-                    labels={"pct_sintoma_confirmados": "% dos confirmados", "sintoma": "Sinal/sintoma"},
-                    hover_data={"texto": False, "sintoma_sim": True, "confirmados": True, "sintoma_nao": True, "sintoma_ignorado": True},
+                    labels={"pct_sintoma_casos": "% dos confirmados", "sintoma": "Sinal/sintoma"},
+                    hover_data={"texto": False, "sintoma_sim": True, "casos": True, "sintoma_nao": True, "sintoma_ignorado": True},
                 )
                 render_plotly_chart(fig_sintomas_resumo)
                 render_interval_total(sintomas_resumo, value_col="sintoma_sim", by_col="sintoma")
@@ -12497,24 +12616,53 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, grap
                     key="sinan_indicadores_sintoma_prevalencia",
                     label_visibility="collapsed",
                 )
-                sintomas_sel = sintomas[sintomas["sintoma"].eq(sintoma_sel)].copy()
-                sintomas_sel["texto"] = [f"{br_pct(p)} (n={br_int(n)})" for p, n in zip(sintomas_sel["pct_sintoma_confirmados"], sintomas_sel["sintoma_sim"])]
+                escopo_sel = st.radio(
+                    "Delimitar por",
+                    options=SINTOMA_GRUPO_ORDER,
+                    horizontal=True,
+                    key="sinan_indicadores_sintoma_prevalencia_escopo",
+                )
+
+                is_fontanela = sintoma_sel == FONTANELA_SYMPTOM_LABEL
+                if is_fontanela:
+                    st.info(FONTANELA_AGE_NOTE)
+
+                if is_fontanela and exprs.get("age"):
+                    fontanela_spec = next((spec for spec in symptom_specs if spec[1] == FONTANELA_SYMPTOM_LABEL), None)
+                    sintomas_fonte = (
+                        query_sinan_symptom_prevalence(
+                            table, exprs, base_where, [fontanela_spec],
+                            age_cap_symptom=FONTANELA_SYMPTOM_LABEL, age_cap_years=FONTANELA_MAX_AGE_YEARS,
+                        )
+                        if fontanela_spec else sintomas
+                    )
+                elif is_fontanela:
+                    st.caption(
+                        "Não foi possível identificar um campo de idade nesta base, então a curva abaixo não pôde ser "
+                        "restrita a até 2 anos; interprete com cautela para os casos com idade maior."
+                    )
+                    sintomas_fonte = sintomas
+                else:
+                    sintomas_fonte = sintomas
+
+                sintomas_sel = sintomas_fonte[sintomas_fonte["sintoma"].eq(sintoma_sel) & sintomas_fonte["grupo_caso"].eq(escopo_sel)].copy()
+                sintomas_sel["texto"] = [f"{br_pct(p)} (n={br_int(n)})" for p, n in zip(sintomas_sel["pct_sintoma_casos"], sintomas_sel["sintoma_sim"])]
                 fig_sintoma = px.line(
                     sintomas_sel,
                     x="ano",
-                    y="pct_sintoma_confirmados",
+                    y="pct_sintoma_casos",
                     markers=True,
                     text="texto",
-                    title=f"Prevalência anual de {sintoma_sel} entre casos confirmados",
-                    labels={"ano": "Ano", "pct_sintoma_confirmados": "% dos confirmados", "sintoma_sim": "Confirmados com sintoma"},
-                    hover_data={"texto": False, "sintoma_sim": True, "confirmados": True, "sintoma_nao": True, "sintoma_ignorado": True},
+                    title=f"Prevalência anual de {sintoma_sel} — {escopo_sel.lower()}" + (" (até 2 anos)" if is_fontanela and exprs.get("age") else ""),
+                    labels={"ano": "Ano", "pct_sintoma_casos": "% do grupo selecionado", "sintoma_sim": "Casos com sintoma"},
+                    hover_data={"texto": False, "sintoma_sim": True, "casos": True, "sintoma_nao": True, "sintoma_ignorado": True},
                 )
                 fig_sintoma.update_traces(textposition="top center")
                 render_plotly_chart(fig_sintoma)
-                render_interval_total(sintomas_sel, value_col="sintoma_sim", denominator_col="confirmados", value_label="confirmados com sintoma", denominator_label="casos confirmados")
+                render_interval_total(sintomas_sel, value_col="sintoma_sim", denominator_col="casos", value_label="casos com sintoma", denominator_label="casos no grupo selecionado")
 
-                copyable_dataframe(sintomas, width="stretch", hide_index=True)
-                download_button(sintomas, "sinan_prevalencia_sintomas_confirmados.csv")
+                copyable_dataframe(sintomas.drop(columns=["ordem_grupo"], errors="ignore"), width="stretch", hide_index=True)
+                download_button(sintomas.drop(columns=["ordem_grupo"], errors="ignore"), "sinan_prevalencia_sintomas_por_grupo_caso.csv")
         else:
             st.info("Para gerar a prevalência de sintomas, CLASSI_FIN, data e os campos clínicos CLI_* precisam existir no SINAN.")
 
@@ -12590,7 +12738,7 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, grap
             st.markdown("**Vacinação por classificação final do caso**")
             vacinacao = vacinacao.copy()
             vacinacao["texto"] = [f"{br_pct(p)} (n={br_int(n)})" for p, n in zip(vacinacao["pct_vacinados_sim"], vacinacao["vacinados_sim"])]
-            grupo_vacina_order = ["Confirmados", "Descartados", "Sem classificação / ignorados"]
+            grupo_vacina_order = ["Total de casos", "Confirmados", "Descartados", "Sem classificação / ignorados"]
             fig_vacinacao = px.bar(
                 vacinacao,
                 x="vacina",
@@ -12602,7 +12750,9 @@ def render_indicators_tab(table: LoadedTable, source: str, base_where: str, grap
                 labels={"vacina": "Vacina", "pct_vacinados_sim": "% com vacinação = Sim", "grupo_classificacao": "Classificação", "denominador": "Denominador"},
                 hover_data={"texto": False, "vacinados_sim": True, "vacinados_nao": True, "vacinacao_ignorada": True, "denominador": True},
                 category_orders={"grupo_classificacao": grupo_vacina_order},
+                color_discrete_map={"Total de casos": TOTAL_CASES_YELLOW},
             )
+            preserve_trace_colors(fig_vacinacao)
             fig_vacinacao.update_xaxes(tickangle=-30)
             render_plotly_chart(fig_vacinacao)
             render_interval_total(vacinacao, value_col="vacinados_sim", by_col="vacina", value_label="vacinados com informação = Sim")
@@ -12906,21 +13056,101 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
             st.warning("Não localizei campo CID-10 válido pela detecção automática para ativar esta análise.")
         else:
             cid_dist = add_text(cid_dist)
+            cid_dist_title = "Menção de CID-10 em relação aos óbitos" if source == "SIM" else "Distribuição por tipo CID-10"
             fig = px.bar(
                 cid_dist,
                 x="n",
                 y="tipo",
                 orientation="h",
                 text="texto",
-                title="Distribuição por tipo CID-10",
+                title=cid_dist_title,
                 labels={"tipo": "Tipo CID-10", "n": "Registros", "pct": "%"},
                 hover_data={"texto": False, "pct": ":.2f", "cids_encontrados": True, "campos_origem": True},
             )
-            fig.update_layout(yaxis={"categoryorder": "total ascending"})
+            fig.update_layout(
+                yaxis={"categoryorder": "total ascending"},
+                height=horizontal_bar_chart_height(len(cid_dist)),
+            )
             render_plotly_chart(fig)
+            if source == "SIM":
+                st.caption(
+                    "Este gráfico conta qualquer menção de CID-10 de meningite/encefalite em CAUSABAS, CAUSABAS_O "
+                    "e nas linhas da Declaração de Óbito (LINHAA–LINHAII, ATESTADO, CB_PRE) — não apenas quando o "
+                    "agravo foi a causa básica do óbito. Para separar causa básica de causa não-básica, veja o "
+                    "gráfico estratificável abaixo."
+                )
             render_interval_total(cid_dist, value_col="n")
             copyable_dataframe(cid_dist, width="stretch", hide_index=True)
             download_button(cid_dist, f"{source.lower()}_cid10_distribuicao.csv")
+
+            if source == "SIM":
+                st.markdown("### CID-10 mais frequentes por critério de causa")
+                sim_cause_criterion_options = [
+                    "CID-10 apenas como causa básica",
+                    "CID-10 aparecendo como causa não-básica",
+                ]
+                sim_cause_criterion = st.selectbox(
+                    "Critério de causa",
+                    sim_cause_criterion_options,
+                    key="sim_cid10_causa_criterio",
+                )
+                if sim_cause_criterion == "CID-10 apenas como causa básica":
+                    cause_cid_sql = exprs.get("causabas_cid")
+                    cause_field_note = "apenas o campo CAUSABAS (causa básica do óbito)"
+                    cause_missing_note = "Para gerar este gráfico, o campo CAUSABAS precisa existir no SIM e ser detectado automaticamente."
+                    cause_filename_suffix = "causa_basica"
+                    cause_col_label = "CID-10 (causa básica)"
+                else:
+                    cause_cid_sql = exprs.get("causabas_non_basic_cid")
+                    cause_field_note = (
+                        "os campos associados à causa não-básica (CAUSABAS_O e as linhas da Declaração de Óbito "
+                        "— LINHAA–LINHAII, ATESTADO, CB_PRE), excluindo CAUSABAS"
+                    )
+                    cause_missing_note = (
+                        "Para gerar este gráfico, ao menos um campo de causa não-básica (CAUSABAS_O, "
+                        "LINHAA–LINHAII, ATESTADO ou CB_PRE) precisa existir no SIM e ser detectado automaticamente."
+                    )
+                    cause_filename_suffix = "causa_nao_basica"
+                    cause_col_label = "CID-10 (causa não-básica)"
+
+                st.caption(
+                    f"Este gráfico usa {cause_field_note} e lista os códigos CID-10 de meningite/encefalite mais "
+                    "frequentes nesse critério, ordenados do mais para o menos frequente. Diferente do gráfico de "
+                    "menções no topo da página, aqui cada critério é contado separadamente: um óbito com o agravo "
+                    "tanto em CAUSABAS quanto em outro campo entra nos dois critérios, um de cada vez."
+                )
+                if not cause_cid_sql:
+                    st.info(cause_missing_note)
+                else:
+                    cause_dist = query_sim_cause_cid_frequency(table, cause_cid_sql, graph_where)
+                    if cause_dist.empty:
+                        st.info("Não há registros com CID-10 de meningite/encefalite detectado nesse critério no recorte atual.")
+                    else:
+                        cause_dist = add_text(cause_dist)
+                        fig_cause = px.bar(
+                            cause_dist,
+                            x="n",
+                            y="tipo",
+                            orientation="h",
+                            text="texto",
+                            title=sim_cause_criterion,
+                            labels={"tipo": "Tipo CID-10", "n": "Óbitos", "pct": "%"},
+                            hover_data={"texto": False, "pct": ":.2f", "cid10": True},
+                        )
+                        fig_cause.update_layout(
+                            yaxis={"categoryorder": "total ascending"},
+                            height=horizontal_bar_chart_height(len(cause_dist)),
+                        )
+                        render_plotly_chart(fig_cause)
+                        render_interval_total(cause_dist, value_col="n", value_label="óbitos")
+                        cause_display = cause_dist.rename(columns={
+                            "cid10": cause_col_label,
+                            "tipo": "Tipo CID-10",
+                            "n": "Óbitos",
+                            "pct": "%",
+                        })
+                        copyable_dataframe(cause_display, width="stretch", hide_index=True)
+                        download_button(cause_dist, f"sim_cid10_{cause_filename_suffix}_frequencia.csv")
 
             conv_adequacy = query_cid10_adequacy_conversion(table, exprs, graph_where)
             if not conv_adequacy.empty:
@@ -12951,7 +13181,10 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                             "campos_origem": True,
                         },
                     )
-                    fig_conv.update_layout(yaxis={"categoryorder": "total ascending"})
+                    fig_conv.update_layout(
+                        yaxis={"categoryorder": "total ascending"},
+                        height=horizontal_bar_chart_height(len(conv_adequacy_plot)),
+                    )
                     render_plotly_chart(fig_conv)
                     render_interval_total(conv_adequacy_plot, value_col="n")
                     st.caption(
@@ -13026,7 +13259,10 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                             labels={"tipo": "Tipo CID-10", "n": "Óbitos CIHA", "pct": "% dos óbitos"},
                             hover_data={"texto": False, "pct": ":.2f", "cids_encontrados": True, "campos_origem": True},
                         )
-                        fig_death.update_layout(yaxis={"categoryorder": "total ascending"})
+                        fig_death.update_layout(
+                            yaxis={"categoryorder": "total ascending"},
+                            height=horizontal_bar_chart_height(len(death_cid)),
+                        )
                         render_plotly_chart(fig_death)
                         render_interval_total(death_cid, value_col="n", value_label="óbitos CIHA")
                         copyable_dataframe(death_cid, width="stretch", hide_index=True)
@@ -13314,9 +13550,15 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
     demography_case_base_where = base_where if (source == "SINAN" and base_where is not None) else graph_where
     outcome_demography_where = base_where if base_where is not None else graph_where
     sinan_case_filter_options = ["Casos confirmados", "Casos descartados / sem classificação"]
+    # A distribuição por faixa etária é exibida naturalmente pelo total de casos, sem
+    # distinguir confirmados de descartados/sem classificação; por isso seu botão de
+    # estratificação tem uma terceira opção ("Total"), usada como padrão.
+    sinan_age_distribution_filter_options = ["Total", "Casos confirmados", "Casos descartados / sem classificação"]
 
     def sinan_case_filter_where(selection: str) -> str:
         if not (source == "SINAN" and classi_code):
+            return graph_where
+        if selection == "Total":
             return graph_where
         if selection == "Casos confirmados":
             return append_clause(demography_case_base_where, f"{classi_code} = '1'")
@@ -13330,7 +13572,7 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
         return ""
 
     def sinan_case_filter_title(selection: Optional[str]) -> str:
-        if not selection:
+        if not selection or selection == "Total":
             return ""
         return " — " + selection.lower()
 
@@ -13672,12 +13914,24 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
         copyable_dataframe(df, width="stretch", hide_index=True)
         download_button(df, f"{source.lower()}_{safe_filename(label)}.csv")
 
-    def render_municipality_charts() -> None:
-        mun_expr = exprs.get("mun_event_label") or exprs.get("mun_event")
+    def render_municipality_charts(kind: str) -> None:
+        """Gráficos de Top 15 + Outros municípios.
+
+        kind="res" usa o município de residência; kind="event" usa o município de
+        ocorrência/atendimento/notificação. Ambos seguem o mesmo tratamento (Top 15 +
+        Outros municípios) e, no SINAN, a mesma estratificação por Total/Confirmados/
+        Descartados/Sem classificação já usada nos demais gráficos desta seção.
+        """
+        if kind == "res":
+            mun_expr = exprs.get("mun_res_label") or exprs.get("mun_res")
+            mun_label = "Município de residência"
+        else:
+            mun_expr = exprs.get("mun_event_label") or exprs.get("mun_event")
+            mun_label = "Município de ocorrência/atendimento/notificação"
         if not mun_expr:
             return
-        mun_label = "Município de ocorrência/atendimento/notificação"
         top_municipios = 15
+        st.markdown(f"### {mun_label}")
         st.caption("Nos gráficos de município, são exibidos os 15 principais códigos IBGE; todas as demais categorias são somadas em 'Outros municípios'. Assim, percentual e denominador continuam representando 100% dos dados filtrados.")
 
         if source == "SINAN" and classi_code:
@@ -13713,6 +13967,7 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
             fig.update_layout(yaxis={"categoryorder": "array", "categoryarray": df["categoria"].tolist()[::-1]})
             render_plotly_chart(fig)
             render_interval_total(df, value_col="n")
+            copyable_dataframe(df, width="stretch", hide_index=True)
             filename = f"{source.lower()}_{safe_filename(mun_label)}_{suffix}_top{top_municipios}_outros.csv"
             download_button(df, filename)
 
@@ -13725,7 +13980,7 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
         if age:
             age_selection = st.selectbox(
                 "Grupo de casos para a distribuição por faixa etária",
-                sinan_case_filter_options,
+                sinan_age_distribution_filter_options,
                 key="sinan_age_distribution_case_filter",
             )
             render_age_distribution_chart(sinan_case_filter_where(age_selection), age_selection)
@@ -13788,7 +14043,8 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
 
         render_sinan_education_chart()
 
-        render_municipality_charts()
+        render_municipality_charts("res")
+        render_municipality_charts("event")
 
     else:
         # SIM/CIHA: sexo, depois pirâmide etária por sexo, depois raça/cor, depois distribuição
@@ -13809,7 +14065,8 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
             else:
                 render_ciha_education_chart()
 
-        render_municipality_charts()
+        render_municipality_charts("res")
+        render_municipality_charts("event")
 
 
 def render_quality_tab(table: LoadedTable, source: str, base_where: str, exprs: Dict[str, Optional[str]]) -> None:
