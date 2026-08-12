@@ -5213,14 +5213,14 @@ def query_sim_cid_freq_by_role(
         if not causabas_cid_expr:
             return pd.DataFrame()
         cid_type = cid_type_expr(causabas_cid_expr)
+        combined_where = append_clause(where_sql, f"({causabas_cid_expr}) IS NOT NULL")
         sql = f"""
             WITH base AS (
                 SELECT
                     ({causabas_cid_expr}) AS cid,
                     ({cid_type}) AS tipo
                 FROM {table.ref_sql}
-                {where_sql}
-                WHERE ({causabas_cid_expr}) IS NOT NULL
+                {combined_where}
             ), agg AS (
                 SELECT cid, tipo, COUNT(*) AS n
                 FROM base
@@ -5256,10 +5256,10 @@ def query_sim_cid_freq_by_role(
         for col in non_basic_cols:
             col_cid = cid_extract_expr_for_col(col)
             col_type = cid_type_expr(col_cid)
+            col_where = append_clause(where_sql, f"({col_cid}) IS NOT NULL")
             union_parts.append(
                 f"SELECT ({col_cid}) AS cid, ({col_type}) AS tipo"
-                f" FROM {table.ref_sql} {where_sql}"
-                f" WHERE ({col_cid}) IS NOT NULL"
+                f" FROM {table.ref_sql} {col_where}"
             )
         union_sql = "\n            UNION ALL\n            ".join(union_parts)
         sql = f"""
@@ -7329,21 +7329,18 @@ def query_sinan_communicants_identified(
         return pd.DataFrame()
 
     communicants = numeric_expr(communicants_col)
-    con_filter = (
-        f"AND {con_code} IN ('01', '02', '03', '05', '09')"
-        if con_code
-        else ""
-    )
+    extra_conditions = [f"{classi} = '1'"]
+    if con_code:
+        extra_conditions.append(f"{con_code} IN ('01', '02', '03', '05', '09')")
+    extra_conditions.append(f"{dt} IS NOT NULL")
+    combined_where = append_clause(where_sql, " AND ".join(extra_conditions))
 
     sql = f"""
         WITH base AS (
             SELECT EXTRACT(YEAR FROM {dt}) AS ano,
                    {communicants} AS comunicantes
             FROM {table.ref_sql}
-            {where_sql}
-            WHERE {classi} = '1'
-              {con_filter}
-              AND {dt} IS NOT NULL
+            {combined_where}
         ), agg AS (
             SELECT ano,
                    COUNT(*) AS casos_elegiveis,
