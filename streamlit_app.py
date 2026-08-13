@@ -68,7 +68,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-07-26-v52-sobreposicao-criterios-ampliados"
+APP_VERSION = "2026-08-13-v65-microorganism-coalesce-fix"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos
@@ -1625,6 +1625,8 @@ SINAN_QUIMIO_INTERPRETATION_ROWS = [
     {
         "Parâmetro": "Leucócitos (céls/mm³)",
         "LCR normal": "0–5",
+        "LCR normal — Neonatos (i)": "Média 8,4; variação 0–32 (117 neonatos de alto risco, sem discriminação termo/pré-termo neste estudo)",
+        "LCR normal — Lactentes ≤60 dias (Thomson 2018) (j)": "≤28 dias: mediana 4; P95 16; limite superior 15. 29–60 dias: mediana 2; P95 11; limite superior 9 (j, k)",
         "Viral": "50–1.000 (a)",
         "Bacteriana": "1.000–5.000 (b)",
         "Tuberculosa": "50–300",
@@ -1633,6 +1635,8 @@ SINAN_QUIMIO_INTERPRETATION_ROWS = [
     {
         "Parâmetro": "Tipo celular predominante",
         "LCR normal": "Mononuclear/linfocitário",
+        "LCR normal — Neonatos (i)": "~60% polimorfonuclear em média — neonato normal pode ter LCR de predomínio neutrofílico, diferente do padrão mononuclear esperado em crianças maiores/adultos",
+        "LCR normal — Lactentes ≤60 dias (Thomson 2018) (j)": "Não relatado por Thomson et al. 2018 (estudo mediu apenas leucócitos, proteína e glicose)",
         "Viral": "Mononuclear/linfocitário; pode iniciar neutrofílico (a)",
         "Bacteriana": "Neutrofílico (c, g)",
         "Tuberculosa": "Mononuclear (e)",
@@ -1641,6 +1645,8 @@ SINAN_QUIMIO_INTERPRETATION_ROWS = [
     {
         "Parâmetro": "Glicose",
         "LCR normal": ">50% da glicemia sérica",
+        "LCR normal — Neonatos (i)": "~81% da glicemia sérica (termo); ~74% (pré-termo) — o artigo relata a razão percentual, não valores absolutos em mg/dL",
+        "LCR normal — Lactentes ≤60 dias (Thomson 2018) (j)": "≤28 dias: mediana 45; P10 37; P5 35; limite inferior 25 mg/dL. 29–60 dias: mediana 47; P10 39; P5 37; limite inferior 27 mg/dL (j)",
         "Viral": "Geralmente normal; em geral >45 mg/dL",
         "Bacteriana": "Reduzida; <40 mg/dL ou razão LCR/soro ≤0,4 (d)",
         "Tuberculosa": "Reduzida; em geral <45 mg/dL",
@@ -1649,6 +1655,8 @@ SINAN_QUIMIO_INTERPRETATION_ROWS = [
     {
         "Parâmetro": "Proteínas (mg/dL)",
         "LCR normal": "<40–45",
+        "LCR normal — Neonatos (i)": "Termo: média 90 (20–170); Pré-termo: média 115 (65–150) (i). Refinamento por idade em dias, sem separar termo/pré-termo: mediana 58 (IQR 48–72); 95º percentil 132 (0–14d) → 100 (15–28d) → 89 (29–42d) → 83 (43–56d) (h)",
+        "LCR normal — Lactentes ≤60 dias (Thomson 2018) (j)": "≤28 dias: mediana 66; P95 118; limite superior 127 mg/dL. 29–60 dias: mediana 49; P95 91; limite superior 99 mg/dL (j, l)",
         "Viral": "<200",
         "Bacteriana": "100–500",
         "Tuberculosa": "50–300",
@@ -1657,6 +1665,8 @@ SINAN_QUIMIO_INTERPRETATION_ROWS = [
     {
         "Parâmetro": "Aspecto do líquor",
         "LCR normal": "Límpido",
+        "LCR normal — Neonatos (i)": "Não relatado nos resumos disponíveis de Sarff et al. 1976 nem de Shah et al. 2011",
+        "LCR normal — Lactentes ≤60 dias (Thomson 2018) (j)": "Não relatado por Thomson et al. 2018",
         "Viral": "Límpido",
         "Bacteriana": "Turvo ou purulento",
         "Tuberculosa": "Límpido ou turvo",
@@ -1692,6 +1702,30 @@ SINAN_QUIMIO_NOTE_ROWS = [
     {
         "Índice": "(g)",
         "Texto": "Listeriose fica operacionalmente dentro de 'outras bactérias' no SINAN e pode cursar com predomínio mononuclear/linfocitário em 25–30% dos casos; em pacientes previamente tratados, essa proporção pode ser ainda maior. No gráfico de predomínio compatível vs. discordante, parte da discordância pode refletir comportamento conhecido da doença, não erro de classificação.",
+    },
+    {
+        "Índice": "(h)",
+        "Texto": "O refinamento por idade em dias da proteína do LCR (mediana e 95º percentil por faixa etária) vem de Shah et al. 2011 (J Hosp Med; PMC2978786), estudo com 375 lactentes de até 56 dias que fizeram punção lombar por suspeita de sepse/infecção e NÃO tinham meningite bacteriana/viral, LP traumática nem outra condição associada a alteração de proteína — ou seja, é uma faixa de referência de lactentes sem infecção do SNC, não um ponto de corte diagnóstico. O estudo mediu exclusivamente a proteína do LCR e não segmentou os resultados por termo/pré-termo; a estratificação usada foi por idade cronológica em dias.",
+    },
+    {
+        "Índice": "(i)",
+        "Texto": "Os valores de leucócitos, tipo celular, glicose e proteína por termo/pré-termo vêm do clássico Sarff LD, Platt LH, McCracken GH Jr. 1976 (J Pediatr), que revisou o LCR de 117 neonatos de alto risco sem meningite. É um estudo antigo (1976), com amostra pequena e critérios de seleção mais permissivos que os de estudos mais recentes; o próprio artigo mostra que quase 60% do LCR desses neonatos era polimorfonuclear em média, o que reforça que um predomínio neutrofílico isolado tem valor discriminatório limitado nessa faixa etária. O artigo relata glicose como razão percentual em relação à glicemia sérica (não em mg/dL absolutos) e não relata, no resumo disponível, o aspecto do líquor nem uma quebra de leucócitos por termo/pré-termo — por isso essas células permanecem sem esse detalhamento.",
+    },
+    {
+        "Índice": "(j)",
+        "Texto": "Os valores da coluna 'LCR normal — Lactentes ≤60 dias (Thomson 2018)' vêm de Thomson J, et al. 2018 (Pediatrics), estudo multicêntrico transversal (18 centros, EUA/Canadá; n=7766 lactentes ≤60 dias), que excluiu meningite confirmada, ITU, infecção viral de SNC e internação >72h. Os limites superior/inferior foram pré-especificados como Q3+1,5×IQR (leucócitos e proteína) e Q1−1,5×IQR (glicose). O próprio estudo incluiu apenas 57 lactentes ≤2 dias de vida, e os autores recomendam cautela ao extrapolar os resultados para berçário ou UTI neonatal — para recém-nascidos muito jovens, esses valores são menos robustos do que aparentam. Tipo celular predominante e aspecto do líquor não foram relatados nesse estudo.",
+    },
+    {
+        "Índice": "(k)",
+        "Texto": "Para leucócitos, o limite superior de Thomson 2018 coincide com o de Kestenbaum LA, et al. 2010 (n=380, centro único) na faixa ≤28 dias (15 vs. 15 céls/mm³), mas diverge na faixa etária seguinte: Kestenbaum encontrou limite superior de apenas 4 céls/mm³ (29–56 dias) contra 9 céls/mm³ de Thomson (29–60 dias) — mais do que o dobro, possivelmente relacionado ao tamanho amostral bem menor e ao desenho de centro único de Kestenbaum. Essa é justamente a faixa etária mais comum de apresentação clínica no pronto-socorro. Os valores de Kestenbaum citados aqui não foram conferidos no artigo original; foram extraídos conforme reproduzidos na seção de Discussão de Thomson et al. 2018.",
+    },
+    {
+        "Índice": "(l)",
+        "Texto": "Para proteína, o percentil 95 de Thomson 2018 converge bem com o de Shah SS, et al. 2011 nas duas faixas etárias (≤28 dias: 118 vs. 115 mg/dL; faixa seguinte: 91 vs. 89 mg/dL). Shah et al. também descreveram declínio de 6,8% na proteína liquórica por semana de vida (IC95%: 5,4–8,1%), citado por Thomson et al. como precursor do modelo contínuo de declínio por idade (método LMST) usado em 2018. O valor de Shah 2011 usado aqui foi extraído conforme citado na Discussão de Thomson et al. 2018, e não conferido diretamente no artigo original de Shah — diferente do refinamento por idade cronológica da coluna 'LCR normal — Neonatos (i)' (nota h), que vem diretamente do artigo original de Shah et al. 2011.",
+    },
+    {
+        "Índice": "(m)",
+        "Texto": "Zimmermann P, Curtis N. 2021 (Neonatology), revisão sistemática com 7 estudos (270 recém-nascidos a termo + 96 pré-termo), não teve valores numéricos incorporados nesta tabela — o artigo não foi disponibilizado nesta análise. A triangulação com esse estudo permanece pendente.",
     },
 ]
 
@@ -1729,6 +1763,26 @@ SINAN_QUIMIO_REFERENCES = [
     {
         "Referência": "WHO. Guidelines on meningitis diagnosis, treatment and care. 2025.",
         "Uso no painel": "Reforço do papel inicial de celularidade, diferencial, glicose, proteína, hemácias e Gram na investigação do LCR.",
+    },
+    {
+        "Referência": "Shah SS, Ebberson J, Kestenbaum LA, Hodinka RL, Zorc JJ. Age-specific reference values for cerebrospinal fluid protein concentration in neonates and young infants. J Hosp Med. 2011;6(1):22-27. PMC2978786.",
+        "Uso no painel": "Valores de referência de proteína do LCR por faixa etária (0–56 dias) usados na coluna 'LCR normal — Neonatos' (nota h). O percentil 95 (n=375) também é comparado ao de Thomson et al. 2018 na nota (l), conforme citado na Discussão de Thomson et al. 2018 — não conferido diretamente no artigo original de Shah para esse uso específico.",
+    },
+    {
+        "Referência": "Sarff LD, Platt LH, McCracken GH Jr. Cerebrospinal fluid evaluation in neonates: comparison of high-risk infants with and without meningitis. J Pediatr. 1976;88(3):473-477.",
+        "Uso no painel": "Valores de referência de leucócitos, tipo celular predominante, glicose (razão com glicemia sérica) e proteína por termo/pré-termo usados na coluna 'LCR normal — Neonatos' (nota i).",
+    },
+    {
+        "Referência": "Thomson J, Sucharew H, Cruz AT, Nigrovic LE, Freedman SB, Garro AC, Balamuth F, Mistry RD, Arms JL, Ishimine PT, Kulik DM, Neuman MI, Shah SS; Pediatric Emergency Medicine Collaborative Research Committee (PEM CRC) HSV Study Group. Cerebrospinal Fluid Reference Values for Young Infants Undergoing Lumbar Puncture. Pediatrics. 2018;141(3):e20173405.",
+        "Uso no painel": "Valores de referência de leucócitos e proteína do LCR por faixa etária (≤28 dias e 29–60 dias), com limites pré-especificados (Q3+1,5×IQR / Q1−1,5×IQR), usados na coluna 'LCR normal — Lactentes ≤60 dias (Thomson 2018)' (nota j). Estudo multicêntrico (n=7766), tratado como referência preferencial por robustez metodológica.",
+    },
+    {
+        "Referência": "Kestenbaum LA, Ebberson J, Zorc JJ, Hodinka RL, Shah SS. Defining cerebrospinal fluid white blood cell count reference values in neonates and young infants. Pediatrics. 2010;125(2):257-264.",
+        "Uso no painel": "Comparação do limite superior de leucócitos citada por Thomson et al. 2018 (nota k), incluindo a divergência relevante na faixa 29–56/29–60 dias; valores não conferidos no artigo original, apenas conforme reproduzidos na Discussão de Thomson et al. 2018.",
+    },
+    {
+        "Referência": "Zimmermann P, Curtis N. Normal Values for Cerebrospinal Fluid in Neonates: A Systematic Review. Neonatology. 2021;118(6):629-638.",
+        "Uso no painel": "Citada para fins de triangulação (nota m); nenhum valor numérico foi incorporado nesta tabela porque o artigo não foi disponibilizado nesta análise.",
     },
 ]
 
@@ -2340,27 +2394,56 @@ def sinan_expected_etiology_group_expr(con_code_sql: str, cla_me_eti_code_sql: O
 
 def sinan_microorganism_label_expr(
     con_code_sql: str,
-    cla_me_bac_label_sql: Optional[str],
-    cla_me_ass_label_sql: Optional[str],
-    cla_me_eti_label_sql: Optional[str],
+    cla_me_bac_code_sql: Optional[str],
+    cla_me_ass_code_sql: Optional[str],
+    cla_me_eti_code_sql: Optional[str],
 ) -> str:
     """Consolida, para casos confirmados, um único rótulo de microrganismo/agente
     etiológico por registro, a partir de CON_DIAGES (campo 51) e dos campos
     complementares CLA_ME_BAC (Quadro II), CLA_ME_ASS (Quadro III) e CLA_ME_ETI
     (Quadro IV) do dicionário de dados do SINAN NET — Meningite. Usado apenas
-    para o ranking dos microrganismos mais prevalentes entre confirmados."""
-    bac_expr = cla_me_bac_label_sql or "NULL"
-    ass_expr = cla_me_ass_label_sql or "NULL"
-    eti_expr = cla_me_eti_label_sql or "NULL"
+    para o ranking dos microrganismos mais prevalentes entre confirmados.
+
+    Recebe os campos de CÓDIGO (não de label) para que o CASE interno possa
+    distinguir corretamente campo ausente/NULL de campo preenchido com código
+    não mapeado, evitando o problema em que case_from_mapping nunca retorna NULL
+    (sempre retorna o ELSE default) e tornava o COALESCE ineficaz."""
+
+    # Gera inline CASE ... END para cada quadro auxiliar, operando sobre o
+    # código bruto. Quando o código é NULL ou não reconhecido o CASE retorna NULL,
+    # permitindo que o COALESCE externo ative o fallback descritivo adequado.
+    def _bac_case(code_sql: str) -> str:
+        parts = " ".join(
+            f"WHEN {qstr(k)} THEN {qstr(v)}" for k, v in SINAN_CLA_ME_BAC.items()
+        )
+        return f"CASE {code_sql} {parts} END"
+
+    def _ass_case(code_sql: str) -> str:
+        parts = " ".join(
+            f"WHEN {qstr(k)} THEN {qstr(v)}" for k, v in SINAN_CLA_ME_ASS.items()
+        )
+        return f"CASE {code_sql} {parts} END"
+
+    def _eti_case(code_sql: str) -> str:
+        parts = " ".join(
+            f"WHEN {qstr(k)} THEN {qstr(v)}" for k, v in SINAN_CLA_ME_ETI.items()
+        )
+        return f"CASE {code_sql} {parts} END"
+
+    # Expressões que retornam NULL quando o código é NULL ou não mapeado
+    bac_mapped = _bac_case(cla_me_bac_code_sql) if cla_me_bac_code_sql else "NULL"
+    ass_mapped = _ass_case(cla_me_ass_code_sql) if cla_me_ass_code_sql else "NULL"
+    eti_mapped = _eti_case(cla_me_eti_code_sql) if cla_me_eti_code_sql else "NULL"
+
     return f"""
         CASE
             WHEN {con_code_sql} IN ('01', '02', '03') THEN 'Neisseria meningitidis (meningococcemia/meningite meningocócica)'
             WHEN {con_code_sql} = '04' THEN 'Mycobacterium tuberculosis (meningite tuberculosa)'
             WHEN {con_code_sql} = '09' THEN 'Haemophilus influenzae'
             WHEN {con_code_sql} = '10' THEN 'Streptococcus pneumoniae'
-            WHEN {con_code_sql} = '05' THEN COALESCE({bac_expr}, 'Meningite por outras bactérias — sem especificação/ignorado')
-            WHEN {con_code_sql} = '07' THEN COALESCE({ass_expr}, 'Meningite asséptica — sem especificação/ignorado')
-            WHEN {con_code_sql} = '08' THEN COALESCE({eti_expr}, 'Meningite por outra etiologia — sem especificação/ignorado')
+            WHEN {con_code_sql} = '05' THEN COALESCE({bac_mapped}, 'Meningite por outras bactérias — sem especificação/ignorado')
+            WHEN {con_code_sql} = '07' THEN COALESCE({ass_mapped}, 'Meningite asséptica — sem especificação/ignorado')
+            WHEN {con_code_sql} = '08' THEN COALESCE({eti_mapped}, 'Meningite por outra etiologia — sem especificação/ignorado')
             WHEN {con_code_sql} = '06' THEN 'Meningite não especificada — agente não identificado'
             ELSE 'Sem conclusão diagnóstica específica/ignorado'
         END
@@ -7349,7 +7432,11 @@ def query_sinan_communicants_identified(
                    ROUND(
                        SUM(CASE WHEN comunicantes IS NOT NULL AND comunicantes >= 0 THEN comunicantes ELSE 0 END)
                        * 1.0 / NULLIF(COUNT(*), 0),
-                   2) AS media_comunicantes_por_caso
+                   2) AS media_comunicantes_por_caso,
+                   ROUND(
+                       SUM(CASE WHEN comunicantes IS NOT NULL AND comunicantes >= 0 THEN comunicantes ELSE 0 END)
+                       * 1.0 / NULLIF(COUNT(*) FILTER (WHERE comunicantes IS NOT NULL AND comunicantes >= 0), 0),
+                   2) AS media_comunicantes_por_caso_informado
             FROM base
             GROUP BY 1
         )
@@ -12982,9 +13069,11 @@ casos de indivíduos com até 2 anos (≤ 24 meses)."
                     "**03 — meningite meningocócica com meningococcemia**, "
                     "**05 — meningite por outras bactérias** e "
                     "**09 — meningite por Haemophilus influenzae**. "
-                    "O gráfico abaixo está restrito a esses casos e apresenta, por ano, "
+                    "O gráfico abaixo está restrito a esses casos e apresenta, por ano, duas médias: "
                     "a média de comunicantes identificados por caso confirmado elegível "
-                    "(total de comunicantes / número de casos confirmados elegíveis)."
+                    "(total de comunicantes / número de casos confirmados elegíveis) e "
+                    "a média de comunicantes identificados por caso com comunicantes informados "
+                    "(total de comunicantes / número de casos elegíveis com comunicantes informados)."
                 )
                 comunicantes_ident = comunicantes_ident.copy()
                 def _br_float_2dec(v: object) -> str:
@@ -12993,7 +13082,7 @@ casos de indivíduos com até 2 anos (≤ 24 meses)."
                     return f"{float(v):.2f}".replace(".", ",")
 
                 comunicantes_ident["texto_media"] = [
-                    f"{_br_float_2dec(m)} ({br_int(t)} comunicantes / {br_int(c)} casos)"
+                    f"{_br_float_2dec(m)} ({br_int(t)} comunicantes / {br_int(c)} casos elegíveis)"
                     if not (pd.isna(m) or pd.isna(t) or pd.isna(c)) else "—"
                     for m, t, c in zip(
                         comunicantes_ident["media_comunicantes_por_caso"],
@@ -13001,25 +13090,45 @@ casos de indivíduos com até 2 anos (≤ 24 meses)."
                         comunicantes_ident["casos_elegiveis"],
                     )
                 ]
+                comunicantes_ident["texto_media_informado"] = [
+                    f"{_br_float_2dec(m)} ({br_int(t)} comunicantes / {br_int(c)} casos com comunicantes informados)"
+                    if not (pd.isna(m) or pd.isna(t) or pd.isna(c)) else "—"
+                    for m, t, c in zip(
+                        comunicantes_ident["media_comunicantes_por_caso_informado"],
+                        comunicantes_ident["total_comunicantes"],
+                        comunicantes_ident["casos_com_comunicantes"],
+                    )
+                ]
+                comunicantes_ident_plot = pd.concat(
+                    [
+                        pd.DataFrame({
+                            "ano": comunicantes_ident["ano"],
+                            "indicador": "Por caso confirmado elegível",
+                            "media": comunicantes_ident["media_comunicantes_por_caso"],
+                            "texto": comunicantes_ident["texto_media"],
+                        }),
+                        pd.DataFrame({
+                            "ano": comunicantes_ident["ano"],
+                            "indicador": "Por caso com comunicantes informados",
+                            "media": comunicantes_ident["media_comunicantes_por_caso_informado"],
+                            "texto": comunicantes_ident["texto_media_informado"],
+                        }),
+                    ],
+                    ignore_index=True,
+                )
                 fig_comu_ident = px.bar(
-                    comunicantes_ident,
+                    comunicantes_ident_plot,
                     x="ano",
-                    y="media_comunicantes_por_caso",
-                    text="texto_media",
-                    title="Média de comunicantes identificados por caso confirmado elegível (CON_DIAGES 01, 02, 03, 05 ou 09)",
+                    y="media",
+                    color="indicador",
+                    barmode="group",
+                    text="texto",
                     labels={
                         "ano": "Ano",
-                        "media_comunicantes_por_caso": "Média de comunicantes / caso elegível",
-                        "casos_elegiveis": "Casos elegíveis",
-                        "casos_com_comunicantes": "Casos com comunicantes informados",
-                        "total_comunicantes": "Total de comunicantes",
+                        "media": "Média de comunicantes",
+                        "indicador": "Denominador da média",
                     },
-                    hover_data={
-                        "texto_media": False,
-                        "casos_elegiveis": True,
-                        "casos_com_comunicantes": True,
-                        "total_comunicantes": True,
-                    },
+                    hover_data={"texto": False},
                 )
                 fig_comu_ident.update_traces(textposition="outside", cliponaxis=False)
                 render_plotly_chart(fig_comu_ident)
@@ -13380,15 +13489,16 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
             if source == "SIM":
                 fig = px.bar(
                     cid_dist,
-                    x="tipo",
-                    y="n",
+                    x="n",
+                    y="tipo",
+                    color="tipo",
+                    orientation="h",
                     text="texto",
                     title="Menção de CID-10 em relação aos óbitos",
                     labels={"tipo": "CID-10", "n": "Óbitos", "pct": "%"},
                     hover_data={"texto": False, "pct": ":.2f", "cids_encontrados": True, "campos_origem": True},
                 )
-                fig.update_xaxes(tickangle=-40, automargin=True)
-                fig.update_layout(xaxis={"categoryorder": "total descending"})
+                fig.update_layout(yaxis={"categoryorder": "total ascending"}, showlegend=False)
             else:
                 fig = px.bar(
                     cid_dist,
@@ -13403,8 +13513,12 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                 fig.update_layout(yaxis={"categoryorder": "total ascending"})
             render_plotly_chart(fig)
             render_interval_total(cid_dist, value_col="n")
-            copyable_dataframe(cid_dist, width="stretch", hide_index=True)
-            download_button(cid_dist, f"{source.lower()}_cid10_distribuicao.csv")
+            if source == "SIM":
+                cid_dist_display = cid_dist.drop(columns=["campos_origem", "pct"], errors="ignore")
+            else:
+                cid_dist_display = cid_dist
+            copyable_dataframe(cid_dist_display, width="stretch", hide_index=True)
+            download_button(cid_dist_display, f"{source.lower()}_cid10_distribuicao.csv")
 
             if source == "SIM":
                 causabas_cid = exprs.get("causabas_cid")
@@ -13424,7 +13538,7 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                         _role_opts_sim.append("CID-10 como causa básica (CAUSABAS)")
                     if has_linhas:
                         _role_opts_sim.append("CID-10 como causa não-básica (LINHAA–LINHAII)")
-                    _sim_cid_role_key = f"sim_cid_role_{id(table)}"
+                    _sim_cid_role_key = f"sim_cid_role_{table.label}"
                     if st.session_state.get(_sim_cid_role_key) not in (None, *_role_opts_sim):
                         st.session_state.pop(_sim_cid_role_key, None)
                     selected_role = st.radio(
@@ -13465,13 +13579,14 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                             role_df,
                             x="n",
                             y="tipo",
+                            color="tipo",
                             orientation="h",
                             text="texto",
                             title=_role_title,
                             labels={"tipo": "CID-10", "n": _n_label, "pct": "% do total", "cid": "Código CID-10", "denominador": "Total de menções"},
                             hover_data={"texto": False, "pct": ":.2f", "cid": True, "denominador": True},
                         )
-                        fig_role.update_layout(yaxis={"categoryorder": "total ascending"})
+                        fig_role.update_layout(yaxis={"categoryorder": "total ascending"}, showlegend=False)
                         render_plotly_chart(fig_role)
                         render_interval_total(role_df, value_col="n", value_label=_n_label.lower())
                         _role_export = role_df.drop(columns=["texto"], errors="ignore")
@@ -13911,9 +14026,9 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
         )
         micro_label_expr = sinan_microorganism_label_expr(
             exprs["con_code"],
-            exprs.get("cla_me_bac_label"),
-            exprs.get("cla_me_ass_label"),
-            exprs.get("cla_me_eti_label"),
+            exprs.get("cla_me_bac_code"),
+            exprs.get("cla_me_ass_code"),
+            exprs.get("cla_me_eti_code"),
         )
         micro_df = query_category(table, micro_label_expr, confirmed_conversion_where, top_n=int(top_n_micro))
         if micro_df.empty:
