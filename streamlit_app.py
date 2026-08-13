@@ -7377,7 +7377,7 @@ def query_sinan_communicants_prophylaxis(
     con_select = con_code if con_code else "CAST(NULL AS VARCHAR)"
     recorte_case = """
         CASE
-            WHEN con_code IN ('02', '03', '09') THEN 'Elegíveis operacionais (CON_DIAGES 02/03/09)'
+            WHEN con_code IN ('02', '03', '09') THEN 'Elegíveis operacionais conforme SINAN'
             ELSE NULL
         END
     """ if con_code else "CAST(NULL AS VARCHAR)"
@@ -9406,11 +9406,6 @@ def render_sinan_lcr_indicators(table: LoadedTable, exprs: Dict[str, Optional[st
             )
 
     st.markdown("**Distribuição — aspecto do líquor (Ficha SINAN)**")
-    st.caption(
-        "Campo 48 da ficha de investigação: 1 — Límpido; 2 — Purulento; 3 — Hemorrágico; "
-        "4 — Turvo; 5 — Xantocrômico; 6 — Outro; 9 — Ignorado. O gráfico abaixo usa essas categorias oficiais, "
-        "mantendo ignorados/sem informação para avaliar também completude de preenchimento entre os elegíveis para interpretação do exame (punção + quimiocitológico)."
-    )
     if exprs.get("lab_aspect_label"):
         aspect_dist = query_sinan_lcr_aspect_distribution(table, exprs, lcr_eligible_where, strat_sql)
         if aspect_dist.empty:
@@ -12918,6 +12913,61 @@ casos de indivíduos com até 2 anos (≤ 24 meses)."
         else:
             st.info("Para gerar a prevalência de sintomas, CLASSI_FIN, data e os campos clínicos CLI_* precisam existir no SINAN.")
 
+        comunicantes = query_sinan_communicants_prophylaxis(table, exprs, base_where, communicants_col, prophylaxis_col)
+        if not comunicantes.empty:
+            st.markdown("**Relação entre comunicantes e profilaxia**")
+            st.caption("Segundo a estrutura do dicionário de dados do SINAN para meningite, `MED_NUCOMU` registra o número de comunicantes identificados e `MED_QUIMIO` informa se foi realizada quimioprofilaxia, codificada como Sim, Não ou Ignorado.")
+            if exprs.get("con_code"):
+                pass
+            else:
+                st.caption(
+                    "Observação: não foi possível criar a visão elegível (CON_DIAGES 02/03/09), porque CON_DIAGES não foi detectado. "
+                    "Os valores abaixo correspondem ao contingente completo de registros ativos e podem subestimar a cobertura real."
+                )
+            comunicantes = comunicantes.copy()
+            recortes_qp = comunicantes["recorte_quimioprofilaxia"].dropna().unique().tolist() if "recorte_quimioprofilaxia" in comunicantes.columns else []
+            default_recorte = "Elegíveis operacionais conforme SINAN" if "Elegíveis operacionais conforme SINAN" in recortes_qp else (recortes_qp[0] if recortes_qp else None)
+            if len(recortes_qp) > 1:
+                recorte_sel = st.selectbox(
+                    "Recorte do denominador da quimioprofilaxia",
+                    recortes_qp,
+                    index=recortes_qp.index(default_recorte) if default_recorte in recortes_qp else 0,
+                    key="sinan_quimioprofilaxia_recorte",
+                )
+                comunicantes_plot_base = comunicantes[comunicantes["recorte_quimioprofilaxia"].eq(recorte_sel)].copy()
+            else:
+                recorte_sel = default_recorte
+                comunicantes_plot_base = comunicantes.copy()
+            comunicantes_plot_base["quimioprofilaxia"] = comunicantes_plot_base["quimioprofilaxia"].astype(str)
+            comunicantes_plot_base["texto_status"] = [
+                count_pct_text(n, p)
+                for n, p in zip(comunicantes_plot_base["registros"], comunicantes_plot_base["pct_registros_ano"])
+            ]
+            fig_quimio_status = px.bar(
+                comunicantes_plot_base,
+                x="ano",
+                y="registros",
+                color="quimioprofilaxia",
+                barmode="group",
+                text="texto_status",
+                title="Realização da quimioprofilaxia entre os comunicantes",
+                labels={
+                    "ano": "Ano",
+                    "registros": "Registros",
+                    "quimioprofilaxia": "Situação da quimioprofilaxia",
+                    "pct_registros_ano": "% no ano",
+                },
+                hover_data={"texto_status": False, "pct_registros_ano": ":.2f", "comunicantes_total": True},
+                category_orders={"quimioprofilaxia": ["Sim", "Não", "Ignorado", "Sem informação"]},
+            )
+            fig_quimio_status.update_traces(textposition="outside", cliponaxis=False)
+            render_plotly_chart(fig_quimio_status)
+            render_interval_total(comunicantes_plot_base, value_col="registros", by_col="quimioprofilaxia", value_label="registros de quimioprofilaxia")
+            copyable_dataframe(comunicantes, width="stretch", hide_index=True)
+            download_button(comunicantes, "sinan_comunicantes_quimioprofilaxia_todos_e_elegiveis.csv")
+        else:
+            st.info("Para gerar o gráfico de comunicantes/profilaxia, MED_NUCOMU e/ou MED_QUIMIO precisam existir no SINAN.")
+
         # -------------------------------------------------------------------
         # Gráfico: Número de comunicantes identificados (média por caso elegível)
         # -------------------------------------------------------------------
@@ -12978,61 +13028,6 @@ casos de indivíduos com até 2 anos (≤ 24 meses)."
                 download_button(comunicantes_ident, "sinan_media_comunicantes_identificados_elegiveis.csv")
             else:
                 st.info("Sem dados suficientes para calcular a média de comunicantes identificados com os filtros ativos.")
-
-        comunicantes = query_sinan_communicants_prophylaxis(table, exprs, base_where, communicants_col, prophylaxis_col)
-        if not comunicantes.empty:
-            st.markdown("**Relação entre comunicantes e profilaxia**")
-            st.caption("Segundo a estrutura do dicionário de dados do SINAN para meningite, `MED_NUCOMU` registra o número de comunicantes identificados e `MED_QUIMIO` informa se foi realizada quimioprofilaxia, codificada como Sim, Não ou Ignorado.")
-            if exprs.get("con_code"):
-                pass
-            else:
-                st.caption(
-                    "Observação: não foi possível criar a visão elegível (CON_DIAGES 02/03/09), porque CON_DIAGES não foi detectado. "
-                    "Os valores abaixo correspondem ao contingente completo de registros ativos e podem subestimar a cobertura real."
-                )
-            comunicantes = comunicantes.copy()
-            recortes_qp = comunicantes["recorte_quimioprofilaxia"].dropna().unique().tolist() if "recorte_quimioprofilaxia" in comunicantes.columns else []
-            default_recorte = "Elegíveis operacionais (CON_DIAGES 02/03/09)" if "Elegíveis operacionais (CON_DIAGES 02/03/09)" in recortes_qp else (recortes_qp[0] if recortes_qp else None)
-            if len(recortes_qp) > 1:
-                recorte_sel = st.selectbox(
-                    "Recorte do denominador da quimioprofilaxia",
-                    recortes_qp,
-                    index=recortes_qp.index(default_recorte) if default_recorte in recortes_qp else 0,
-                    key="sinan_quimioprofilaxia_recorte",
-                )
-                comunicantes_plot_base = comunicantes[comunicantes["recorte_quimioprofilaxia"].eq(recorte_sel)].copy()
-            else:
-                recorte_sel = default_recorte
-                comunicantes_plot_base = comunicantes.copy()
-            comunicantes_plot_base["quimioprofilaxia"] = comunicantes_plot_base["quimioprofilaxia"].astype(str)
-            comunicantes_plot_base["texto_status"] = [
-                count_pct_text(n, p)
-                for n, p in zip(comunicantes_plot_base["registros"], comunicantes_plot_base["pct_registros_ano"])
-            ]
-            fig_quimio_status = px.bar(
-                comunicantes_plot_base,
-                x="ano",
-                y="registros",
-                color="quimioprofilaxia",
-                barmode="group",
-                text="texto_status",
-                title="Realização da quimioprofilaxia entre os comunicantes",
-                labels={
-                    "ano": "Ano",
-                    "registros": "Registros",
-                    "quimioprofilaxia": "Situação da quimioprofilaxia",
-                    "pct_registros_ano": "% no ano",
-                },
-                hover_data={"texto_status": False, "pct_registros_ano": ":.2f", "comunicantes_total": True},
-                category_orders={"quimioprofilaxia": ["Sim", "Não", "Ignorado", "Sem informação"]},
-            )
-            fig_quimio_status.update_traces(textposition="outside", cliponaxis=False)
-            render_plotly_chart(fig_quimio_status)
-            render_interval_total(comunicantes_plot_base, value_col="registros", by_col="quimioprofilaxia", value_label="registros de quimioprofilaxia")
-            copyable_dataframe(comunicantes, width="stretch", hide_index=True)
-            download_button(comunicantes, "sinan_comunicantes_quimioprofilaxia_todos_e_elegiveis.csv")
-        else:
-            st.info("Para gerar o gráfico de comunicantes/profilaxia, MED_NUCOMU e/ou MED_QUIMIO precisam existir no SINAN.")
 
         vacinacao = query_sinan_vaccination_by_classification(table, exprs, base_where, vaccine_specs)
         if not vacinacao.empty:
@@ -13411,6 +13406,85 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
             copyable_dataframe(cid_dist, width="stretch", hide_index=True)
             download_button(cid_dist, f"{source.lower()}_cid10_distribuicao.csv")
 
+            if source == "SIM":
+                causabas_cid = exprs.get("causabas_cid")
+                non_basic_cols: List[str] = exprs.get("sim_non_basic_cid_cols") or []  # type: ignore[assignment]
+                has_causabas = bool(causabas_cid)
+                has_linhas = bool(non_basic_cols)
+                if has_causabas or has_linhas:
+                    st.markdown("### CID-10 mais frequentes por papel na Declaração de Óbito")
+                    st.caption(
+                        "Selecione abaixo se deseja ver os CID-10 mais frequentes como **causa básica** (campo CAUSABAS) "
+                        "ou como **causa não-básica** (linhas da Declaração de Óbito: LINHAA–LINHAII). "
+                        "Os percentuais usam como denominador o total de menções no papel selecionado, "
+                        "e não o total de óbitos — um mesmo óbito pode ter o mesmo CID em múltiplas linhas."
+                    )
+                    _role_opts_sim = []
+                    if has_causabas:
+                        _role_opts_sim.append("CID-10 como causa básica (CAUSABAS)")
+                    if has_linhas:
+                        _role_opts_sim.append("CID-10 como causa não-básica (LINHAA–LINHAII)")
+                    _sim_cid_role_key = f"sim_cid_role_{id(table)}"
+                    if st.session_state.get(_sim_cid_role_key) not in (None, *_role_opts_sim):
+                        st.session_state.pop(_sim_cid_role_key, None)
+                    selected_role = st.radio(
+                        "Papel do CID-10 no atestado",
+                        _role_opts_sim,
+                        horizontal=True,
+                        key=_sim_cid_role_key,
+                    )
+                    _role_key = "basica" if "causa básica" in (selected_role or "") else "nao_basica"
+                    role_df = query_sim_cid_freq_by_role(
+                        table,
+                        _role_key,
+                        causabas_cid,
+                        non_basic_cols,
+                        graph_where,
+                        top_n=20,
+                    )
+                    if role_df.empty:
+                        st.info("Sem dados suficientes para tabular CID-10 por papel com os filtros atuais.")
+                    else:
+                        def _br_int_local(v: object) -> str:
+                            return "—" if pd.isna(v) else f"{int(v):,}".replace(",", ".")
+
+                        def _br_pct_local(v: object) -> str:
+                            return "—" if pd.isna(v) else f"{float(v):.2f}%".replace(".", ",")
+
+                        role_df["texto"] = [
+                            f"{_br_int_local(n)} ({_br_pct_local(p)})"
+                            for n, p in zip(role_df["n"], role_df["pct"])
+                        ]
+                        _role_title = (
+                            "CID-10 mais frequentes como causa básica do óbito (CAUSABAS)"
+                            if _role_key == "basica"
+                            else "CID-10 mais frequentes como causa não-básica (linhas da Declaração de Óbito)"
+                        )
+                        _n_label = "Óbitos" if _role_key == "basica" else "Menções"
+                        fig_role = px.bar(
+                            role_df,
+                            x="n",
+                            y="tipo",
+                            orientation="h",
+                            text="texto",
+                            title=_role_title,
+                            labels={"tipo": "CID-10", "n": _n_label, "pct": "% do total", "cid": "Código CID-10", "denominador": "Total de menções"},
+                            hover_data={"texto": False, "pct": ":.2f", "cid": True, "denominador": True},
+                        )
+                        fig_role.update_layout(yaxis={"categoryorder": "total ascending"})
+                        render_plotly_chart(fig_role)
+                        render_interval_total(role_df, value_col="n", value_label=_n_label.lower())
+                        _role_export = role_df.drop(columns=["texto"], errors="ignore")
+                        copyable_dataframe(_role_export, width="stretch", hide_index=True)
+                        _fname_suffix = "causa_basica" if _role_key == "basica" else "causa_nao_basica"
+                        download_button(_role_export, f"sim_cid10_freq_{_fname_suffix}.csv")
+                else:
+                    st.info(
+                        "Para gerar a análise de CID-10 por papel na Declaração de Óbito, "
+                        "é necessário que os campos CAUSABAS e/ou as linhas da DO (LINHAA–LINHAII) "
+                        "existam e sejam detectados automaticamente."
+                    )
+
             conv_adequacy = query_cid10_adequacy_conversion(table, exprs, graph_where)
             if not conv_adequacy.empty:
                 conv_adequacy = add_text(conv_adequacy)
@@ -13521,85 +13595,6 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                         copyable_dataframe(death_cid, width="stretch", hide_index=True)
                         download_button(death_cid, "ciha_obitos_cid10_distribuicao.csv")
 
-        if source == "SIM":
-            causabas_cid = exprs.get("causabas_cid")
-            non_basic_cols: List[str] = exprs.get("sim_non_basic_cid_cols") or []  # type: ignore[assignment]
-            has_causabas = bool(causabas_cid)
-            has_linhas = bool(non_basic_cols)
-            if has_causabas or has_linhas:
-                st.markdown("### CID-10 mais frequentes por papel na Declaração de Óbito")
-                st.caption(
-                    "Selecione abaixo se deseja ver os CID-10 mais frequentes como **causa básica** (campo CAUSABAS) "
-                    "ou como **causa não-básica** (linhas da Declaração de Óbito: LINHAA–LINHAII). "
-                    "Os percentuais usam como denominador o total de menções no papel selecionado, "
-                    "e não o total de óbitos — um mesmo óbito pode ter o mesmo CID em múltiplas linhas."
-                )
-                _role_opts_sim = []
-                if has_causabas:
-                    _role_opts_sim.append("CID-10 como causa básica (CAUSABAS)")
-                if has_linhas:
-                    _role_opts_sim.append("CID-10 como causa não-básica (LINHAA–LINHAII)")
-                _sim_cid_role_key = f"sim_cid_role_{id(table)}"
-                if st.session_state.get(_sim_cid_role_key) not in (None, *_role_opts_sim):
-                    st.session_state.pop(_sim_cid_role_key, None)
-                selected_role = st.radio(
-                    "Papel do CID-10 no atestado",
-                    _role_opts_sim,
-                    horizontal=True,
-                    key=_sim_cid_role_key,
-                )
-                _role_key = "basica" if "causa básica" in (selected_role or "") else "nao_basica"
-                role_df = query_sim_cid_freq_by_role(
-                    table,
-                    _role_key,
-                    causabas_cid,
-                    non_basic_cols,
-                    graph_where,
-                    top_n=20,
-                )
-                if role_df.empty:
-                    st.info("Sem dados suficientes para tabular CID-10 por papel com os filtros atuais.")
-                else:
-                    def _br_int_local(v: object) -> str:
-                        return "—" if pd.isna(v) else f"{int(v):,}".replace(",", ".")
-
-                    def _br_pct_local(v: object) -> str:
-                        return "—" if pd.isna(v) else f"{float(v):.2f}%".replace(".", ",")
-
-                    role_df["texto"] = [
-                        f"{_br_int_local(n)} ({_br_pct_local(p)})"
-                        for n, p in zip(role_df["n"], role_df["pct"])
-                    ]
-                    _role_title = (
-                        "CID-10 mais frequentes como causa básica do óbito (CAUSABAS)"
-                        if _role_key == "basica"
-                        else "CID-10 mais frequentes como causa não-básica (linhas da Declaração de Óbito)"
-                    )
-                    _n_label = "Óbitos" if _role_key == "basica" else "Menções"
-                    fig_role = px.bar(
-                        role_df,
-                        x="tipo",
-                        y="n",
-                        text="texto",
-                        title=_role_title,
-                        labels={"tipo": "CID-10", "n": _n_label, "pct": "% do total", "cid": "Código CID-10", "denominador": "Total de menções"},
-                        hover_data={"texto": False, "pct": ":.2f", "cid": True, "denominador": True},
-                    )
-                    fig_role.update_xaxes(tickangle=-40, automargin=True)
-                    fig_role.update_layout(xaxis={"categoryorder": "total descending"})
-                    render_plotly_chart(fig_role)
-                    render_interval_total(role_df, value_col="n", value_label=_n_label.lower())
-                    _role_export = role_df.drop(columns=["texto"], errors="ignore")
-                    copyable_dataframe(_role_export, width="stretch", hide_index=True)
-                    _fname_suffix = "causa_basica" if _role_key == "basica" else "causa_nao_basica"
-                    download_button(_role_export, f"sim_cid10_freq_{_fname_suffix}.csv")
-            else:
-                st.info(
-                    "Para gerar a análise de CID-10 por papel na Declaração de Óbito, "
-                    "é necessário que os campos CAUSABAS e/ou as linhas da DO (LINHAA–LINHAII) "
-                    "existam e sejam detectados automaticamente."
-                )
-
         return
 
     st.markdown("### Classificação específica do SINAN")
@@ -13620,6 +13615,99 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
         if exprs.get("classi_code")
         else conversion_base_where
     )
+
+    if exprs.get("criterio_code"):
+        _presenca_criterio_grupos = [
+            ("Total de casos", conversion_base_where),
+            ("Entre casos confirmados", confirmed_conversion_where),
+            ("Entre casos descartados", discarded_conversion_where),
+        ]
+        _presenca_criterio_frames = []
+        for _grupo_label, _grupo_where in _presenca_criterio_grupos:
+            _presenca_criterio_grupo_df = query_field_presence(
+                table,
+                exprs["criterio_code"],
+                _grupo_where,
+                present_label="Sim — critério informado",
+                absent_label="Não — sem critério informado",
+            )
+            if not _presenca_criterio_grupo_df.empty:
+                _presenca_criterio_grupo_df = _presenca_criterio_grupo_df.copy()
+                _presenca_criterio_grupo_df["grupo"] = _grupo_label
+                _presenca_criterio_frames.append(_presenca_criterio_grupo_df)
+        if _presenca_criterio_frames:
+            criterio_presenca = pd.concat(_presenca_criterio_frames, ignore_index=True)
+            criterio_presenca = add_text(criterio_presenca)
+            fig_criterio_presenca = px.bar(
+                criterio_presenca,
+                x="categoria",
+                y="n",
+                color="grupo",
+                barmode="group",
+                text="texto",
+                title="Presença de critério de confirmação para meningite",
+                labels={"categoria": "Critério de confirmação", "n": "Casos", "pct": "% do grupo", "grupo": "Grupo"},
+                category_orders={"grupo": ["Total de casos", "Entre casos confirmados", "Entre casos descartados"]},
+                hover_data={"texto": False, "pct": ":.2f", "denominador": True, "grupo": True},
+            )
+            render_plotly_chart(fig_criterio_presenca)
+            st.caption(
+                "Este gráfico compara a presença do campo CRITERIO entre o total de casos, os casos confirmados e os casos descartados/sem classificação; "
+                "o percentual é calculado sobre o total de cada grupo. O gráfico seguinte detalha quais critérios foram registrados entre os preenchidos, "
+                "conforme a estratificação selecionada abaixo."
+            )
+            render_interval_total(criterio_presenca, value_col="n", value_label="casos")
+            copyable_dataframe(criterio_presenca, width="stretch", hide_index=True)
+            download_button(criterio_presenca, "sinan_presenca_criterio_confirmacao_por_grupo.csv")
+
+    _criterio_where = conversion_base_where
+    _criterio_group_label = "total de casos"
+    criterio_strat_sel = "Total de casos"
+    if exprs.get("criterio_code") or exprs.get("criterio_label"):
+        _CRITERIO_STRAT_OPTIONS = ["Total de casos", "Casos confirmados", "Casos descartados / sem classificação"]
+        criterio_strat_sel = st.radio(
+            "Estratificação do critério de confirmação",
+            _CRITERIO_STRAT_OPTIONS,
+            index=0,
+            key="sinan_criterio_strat",
+            horizontal=True,
+        )
+        if criterio_strat_sel == "Total de casos":
+            _criterio_where = conversion_base_where
+            _criterio_group_label = "total de casos"
+        elif criterio_strat_sel == "Casos confirmados":
+            _criterio_where = confirmed_conversion_where
+            _criterio_group_label = "casos confirmados"
+        else:
+            _criterio_where = discarded_conversion_where
+            _criterio_group_label = "casos descartados / sem classificação"
+
+    if exprs.get("criterio_label"):
+        criterio_coverage_text = ""
+        criterio_coverage_df = pd.DataFrame()
+        if exprs.get("criterio_code"):
+            criterio_coverage_df = query_field_coverage(table, exprs["criterio_code"], _criterio_where)
+            criterio_coverage_text = coverage_subtitle_from_df(criterio_coverage_df)
+        criterio_df = query_category(table, exprs["criterio_label"], _criterio_where, top_n=40)
+        if not criterio_df.empty:
+            criterio_df = add_text(criterio_df)
+            fig_criterio = px.bar(
+                criterio_df,
+                x="n",
+                y="categoria",
+                orientation="h",
+                text="texto",
+                title="Critério de confirmação — " + _criterio_group_label + (f"<br><sup>{criterio_coverage_text}</sup>" if criterio_coverage_text else ""),
+                labels={"categoria": "Critério", "n": "Casos", "pct": "%"},
+                hover_data={"texto": False, "pct": ":.2f"},
+            )
+            fig_criterio.update_layout(yaxis={"categoryorder": "total ascending"})
+            render_field_completeness_warning(criterio_coverage_df, "CRITERIO (critério de confirmação)")
+            render_plotly_chart(fig_criterio)
+            if criterio_coverage_text:
+                st.caption("CRITERIO — " + criterio_coverage_text)
+            render_interval_total(criterio_df, value_col="n", value_label="casos")
+            copyable_dataframe(criterio_df, width="stretch", hide_index=True)
 
     if exprs.get("con_label"):
         con_coverage_text = ""
@@ -13695,99 +13783,6 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
         render_interval_total(etio, value_col="obitos_meningite", denominator_col="confirmados_evolucao_conhecida", value_label="óbitos por meningite", denominator_label="confirmados com evolução conhecida")
         copyable_dataframe(etio, width="stretch", hide_index=True)
         download_button(etio, "sinan_letalidade_por_etiologia.csv")
-
-    if exprs.get("criterio_code"):
-        _presenca_criterio_grupos = [
-            ("Total de casos", conversion_base_where),
-            ("Entre casos confirmados", confirmed_conversion_where),
-            ("Entre casos descartados", discarded_conversion_where),
-        ]
-        _presenca_criterio_frames = []
-        for _grupo_label, _grupo_where in _presenca_criterio_grupos:
-            _presenca_criterio_grupo_df = query_field_presence(
-                table,
-                exprs["criterio_code"],
-                _grupo_where,
-                present_label="Sim — critério informado",
-                absent_label="Não — sem critério informado",
-            )
-            if not _presenca_criterio_grupo_df.empty:
-                _presenca_criterio_grupo_df = _presenca_criterio_grupo_df.copy()
-                _presenca_criterio_grupo_df["grupo"] = _grupo_label
-                _presenca_criterio_frames.append(_presenca_criterio_grupo_df)
-        if _presenca_criterio_frames:
-            criterio_presenca = pd.concat(_presenca_criterio_frames, ignore_index=True)
-            criterio_presenca = add_text(criterio_presenca)
-            fig_criterio_presenca = px.bar(
-                criterio_presenca,
-                x="categoria",
-                y="n",
-                color="grupo",
-                barmode="group",
-                text="texto",
-                title="Presença de critério de confirmação",
-                labels={"categoria": "Critério de confirmação", "n": "Casos", "pct": "% do grupo", "grupo": "Grupo"},
-                category_orders={"grupo": ["Total de casos", "Entre casos confirmados", "Entre casos descartados"]},
-                hover_data={"texto": False, "pct": ":.2f", "denominador": True, "grupo": True},
-            )
-            render_plotly_chart(fig_criterio_presenca)
-            st.caption(
-                "Este gráfico compara a presença do campo CRITERIO entre o total de casos, os casos confirmados e os casos descartados/sem classificação; "
-                "o percentual é calculado sobre o total de cada grupo. O gráfico seguinte detalha quais critérios foram registrados entre os preenchidos, "
-                "conforme a estratificação selecionada abaixo."
-            )
-            render_interval_total(criterio_presenca, value_col="n", value_label="casos")
-            copyable_dataframe(criterio_presenca, width="stretch", hide_index=True)
-            download_button(criterio_presenca, "sinan_presenca_criterio_confirmacao_por_grupo.csv")
-
-    _criterio_where = conversion_base_where
-    _criterio_group_label = "total de casos"
-    criterio_strat_sel = "Total de casos"
-    if exprs.get("criterio_code") or exprs.get("criterio_label"):
-        _CRITERIO_STRAT_OPTIONS = ["Total de casos", "Casos confirmados", "Casos descartados / sem classificação"]
-        criterio_strat_sel = st.radio(
-            "Estratificação do critério de confirmação",
-            _CRITERIO_STRAT_OPTIONS,
-            index=0,
-            key="sinan_criterio_strat",
-            horizontal=True,
-        )
-        if criterio_strat_sel == "Total de casos":
-            _criterio_where = conversion_base_where
-            _criterio_group_label = "total de casos"
-        elif criterio_strat_sel == "Casos confirmados":
-            _criterio_where = confirmed_conversion_where
-            _criterio_group_label = "casos confirmados"
-        else:
-            _criterio_where = discarded_conversion_where
-            _criterio_group_label = "casos descartados / sem classificação"
-
-    if exprs.get("criterio_label"):
-        criterio_coverage_text = ""
-        criterio_coverage_df = pd.DataFrame()
-        if exprs.get("criterio_code"):
-            criterio_coverage_df = query_field_coverage(table, exprs["criterio_code"], _criterio_where)
-            criterio_coverage_text = coverage_subtitle_from_df(criterio_coverage_df)
-        criterio_df = query_category(table, exprs["criterio_label"], _criterio_where, top_n=40)
-        if not criterio_df.empty:
-            criterio_df = add_text(criterio_df)
-            fig_criterio = px.bar(
-                criterio_df,
-                x="n",
-                y="categoria",
-                orientation="h",
-                text="texto",
-                title="Critério de confirmação — " + _criterio_group_label + (f"<br><sup>{criterio_coverage_text}</sup>" if criterio_coverage_text else ""),
-                labels={"categoria": "Critério", "n": "Casos", "pct": "%"},
-                hover_data={"texto": False, "pct": ":.2f"},
-            )
-            fig_criterio.update_layout(yaxis={"categoryorder": "total ascending"})
-            render_field_completeness_warning(criterio_coverage_df, "CRITERIO (critério de confirmação)")
-            render_plotly_chart(fig_criterio)
-            if criterio_coverage_text:
-                st.caption("CRITERIO — " + criterio_coverage_text)
-            render_interval_total(criterio_df, value_col="n", value_label="casos")
-            copyable_dataframe(criterio_df, width="stretch", hide_index=True)
 
     st.markdown("### Especificação da meningite")
     if not exprs.get("con_code"):
@@ -14406,9 +14401,6 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
     def render_sim_education_chart() -> None:
         render_non_sinan_education_chart()
 
-    def render_ciha_education_chart() -> None:
-        render_non_sinan_education_chart()
-
     def render_simple_category_chart(label: str, expr: str, top_n: int = 25) -> None:
         df = query_category(table, expr, graph_where, top_n=top_n)
         if df.empty:
@@ -14573,12 +14565,9 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
         if age:
             render_age_distribution_chart(graph_where, None)
 
-        if source in {"SIM", "CIHA"}:
+        if source == "SIM":
             st.markdown("### Escolaridade")
-            if source == "SIM":
-                render_sim_education_chart()
-            else:
-                render_ciha_education_chart()
+            render_sim_education_chart()
 
         render_municipality_charts()
 
