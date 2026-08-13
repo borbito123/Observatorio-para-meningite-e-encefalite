@@ -68,7 +68,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-08-13-v65-microorganism-coalesce-fix"
+APP_VERSION = "2026-08-13-v67-remove-mencao-cid-fix-cor-causa-basica"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos
@@ -5339,19 +5339,29 @@ def query_sim_cid_freq_by_role(
         for col in non_basic_cols:
             col_cid = cid_extract_expr_for_col(col)
             col_type = cid_type_expr(col_cid)
-            col_where = append_clause(where_sql, f"({col_cid}) IS NOT NULL")
             union_parts.append(
-                f"SELECT ({col_cid}) AS cid, ({col_type}) AS tipo"
-                f" FROM {table.ref_sql} {col_where}"
+                f"SELECT caso_id, ({col_cid}) AS cid, ({col_type}) AS tipo"
+                f" FROM caso_base WHERE ({col_cid}) IS NOT NULL"
             )
         union_sql = "\n            UNION ALL\n            ".join(union_parts)
         sql = f"""
-            WITH all_linhas AS (
+            WITH caso_base AS (
+                SELECT ROW_NUMBER() OVER () AS caso_id, *
+                FROM {table.ref_sql}
+                {where_sql}
+            ), all_linhas AS (
                 {union_sql}
-            ), agg AS (
-                SELECT cid, tipo, COUNT(*) AS n
+            ), mencoes_unicas AS (
+                -- Um mesmo CID-10 conta uma única vez por óbito, mesmo que apareça em
+                -- mais de uma linha da Declaração de Óbito (ex.: repetido em LINHAB e
+                -- LINHAC). CID-10 diferentes em linhas diferentes do mesmo óbito
+                -- continuam gerando uma menção cada um.
+                SELECT DISTINCT caso_id, cid, tipo
                 FROM all_linhas
                 WHERE cid IS NOT NULL
+            ), agg AS (
+                SELECT cid, tipo, COUNT(*) AS n
+                FROM mencoes_unicas
                 GROUP BY cid, tipo
             ), with_total AS (
                 SELECT cid, tipo, n, SUM(n) OVER () AS denominador
@@ -13485,21 +13495,13 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
         if cid_dist.empty:
             st.warning("Não localizei campo CID-10 válido pela detecção automática para ativar esta análise.")
         else:
-            cid_dist = add_text(cid_dist)
-            if source == "SIM":
-                fig = px.bar(
-                    cid_dist,
-                    x="n",
-                    y="tipo",
-                    color="tipo",
-                    orientation="h",
-                    text="texto",
-                    title="Menção de CID-10 em relação aos óbitos",
-                    labels={"tipo": "CID-10", "n": "Óbitos", "pct": "%"},
-                    hover_data={"texto": False, "pct": ":.2f", "cids_encontrados": True, "campos_origem": True},
-                )
-                fig.update_layout(yaxis={"categoryorder": "total ascending"}, showlegend=False)
-            else:
+            if source != "SIM":
+                # SIM não renderiza mais o gráfico "Menção de CID-10 em relação aos óbitos"
+                # aqui: ele era redundante com "CID-10 mais frequentes por papel na
+                # Declaração de Óbito" (opção causa básica), logo abaixo. cid_dist
+                # continua sendo calculado para servir de gate das seções seguintes
+                # (conversão de adequação e verificação G01/G02).
+                cid_dist = add_text(cid_dist)
                 fig = px.bar(
                     cid_dist,
                     x="n",
@@ -13511,14 +13513,10 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                     hover_data={"texto": False, "pct": ":.2f", "cids_encontrados": True, "campos_origem": True},
                 )
                 fig.update_layout(yaxis={"categoryorder": "total ascending"})
-            render_plotly_chart(fig)
-            render_interval_total(cid_dist, value_col="n")
-            if source == "SIM":
-                cid_dist_display = cid_dist.drop(columns=["campos_origem", "pct"], errors="ignore")
-            else:
-                cid_dist_display = cid_dist
-            copyable_dataframe(cid_dist_display, width="stretch", hide_index=True)
-            download_button(cid_dist_display, f"{source.lower()}_cid10_distribuicao.csv")
+                render_plotly_chart(fig)
+                render_interval_total(cid_dist, value_col="n")
+                copyable_dataframe(cid_dist, width="stretch", hide_index=True)
+                download_button(cid_dist, f"{source.lower()}_cid10_distribuicao.csv")
 
             if source == "SIM":
                 causabas_cid = exprs.get("causabas_cid")
@@ -13531,7 +13529,9 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                         "Selecione abaixo se deseja ver os CID-10 mais frequentes como **causa básica** (campo CAUSABAS) "
                         "ou como **causa não-básica** (linhas da Declaração de Óbito: LINHAA–LINHAII). "
                         "Os percentuais usam como denominador o total de menções no papel selecionado, "
-                        "e não o total de óbitos — um mesmo óbito pode ter o mesmo CID em múltiplas linhas."
+                        "e não o total de óbitos — um mesmo óbito pode contribuir com menções de CID-10 diferentes "
+                        "(uma para cada código distinto encontrado nas linhas). Se o mesmo CID-10 aparecer repetido "
+                        "em mais de uma linha do mesmo óbito, ele é contado uma única vez para aquele óbito."
                     )
                     _role_opts_sim = []
                     if has_causabas:
@@ -13587,6 +13587,13 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                             hover_data={"texto": False, "pct": ":.2f", "cid": True, "denominador": True},
                         )
                         fig_role.update_layout(yaxis={"categoryorder": "total ascending"}, showlegend=False)
+                        # O título deste gráfico contém "óbito", o que aciona a regra global
+                        # de forçar vermelho em gráficos de óbito/letalidade quando há apenas
+                        # 1 categoria (traço) — típico de "causa básica", que costuma
+                        # concentrar-se em poucos tipos de CID-10 (ex.: G03). Sem este disable,
+                        # todas as barras saíam com a mesma cor (vermelha) em vez da cor por CID-10.
+                        disable_death_red(fig_role)
+                        preserve_trace_colors(fig_role)
                         render_plotly_chart(fig_role)
                         render_interval_total(role_df, value_col="n", value_label=_n_label.lower())
                         _role_export = role_df.drop(columns=["texto"], errors="ignore")
