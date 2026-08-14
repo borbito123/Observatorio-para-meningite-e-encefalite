@@ -1799,15 +1799,15 @@ SINAN_EVOLUCAO = {
 }
 
 SINAN_CRITERIO = {
-    "1": "1 — cultura",
-    "2": "2 — CIE",
-    "3": "3 — látex",
-    "4": "4 — clínico",
-    "5": "5 — bacterioscopia",
-    "6": "6 — quimiocitológico",
-    "7": "7 — clínico-epidemiológico",
-    "8": "8 — isolamento viral",
-    "9": "9 — PCR",
+    "01": "01 — cultura",
+    "02": "02 — CIE",
+    "03": "03 — látex",
+    "04": "04 — clínico",
+    "05": "05 — bacterioscopia",
+    "06": "06 — quimiocitológico",
+    "07": "07 — clínico-epidemiológico",
+    "08": "08 — isolamento viral",
+    "09": "09 — PCR",
     "10": "10 — outro",
 }
 
@@ -4515,7 +4515,7 @@ def build_expressions(source: str, sel: ColumnSelection) -> Dict[str, Optional[s
             exprs["sinan_cid10_conversion_reason"] = None
             exprs["sinan_cid10_conversion_include"] = None
             exprs["sinan_g01_base_disease"] = None
-        exprs["criterio_code"] = clean_code_expr(sel.criterio_col) if sel.criterio_col else None
+        exprs["criterio_code"] = clean_code_expr(sel.criterio_col, pad2=True) if sel.criterio_col else None
         exprs["criterio_label"] = case_from_mapping(exprs["criterio_code"], SINAN_CRITERIO, "Sem critério/ignorado") if exprs["criterio_code"] else None
         exprs["expected_etiology_group"] = (
             sinan_expected_etiology_group_expr(exprs["con_code"], exprs.get("cla_me_eti_code"))
@@ -4722,6 +4722,58 @@ def query_field_presence(
                CASE WHEN denominador > 0 THEN ROUND(100.0 * n_ausente / denominador, 2) ELSE NULL END AS pct,
                2 AS ordem
         FROM agg
+        ORDER BY ordem
+    """
+    return run_query(table, sql)
+
+
+def query_field_presence_sim_nao_ignorado(
+    table: LoadedTable,
+    field_sql: str,
+    where_sql: str,
+    valid_codes: Sequence[str],
+    present_label: str = "Sim — critério informado",
+    absent_label: str = "Não — sem preenchimento",
+    invalid_label: str = "Ignorado — código não reconhecido",
+) -> pd.DataFrame:
+    """Distribuição de presença de um campo codificado em três estados.
+
+    Diferente de `query_field_presence` (binária: preenchido/vazio), esta versão
+    também isola valores presentes que não correspondem a nenhum código válido do
+    domínio esperado (`valid_codes`), rotulando-os como "Ignorado" em vez de
+    contá-los junto com os valores realmente informados.
+    """
+    codes_list_sql = ", ".join(qstr(c) for c in valid_codes) if valid_codes else "NULL"
+    sql = f"""
+        WITH base AS (
+            SELECT {field_sql} AS valor
+            FROM {table.ref_sql}
+            {where_sql}
+        ), classificado AS (
+            SELECT
+                CASE
+                    WHEN valor IS NULL THEN {qstr(absent_label)}
+                    WHEN valor IN ({codes_list_sql}) THEN {qstr(present_label)}
+                    ELSE {qstr(invalid_label)}
+                END AS categoria
+            FROM base
+        ), agg AS (
+            SELECT categoria, COUNT(*) AS n
+            FROM classificado
+            GROUP BY 1
+        ), totals AS (
+            SELECT SUM(n) AS denominador FROM agg
+        )
+        SELECT categoria, n, t.denominador,
+               CASE WHEN t.denominador > 0 THEN ROUND(100.0 * n / t.denominador, 2) ELSE NULL END AS pct,
+               CASE categoria
+                   WHEN {qstr(present_label)} THEN 1
+                   WHEN {qstr(absent_label)} THEN 2
+                   WHEN {qstr(invalid_label)} THEN 3
+                   ELSE 4
+               END AS ordem
+        FROM agg a
+        CROSS JOIN totals t
         ORDER BY ordem
     """
     return run_query(table, sql)
@@ -9915,7 +9967,7 @@ def query_sinan_overlap_candidate_records(
 
     classi_code_sql = clean_code_expr(classi_col) if classi_col else "NULL"
     con_code_sql = clean_code_expr(con_col, pad2=True) if con_col else "NULL"
-    criterio_code_sql = clean_code_expr(criterio_col) if criterio_col else "NULL"
+    criterio_code_sql = clean_code_expr(criterio_col, pad2=True) if criterio_col else "NULL"
     evol_code_sql = clean_code_expr(evol_col) if evol_col else "NULL"
     classi_label_sql = exprs.get("classi_label") or classi_code_sql
     con_label_sql = exprs.get("con_label") or con_code_sql
@@ -13739,50 +13791,6 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
         else conversion_base_where
     )
 
-    if exprs.get("criterio_code"):
-        _presenca_criterio_grupos = [
-            ("Total de casos", conversion_base_where),
-            ("Entre casos confirmados", confirmed_conversion_where),
-            ("Entre casos descartados", discarded_conversion_where),
-        ]
-        _presenca_criterio_frames = []
-        for _grupo_label, _grupo_where in _presenca_criterio_grupos:
-            _presenca_criterio_grupo_df = query_field_presence(
-                table,
-                exprs["criterio_code"],
-                _grupo_where,
-                present_label="Sim — critério informado",
-                absent_label="Não — sem critério informado",
-            )
-            if not _presenca_criterio_grupo_df.empty:
-                _presenca_criterio_grupo_df = _presenca_criterio_grupo_df.copy()
-                _presenca_criterio_grupo_df["grupo"] = _grupo_label
-                _presenca_criterio_frames.append(_presenca_criterio_grupo_df)
-        if _presenca_criterio_frames:
-            criterio_presenca = pd.concat(_presenca_criterio_frames, ignore_index=True)
-            criterio_presenca = add_text(criterio_presenca)
-            fig_criterio_presenca = px.bar(
-                criterio_presenca,
-                x="categoria",
-                y="n",
-                color="grupo",
-                barmode="group",
-                text="texto",
-                title="Presença de critério de confirmação para meningite",
-                labels={"categoria": "Critério de confirmação", "n": "Casos", "pct": "% do grupo", "grupo": "Grupo"},
-                category_orders={"grupo": ["Total de casos", "Entre casos confirmados", "Entre casos descartados"]},
-                hover_data={"texto": False, "pct": ":.2f", "denominador": True, "grupo": True},
-            )
-            render_plotly_chart(fig_criterio_presenca)
-            st.caption(
-                "Este gráfico compara a presença do campo CRITERIO entre o total de casos, os casos confirmados e os casos descartados/sem classificação; "
-                "o percentual é calculado sobre o total de cada grupo. O gráfico seguinte detalha quais critérios foram registrados entre os preenchidos, "
-                "conforme a estratificação selecionada abaixo."
-            )
-            render_interval_total(criterio_presenca, value_col="n", value_label="casos")
-            copyable_dataframe(criterio_presenca, width="stretch", hide_index=True)
-            download_button(criterio_presenca, "sinan_presenca_criterio_confirmacao_por_grupo.csv")
-
     _criterio_where = conversion_base_where
     _criterio_group_label = "total de casos"
     criterio_strat_sel = "Total de casos"
@@ -13804,6 +13812,42 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
         else:
             _criterio_where = discarded_conversion_where
             _criterio_group_label = "casos descartados / sem classificação"
+
+    if exprs.get("criterio_code"):
+        criterio_presenca = query_field_presence_sim_nao_ignorado(
+            table,
+            exprs["criterio_code"],
+            _criterio_where,
+            valid_codes=list(SINAN_CRITERIO.keys()),
+            present_label="Sim — critério informado",
+            absent_label="Não — sem preenchimento",
+            invalid_label="Ignorado — código não reconhecido",
+        )
+        if not criterio_presenca.empty:
+            criterio_presenca = add_text(criterio_presenca)
+            _presenca_order = ["Sim — critério informado", "Não — sem preenchimento", "Ignorado — código não reconhecido"]
+            fig_criterio_presenca = px.bar(
+                criterio_presenca,
+                x="n",
+                y="categoria",
+                orientation="h",
+                text="texto",
+                title="Presença de critério de confirmação para meningite — " + _criterio_group_label,
+                labels={"categoria": "Presença de critério de confirmação", "n": "Casos", "pct": "%"},
+                category_orders={"categoria": _presenca_order},
+                hover_data={"texto": False, "pct": ":.2f", "denominador": True},
+            )
+            fig_criterio_presenca.update_layout(yaxis={"categoryorder": "array", "categoryarray": list(reversed(_presenca_order))})
+            render_plotly_chart(fig_criterio_presenca)
+            st.caption(
+                "Sim = campo CRITERIO preenchido com um dos 10 códigos válidos do Quadro V do SINAN (01 a 10). "
+                "Não = campo vazio/sem preenchimento. Ignorado = campo preenchido, mas com um valor que não corresponde a "
+                "nenhum código válido do domínio esperado. O percentual é calculado sobre o total do estrato selecionado acima; "
+                "o gráfico seguinte detalha quais critérios específicos foram registrados entre os informados, na mesma estratificação."
+            )
+            render_interval_total(criterio_presenca, value_col="n", value_label="casos")
+            copyable_dataframe(criterio_presenca, width="stretch", hide_index=True)
+            download_button(criterio_presenca, "sinan_presenca_criterio_confirmacao.csv")
 
     if exprs.get("criterio_label"):
         criterio_coverage_text = ""
@@ -14894,10 +14938,10 @@ def render_source(source: str) -> Optional[Dict[str, object]]:
     render_kpis(table, source, base_where, graph_where, exprs)
 
     analysis_sections = [
-        "Principais indicadores epidemiológicos",
-        "Temporal",
+        "Análise dos principais indicadores epidemiológicos",
+        "Análise Temporal",
         "Análise etiológica e CID-10",
-        "Demografia e território",
+        "Análise demográfica e territorial",
     ]
     if source == "SINAN":
         analysis_sections.append("Sobreposição NU_NOTIFIC / NM_PACIENT")
@@ -14917,13 +14961,13 @@ def render_source(source: str) -> Optional[Dict[str, object]]:
         help="Somente a área selecionada é calculada nesta execução para reduzir memória e tempo de rerun.",
     )
 
-    if selected_section == "Principais indicadores epidemiológicos":
+    if selected_section == "Análise dos principais indicadores epidemiológicos":
         render_indicators_tab(table, source, base_where, graph_where, exprs)
-    elif selected_section == "Temporal":
+    elif selected_section == "Análise Temporal":
         render_temporal_tab(table, source, graph_where, exprs)
     elif selected_section == "Análise etiológica e CID-10":
         render_cid_tab(table, source, graph_where, exprs, base_where=base_where)
-    elif selected_section == "Demografia e território":
+    elif selected_section == "Análise demográfica e territorial":
         render_demography_tab(table, source, graph_where, exprs, base_where=base_where)
     elif selected_section == "Sobreposição NU_NOTIFIC / NM_PACIENT" and source == "SINAN":
         render_sinan_overlap_tab(table, base_where, exprs)
@@ -15095,10 +15139,10 @@ def render_methodology():
     st.markdown("### Como usar este app para investigação epidemiológica")
     st.markdown(
         """
-        1. Comece pela aba **Principais indicadores epidemiológicos** do SINAN para separar total de notificações, confirmados, descartados e sem classificação/ignorados.
+        1. Comece pela aba **Análise dos principais indicadores epidemiológicos** do SINAN para separar total de notificações, confirmados, descartados e sem classificação/ignorados.
         2. Use **Análise etiológica e CID-10** para comparar o CID bruto com a classificação específica. No SINAN, dê prioridade a `CON_DIAGES`, `CLA_ME_BAC`, `CLA_ME_ASS` e `CLA_ME_ETI`.
-        3. Use **Temporal** para verificar queda, recuperação e sazonalidade.
-        4. Use **Demografia e território** para levantar hipóteses por idade, sexo, residência e atendimento.
+        3. Use **Análise Temporal** para verificar queda, recuperação e sazonalidade.
+        4. Use **Análise demográfica e territorial** para levantar hipóteses por idade, sexo, residência e atendimento.
         5. Use **Prévia** para inspecionar casos filtrados e exportar a planilha completa quando necessário.
         6. Use **SQL Lab** para transformar a hipótese em uma consulta reprodutível.
         """
