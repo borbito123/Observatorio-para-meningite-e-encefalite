@@ -68,7 +68,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-08-13-v67-remove-mencao-cid-fix-cor-causa-basica"
+APP_VERSION = "2026-08-14-v73-fix-modalidade-ciha-cid10-completo-diag-secundario"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos
@@ -7864,12 +7864,14 @@ def query_ciha_indicators(table: LoadedTable, exprs: Dict[str, Optional[str]], w
     dt = exprs.get("dt")
     cid_any = exprs.get("cid")
     diag_princ = exprs.get("diag_princ_cid")
+    diag_secun = exprs.get("diag_secun_cid")
     morte = exprs.get("morte_code")
     dias = exprs.get("dias_perm")
     if not dt:
         return pd.DataFrame()
     cid_any_sql = cid_any or "NULL"
     diag_princ_sql = diag_princ or "NULL"
+    diag_secun_sql = diag_secun or "NULL"
     morte_sql = morte or "NULL"
     dias_sql = dias or "NULL"
     sql = f"""
@@ -7877,6 +7879,7 @@ def query_ciha_indicators(table: LoadedTable, exprs: Dict[str, Optional[str]], w
             SELECT {dt} AS dt,
                    {cid_any_sql} AS cid_mencao,
                    {diag_princ_sql} AS cid_principal,
+                   {diag_secun_sql} AS cid_secundario,
                    {morte_sql} AS morte,
                    {dias_sql} AS dias_perm
             FROM {table.ref_sql}
@@ -7885,6 +7888,7 @@ def query_ciha_indicators(table: LoadedTable, exprs: Dict[str, Optional[str]], w
             SELECT EXTRACT(YEAR FROM dt) AS ano,
                    COUNT(*) AS atendimentos,
                    COUNT(*) FILTER (WHERE cid_principal IS NOT NULL) AS atendimentos_diag_principal_meningite,
+                   COUNT(*) FILTER (WHERE cid_secundario IS NOT NULL AND cid_principal IS NULL) AS atendimentos_diag_secundario_meningite,
                    COUNT(*) FILTER (WHERE cid_mencao IS NOT NULL) AS atendimentos_qualquer_cid_meningite,
                    COUNT(*) FILTER (WHERE morte = '1') AS mortes_administrativas,
                    COUNT(*) FILTER (WHERE dias_perm = 0) AS permanencia_zero,
@@ -7895,6 +7899,7 @@ def query_ciha_indicators(table: LoadedTable, exprs: Dict[str, Optional[str]], w
         )
         SELECT *,
                {pct_expr('atendimentos_diag_principal_meningite', 'atendimentos')} AS pct_atendimentos_diag_principal_meningite,
+               {pct_expr('atendimentos_diag_secundario_meningite', 'atendimentos')} AS pct_atendimentos_diag_secundario_meningite,
                {pct_expr('atendimentos_qualquer_cid_meningite', 'atendimentos')} AS pct_atendimentos_qualquer_cid_meningite,
                {pct_expr('mortes_administrativas', 'atendimentos')} AS pct_morte_administrativa,
                {pct_expr('permanencia_zero', 'atendimentos')} AS pct_permanencia_zero
@@ -13600,7 +13605,8 @@ casos de indivíduos com até 2 anos (≤ 24 meses)."
     else:
         ciha_count_specs = [
             ("atendimentos", "Atendimentos", None),
-            ("atendimentos_diag_principal_meningite", "Diagnóstico principal de meningite", "pct_atendimentos_diag_principal_meningite"),
+            ("atendimentos_diag_principal_meningite", "Meningite como diagnóstico principal", "pct_atendimentos_diag_principal_meningite"),
+            ("atendimentos_diag_secundario_meningite", "Meningite como diagnóstico secundário", "pct_atendimentos_diag_secundario_meningite"),
             ("mortes_administrativas", "Mortes administrativas", "pct_morte_administrativa"),
         ]
         ciha_count_rows = []
@@ -13628,6 +13634,13 @@ casos de indivíduos com até 2 anos (≤ 24 meses)."
             hover_data={"texto": False, "pct": ":.2f", "denominador": True},
         )
         fig.update_traces(textposition="top center")
+        add_calc_note(
+            "'Meningite como diagnóstico principal' conta atendimentos em que algum CID-10 de meningite "
+            "aparece no campo DIAG_PRINC. 'Meningite como diagnóstico secundário' conta atendimentos em que "
+            "algum CID-10 de meningite aparece em DIAG_SECUN, mas exclui explicitamente (AND cid_principal IS NULL) "
+            "os casos em que meningite também aparece em DIAG_PRINC — ou seja, as duas categorias são mutuamente "
+            "exclusivas e não se sobrepõem."
+        )
         render_plotly_chart(fig, calc_title="CIHA — Atendimentos e mortes administrativas")
         render_interval_total(ciha_count_long, value_col="n", by_col="indicador")
 
@@ -13701,6 +13714,8 @@ casos de indivíduos com até 2 anos (≤ 24 meses)."
                             x=df_cat["ano"],
                             y=df_cat["n"],
                             name=str(categoria),
+                            legendgroup="modalidade",
+                            legendgrouptitle_text="Modalidade do atendimento",
                             text=df_cat["texto"],
                             textposition="inside",
                             marker={"color": color},
@@ -13723,6 +13738,8 @@ casos de indivíduos com até 2 anos (≤ 24 meses)."
                         y=letalidade_df["pct_morte_administrativa"],
                         mode="lines+markers+text",
                         name="Letalidade — óbitos/atendimentos CIHA",
+                        legendgroup="letalidade",
+                        legendgrouptitle_text="Letalidade",
                         text=letalidade_df["texto_letalidade"],
                         textposition="top center",
                         line={"color": "#000000", "dash": "dash"},
@@ -13738,10 +13755,15 @@ casos de indivíduos com até 2 anos (≤ 24 meses)."
                     col=1,
                 )
 
-            fig_obitos_ciha.update_layout(title="Óbitos CIHA por ano, modalidade do atendimento e letalidade")
+            fig_obitos_ciha.update_layout(title="Óbitos CIHA por ano, modalidade do atendimento e letalidade", legend={"groupclick": "togglegroup"})
             fig_obitos_ciha.update_xaxes(title_text="Ano", row=2, col=1)
-            fig_obitos_ciha.update_yaxes(title_text="Óbitos (MORTE = 1)", row=1, col=1)
+            fig_obitos_ciha.update_yaxes(title_text="Óbitos por modalidade (MORTE = 1)", row=1, col=1)
             fig_obitos_ciha.update_yaxes(title_text="Letalidade (%)", ticksuffix="%", row=2, col=1)
+            fig_obitos_ciha.add_annotation(
+                text="Modalidade do atendimento (hospitalar vs. ambulatorial)",
+                xref="paper", yref="paper", x=0, y=1.0, xanchor="left", yanchor="bottom",
+                showarrow=False, font={"size": 12, "color": DARK_GRAY},
+            )
             st.caption(
                 "**Letalidade**, aqui, é a proporção de óbitos administrativos (`MORTE = 1`) sobre o total de "
                 "atendimentos/internações informados à CIHA no mesmo ano (100 × mortes administrativas / "
@@ -13823,7 +13845,9 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                 # continua sendo calculado para servir de gate das seções seguintes
                 # (conversão de adequação e verificação G01/G02).
                 cid_dist = add_text(cid_dist)
-                cid_dist_plot = summarize_cid_distribution_plot(cid_dist, top_n=15)
+                cid_dist_plot = cid_dist.sort_values("n", ascending=False).reset_index(drop=True).copy()
+                cid_dist_plot["grupo_plot"] = cid_dist_plot["grupo"]
+                cid_dist_plot["tipo_completo"] = cid_dist_plot["tipo"]
                 fig = px.bar(
                     cid_dist_plot,
                     x="n",
@@ -13836,16 +13860,15 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                 )
                 fig.update_layout(
                     yaxis={"categoryorder": "total ascending"},
-                    height=max(420, 34 * len(cid_dist_plot) + 160),
+                    height=max(420, 26 * len(cid_dist_plot) + 160),
                 )
-                if len(cid_dist_plot) < len(cid_dist):
-                    add_calc_note(
-                        f"Gráfico limitado aos {15} tipos de CID-10 com mais registros "
-                        "(summarize_cid_distribution_plot); os demais foram somados em 'Outros CID-10' "
-                        "para manter a leitura legível. O eixo mostra só o código do CID-10 — a descrição "
-                        "completa aparece ao passar o mouse e na tabela de referência acima. A tabela e o "
-                        "CSV abaixo trazem a distribuição completa, sem agrupamento."
-                    )
+                add_calc_note(
+                    "O gráfico lista todos os tipos de CID-10 (`grupo`) encontrados no recorte atual, sem "
+                    "agrupar os menos frequentes em 'Outros CID-10' — a altura do gráfico cresce "
+                    "proporcionalmente à quantidade de tipos distintos para manter a leitura legível. O eixo "
+                    "mostra só o código do CID-10 — a descrição completa aparece ao passar o mouse e na tabela "
+                    "de referência acima. A tabela e o CSV abaixo trazem a mesma distribuição completa."
+                )
                 render_plotly_chart(fig, calc_title="Distribuição por tipo CID-10")
                 render_interval_total(cid_dist, value_col="n")
                 copyable_dataframe(cid_dist, width="stretch", hide_index=True)
