@@ -5415,10 +5415,18 @@ def query_sim_cid_freq_by_role(
     non_basic_cols : nomes das colunas das linhas da DO (LINHAA, LINHAB, …).
     where_sql : cláusula WHERE já com os filtros ativos.
 
-    Traz todos os CID-10 encontrados no recorte, sem limitar a um número fixo de tipos nem
-    somar o restante em uma categoria genérica "Outros CID" — mesmo comportamento do gráfico
-    "Distribuição por tipo CID-10" do CIHA. Cada CID-10 que aparece recebe sua própria linha
-    (e, no gráfico, sua própria barra).
+    Traz todos os tipos de CID-10 (`tipo`, rótulo agrupado por CID_RULES) encontrados no
+    recorte, sem limitar a um número fixo nem somar o restante em uma categoria genérica
+    "Outros CID" — mesmo comportamento do gráfico "Distribuição por tipo CID-10" do CIHA.
+    A agregação final é feita por `tipo`, não por código bruto (`cid`): como várias
+    variações de código (ex.: G030, G031, G038, G039) podem mapear para o mesmo rótulo,
+    agregar por `cid` faria com que um mesmo `tipo` gerasse várias linhas — e, no gráfico,
+    várias barras sobrepostas na mesma posição do eixo (já que Plotly não soma
+    automaticamente pontos com a mesma categoria dentro de um único trace). Agregando por
+    `tipo`, cada categoria vira exatamente uma linha (uma barra), com o total correto; os
+    códigos brutos que compõem cada categoria ficam preservados em `cids_encontrados`/
+    `cids_distintos` para consulta (hover e tabela), no mesmo padrão de
+    `query_cid_distribution`.
     """
     if role == "basica":
         if not causabas_cid_expr:
@@ -5433,17 +5441,21 @@ def query_sim_cid_freq_by_role(
                 FROM {table.ref_sql}
                 {combined_where}
             ), agg AS (
-                SELECT cid, tipo, COUNT(*) AS n
+                SELECT
+                    tipo,
+                    COUNT(*) AS n,
+                    COUNT(DISTINCT cid) AS cids_distintos,
+                    string_agg(DISTINCT cid, ', ' ORDER BY cid) AS cids_encontrados
                 FROM base
-                GROUP BY cid, tipo
+                GROUP BY tipo
             ), with_total AS (
-                SELECT cid, tipo, n, SUM(n) OVER () AS denominador
+                SELECT tipo, n, cids_distintos, cids_encontrados, SUM(n) OVER () AS denominador
                 FROM agg
             )
-            SELECT cid, tipo, n, denominador,
+            SELECT tipo, n, cids_distintos, cids_encontrados, denominador,
                    ROUND(100.0 * n / NULLIF(denominador, 0), 2) AS pct
             FROM with_total
-            ORDER BY n DESC, cid
+            ORDER BY n DESC, tipo
         """
         df = run_query(table, sql)
     else:  # nao_basica
@@ -5469,22 +5481,28 @@ def query_sim_cid_freq_by_role(
                 -- Um mesmo CID-10 conta uma única vez por óbito, mesmo que apareça em
                 -- mais de uma linha da Declaração de Óbito (ex.: repetido em LINHAB e
                 -- LINHAC). CID-10 diferentes em linhas diferentes do mesmo óbito
-                -- continuam gerando uma menção cada um.
+                -- continuam gerando uma menção cada um. A dedup acontece no nível do
+                -- código bruto (caso_id, cid); a agregação abaixo, por `tipo`, soma essas
+                -- menções já deduplicadas — não reintroduz o problema de contagem dupla.
                 SELECT DISTINCT caso_id, cid, tipo
                 FROM all_linhas
                 WHERE cid IS NOT NULL
             ), agg AS (
-                SELECT cid, tipo, COUNT(*) AS n
+                SELECT
+                    tipo,
+                    COUNT(*) AS n,
+                    COUNT(DISTINCT cid) AS cids_distintos,
+                    string_agg(DISTINCT cid, ', ' ORDER BY cid) AS cids_encontrados
                 FROM mencoes_unicas
-                GROUP BY cid, tipo
+                GROUP BY tipo
             ), with_total AS (
-                SELECT cid, tipo, n, SUM(n) OVER () AS denominador
+                SELECT tipo, n, cids_distintos, cids_encontrados, SUM(n) OVER () AS denominador
                 FROM agg
             )
-            SELECT cid, tipo, n, denominador,
+            SELECT tipo, n, cids_distintos, cids_encontrados, denominador,
                    ROUND(100.0 * n / NULLIF(denominador, 0), 2) AS pct
             FROM with_total
-            ORDER BY n DESC, cid
+            ORDER BY n DESC, tipo
         """
         df = run_query(table, sql)
 
@@ -13886,8 +13904,15 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                             orientation="h",
                             text="texto",
                             title=_role_title,
-                            labels={"tipo": "CID-10", "n": _n_label, "pct": "% do total", "cid": "Código CID-10", "denominador": "Total de menções"},
-                            hover_data={"texto": False, "pct": ":.2f", "cid": True, "denominador": True},
+                            labels={
+                                "tipo": "CID-10",
+                                "n": _n_label,
+                                "pct": "% do total",
+                                "cids_encontrados": "Códigos CID-10 agrupados nesta categoria",
+                                "cids_distintos": "Nº de códigos distintos",
+                                "denominador": "Total de menções",
+                            },
+                            hover_data={"texto": False, "pct": ":.2f", "cids_distintos": True, "cids_encontrados": True, "denominador": True},
                         )
                         fig_role.update_layout(
                             yaxis={"categoryorder": "total ascending"},
@@ -13904,9 +13929,12 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                         add_calc_note(
                             "O gráfico lista todos os tipos de CID-10 encontrados no papel selecionado "
                             "(causa básica ou causa não-básica), sem agrupar os menos frequentes em 'Outros "
-                            "CID' — mesmo comportamento do gráfico 'Distribuição por tipo CID-10' do CIHA. A "
-                            "altura do gráfico cresce proporcionalmente à quantidade de tipos distintos "
-                            "exibidos para manter a leitura legível."
+                            "CID' — mesmo comportamento do gráfico 'Distribuição por tipo CID-10' do CIHA. Cada "
+                            "categoria de CID-10 (`tipo`) soma todos os códigos brutos que se enquadram nela "
+                            "(ex.: G030, G031, G038 e G039 contam juntos como 'G03') e gera uma única barra; a "
+                            "lista dos códigos brutos que compõem cada categoria fica disponível ao passar o "
+                            "mouse e na tabela/CSV abaixo. A altura do gráfico cresce proporcionalmente à "
+                            "quantidade de tipos distintos exibidos para manter a leitura legível."
                         )
                         render_plotly_chart(fig_role, calc_title=_role_title)
                         render_interval_total(role_df, value_col="n", value_label=_n_label.lower())
