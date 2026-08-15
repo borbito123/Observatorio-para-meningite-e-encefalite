@@ -525,6 +525,20 @@ def style_plotly_figure(fig: go.Figure) -> go.Figure:
     return fig
 
 
+def cid10_bar_chart_height(n_categories: int, min_height: int = 420, px_per_bar: int = 26, base_padding: int = 160) -> int:
+    """Altura dinâmica para gráficos de barras horizontais que listam CID-10 sem agrupamento.
+
+    Mesma fórmula usada no gráfico "Distribuição por tipo CID-10" do CIHA: a altura cresce
+    proporcionalmente à quantidade de categorias exibidas (26px por barra + 160px de folga
+    para título/eixo), com um piso de 420px para recortes com poucas categorias. Centralizada
+    aqui para que todo gráfico de CID-10 que lista cada tipo individualmente (sem agrupar os
+    menos frequentes em "Outros CID-10") mantenha a mesma leitura legível, independentemente de
+    quantos tipos distintos aparecerem no recorte atual.
+    """
+    n = max(0, int(n_categories or 0))
+    return max(min_height, px_per_bar * n + base_padding)
+
+
 # =============================================================================
 # Transparência de cálculo — "bastidores" de cada gráfico
 # =============================================================================
@@ -5385,63 +5399,12 @@ def query_cid_distribution(table: LoadedTable, exprs: Dict[str, Optional[str]], 
     return df
 
 
-def summarize_cid_distribution_plot(df: pd.DataFrame, top_n: int = 15) -> pd.DataFrame:
-    """Limita o gráfico de distribuição por tipo de CID-10 aos `top_n` tipos com mais
-    registros, somando o restante em uma única categoria 'Outros CID-10 (agrupados)'.
-
-    Sem esse limite, bases com muitos tipos de CID-10 possíveis (caso típico da CIHA)
-    geram um gráfico de barras horizontais com dezenas de categorias, o que deixa a
-    leitura ruim e dificulta identificar qual CID-10 corresponde a qual barra. O eixo
-    do gráfico passa a mostrar apenas o código do grupo CID-10 (coluna `grupo`, ex.:
-    "G03"), curto e sem ambiguidade — a descrição completa (coluna `tipo`) continua
-    disponível no hover. A tabela e o CSV exportados a partir do `df` original (não
-    deste resumo) continuam trazendo a distribuição completa, sem agrupamento.
-    """
-    required = {"grupo", "tipo", "n", "pct"}
-    if df is None or df.empty or not required.issubset(df.columns):
-        return df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
-
-    ordered = df.sort_values("n", ascending=False).reset_index(drop=True)
-    top = ordered.iloc[:top_n].copy()
-    rest = ordered.iloc[top_n:].copy()
-
-    top["grupo_plot"] = top["grupo"]
-    top["tipo_completo"] = top["tipo"]
-
-    if rest.empty:
-        return top
-
-    outros_tipos = _join_unique_text(rest["tipo"])
-    outros: Dict[str, object] = {
-        "grupo": "Outros CID-10",
-        "tipo": "Outros CID-10 (agrupados)",
-        "n": pd.to_numeric(rest["n"], errors="coerce").fillna(0).sum(),
-        "pct": pd.to_numeric(rest["pct"], errors="coerce").fillna(0).sum(),
-        "grupo_plot": f"Outros CID-10 ({len(rest)} tipos)",
-        "tipo_completo": f"Outros CID-10 (agrupados): {outros_tipos}" if outros_tipos else "Outros CID-10 (agrupados)",
-    }
-    if "cids_distintos" in rest.columns:
-        outros["cids_distintos"] = pd.to_numeric(rest["cids_distintos"], errors="coerce").fillna(0).sum()
-    if "cids_encontrados" in rest.columns:
-        outros["cids_encontrados"] = _join_unique_text(rest["cids_encontrados"])
-    if "campos_origem" in rest.columns:
-        outros["campos_origem"] = _join_unique_text(rest["campos_origem"])
-    outros["texto"] = f"{_format_br_int(outros['n'])} ({_format_br_pct(outros['pct'])})"
-
-    top_cols = list(top.columns)
-    for col in top_cols:
-        outros.setdefault(col, None)
-    outros_df = pd.DataFrame([outros])[top_cols]
-    return pd.concat([top, outros_df], ignore_index=True)
-
-
 def query_sim_cid_freq_by_role(
     table: LoadedTable,
     role: str,
     causabas_cid_expr: Optional[str],
     non_basic_cols: List[str],
     where_sql: str,
-    top_n: int = 20,
 ) -> pd.DataFrame:
     """Frequência de CID-10 no SIM por papel: causa básica (CAUSABAS) ou causa não-básica (LINHAA–LINHAII).
 
@@ -5451,10 +5414,12 @@ def query_sim_cid_freq_by_role(
     causabas_cid_expr : expressão SQL que extrai o CID de CAUSABAS.
     non_basic_cols : nomes das colunas das linhas da DO (LINHAA, LINHAB, …).
     where_sql : cláusula WHERE já com os filtros ativos.
-    top_n : número de CID-10 a exibir individualmente; restantes → 'Outros CID'.
-    """
-    top_n = max(1, int(top_n or 20))
 
+    Traz todos os CID-10 encontrados no recorte, sem limitar a um número fixo de tipos nem
+    somar o restante em uma categoria genérica "Outros CID" — mesmo comportamento do gráfico
+    "Distribuição por tipo CID-10" do CIHA. Cada CID-10 que aparece recebe sua própria linha
+    (e, no gráfico, sua própria barra).
+    """
     if role == "basica":
         if not causabas_cid_expr:
             return pd.DataFrame()
@@ -5474,25 +5439,11 @@ def query_sim_cid_freq_by_role(
             ), with_total AS (
                 SELECT cid, tipo, n, SUM(n) OVER () AS denominador
                 FROM agg
-            ), ranked AS (
-                SELECT *, ROW_NUMBER() OVER (ORDER BY n DESC, cid) AS rn
-                FROM with_total
-            ), final AS (
-                SELECT
-                    CASE WHEN rn <= {top_n} THEN cid ELSE 'Outros CID' END AS cid,
-                    CASE WHEN rn <= {top_n} THEN tipo ELSE 'Outros CID' END AS tipo,
-                    SUM(n) AS n,
-                    MAX(denominador) AS denominador,
-                    MIN(rn) AS ordem
-                FROM ranked
-                GROUP BY
-                    CASE WHEN rn <= {top_n} THEN cid ELSE 'Outros CID' END,
-                    CASE WHEN rn <= {top_n} THEN tipo ELSE 'Outros CID' END
             )
             SELECT cid, tipo, n, denominador,
                    ROUND(100.0 * n / NULLIF(denominador, 0), 2) AS pct
-            FROM final
-            ORDER BY ordem, n DESC
+            FROM with_total
+            ORDER BY n DESC, cid
         """
         df = run_query(table, sql)
     else:  # nao_basica
@@ -5529,25 +5480,11 @@ def query_sim_cid_freq_by_role(
             ), with_total AS (
                 SELECT cid, tipo, n, SUM(n) OVER () AS denominador
                 FROM agg
-            ), ranked AS (
-                SELECT *, ROW_NUMBER() OVER (ORDER BY n DESC, cid) AS rn
-                FROM with_total
-            ), final AS (
-                SELECT
-                    CASE WHEN rn <= {top_n} THEN cid ELSE 'Outros CID' END AS cid,
-                    CASE WHEN rn <= {top_n} THEN tipo ELSE 'Outros CID' END AS tipo,
-                    SUM(n) AS n,
-                    MAX(denominador) AS denominador,
-                    MIN(rn) AS ordem
-                FROM ranked
-                GROUP BY
-                    CASE WHEN rn <= {top_n} THEN cid ELSE 'Outros CID' END,
-                    CASE WHEN rn <= {top_n} THEN tipo ELSE 'Outros CID' END
             )
             SELECT cid, tipo, n, denominador,
                    ROUND(100.0 * n / NULLIF(denominador, 0), 2) AS pct
-            FROM final
-            ORDER BY ordem, n DESC
+            FROM with_total
+            ORDER BY n DESC, cid
         """
         df = run_query(table, sql)
 
@@ -13677,19 +13614,19 @@ casos de indivíduos com até 2 anos (≤ 24 meses)."
         else:
             obitos_modalidade = pd.DataFrame()
 
-        letalidade_df = ind[["ano", "mortes_administrativas", "atendimentos", "pct_morte_administrativa"]].copy()
-        letalidade_df = letalidade_df[pd.to_numeric(letalidade_df["atendimentos"], errors="coerce").fillna(0).gt(0)]
-        if not letalidade_df.empty:
-            letalidade_df["texto_letalidade"] = [br_pct(v) for v in letalidade_df["pct_morte_administrativa"]]
+        mortalidade_df = ind[["ano", "mortes_administrativas", "atendimentos", "pct_morte_administrativa"]].copy()
+        mortalidade_df = mortalidade_df[pd.to_numeric(mortalidade_df["atendimentos"], errors="coerce").fillna(0).gt(0)]
+        if not mortalidade_df.empty:
+            mortalidade_df["texto_mortalidade"] = [br_pct(v) for v in mortalidade_df["pct_morte_administrativa"]]
 
-        if obitos_modalidade.empty and letalidade_df.empty:
-            st.info("Sem dados suficientes para o gráfico de óbitos CIHA por modalidade e letalidade no recorte atual.")
+        if obitos_modalidade.empty and mortalidade_df.empty:
+            st.info("Sem dados suficientes para o gráfico de óbitos CIHA por modalidade e mortalidade no recorte atual.")
         else:
-            st.markdown("**Óbitos CIHA por ano — modalidade do atendimento e letalidade**")
+            st.markdown("**Óbitos CIHA por ano — modalidade do atendimento e mortalidade**")
             if obitos_modalidade.empty:
                 st.info(
                     "Para separar os óbitos entre atendimento hospitalar e ambulatorial, os campos de data e "
-                    "MODALIDADE precisam existir na CIHA e ser detectados automaticamente. O painel de letalidade "
+                    "MODALIDADE precisam existir na CIHA e ser detectados automaticamente. O painel de mortalidade "
                     "abaixo continua sendo exibido normalmente."
                 )
 
@@ -13731,22 +13668,22 @@ casos de indivíduos com até 2 anos (≤ 24 meses)."
                     )
                 fig_obitos_ciha.update_layout(barmode="stack")
 
-            if not letalidade_df.empty:
+            if not mortalidade_df.empty:
                 fig_obitos_ciha.add_trace(
                     go.Scatter(
-                        x=letalidade_df["ano"],
-                        y=letalidade_df["pct_morte_administrativa"],
+                        x=mortalidade_df["ano"],
+                        y=mortalidade_df["pct_morte_administrativa"],
                         mode="lines+markers+text",
-                        name="Letalidade — óbitos/atendimentos CIHA",
-                        legendgroup="letalidade",
-                        legendgrouptitle_text="Letalidade",
-                        text=letalidade_df["texto_letalidade"],
+                        name="Mortalidade — óbitos/atendimentos CIHA",
+                        legendgroup="mortalidade",
+                        legendgrouptitle_text="Mortalidade",
+                        text=mortalidade_df["texto_mortalidade"],
                         textposition="top center",
                         line={"color": "#000000", "dash": "dash"},
                         marker={"color": "#000000"},
-                        customdata=np.stack([letalidade_df["mortes_administrativas"], letalidade_df["atendimentos"]], axis=-1),
+                        customdata=np.stack([mortalidade_df["mortes_administrativas"], mortalidade_df["atendimentos"]], axis=-1),
                         hovertemplate=(
-                            "Ano %{x}<br>Letalidade: %{y:.2f}%<br>"
+                            "Ano %{x}<br>Mortalidade: %{y:.2f}%<br>"
                             "Óbitos (MORTE = 1): %{customdata[0]}<br>"
                             "Atendimentos: %{customdata[1]}<extra></extra>"
                         ),
@@ -13755,42 +13692,43 @@ casos de indivíduos com até 2 anos (≤ 24 meses)."
                     col=1,
                 )
 
-            fig_obitos_ciha.update_layout(title="Óbitos CIHA por ano, modalidade do atendimento e letalidade", legend={"groupclick": "togglegroup"})
+            fig_obitos_ciha.update_layout(title="Óbitos CIHA por ano, modalidade do atendimento e mortalidade", legend={"groupclick": "togglegroup"})
             fig_obitos_ciha.update_xaxes(title_text="Ano", row=2, col=1)
             fig_obitos_ciha.update_yaxes(title_text="Óbitos por modalidade (MORTE = 1)", row=1, col=1)
-            fig_obitos_ciha.update_yaxes(title_text="Letalidade (%)", ticksuffix="%", row=2, col=1)
+            fig_obitos_ciha.update_yaxes(title_text="Mortalidade (%)", ticksuffix="%", row=2, col=1)
             fig_obitos_ciha.add_annotation(
                 text="Modalidade do atendimento (hospitalar vs. ambulatorial)",
                 xref="paper", yref="paper", x=0, y=1.0, xanchor="left", yanchor="bottom",
                 showarrow=False, font={"size": 12, "color": DARK_GRAY},
             )
             st.caption(
-                "**Letalidade**, aqui, é a proporção de óbitos administrativos (`MORTE = 1`) sobre o total de "
+                "**Mortalidade**, aqui, é a proporção de óbitos administrativos (`MORTE = 1`) sobre o total de "
                 "atendimentos/internações informados à CIHA no mesmo ano (100 × mortes administrativas / "
                 "atendimentos) — a mesma taxa já mostrada como percentual no gráfico 'Atendimentos e mortes "
-                "administrativas', mais acima. Não é a letalidade clínica clássica (óbitos / casos confirmados) "
-                "usada no SINAN, pois a CIHA não confirma diagnóstico — ela mede utilização de serviço. "
+                "administrativas', mais acima. Não é a letalidade clínica clássica (óbitos / casos confirmados "
+                "da doença) usada no SINAN, pois a CIHA não confirma diagnóstico — ela mede utilização de "
+                "serviço, e o denominador aqui é o total de atendimentos, não os casos confirmados. "
                 "O painel superior mostra apenas os óbitos, separados entre atendimento hospitalar e "
-                "ambulatorial; o painel inferior traz a letalidade isolada, para não misturar escala de "
+                "ambulatorial; o painel inferior traz a mortalidade isolada, para não misturar escala de "
                 "contagem com percentual."
             )
             disable_death_red(fig_obitos_ciha)
             preserve_trace_colors(fig_obitos_ciha)
             add_calc_note(
                 "Painel superior: óbitos (MORTE = 1) por ano e modalidade, via query_yearly_category filtrada "
-                "por MORTE = 1. Painel inferior: letalidade = pct_morte_administrativa "
+                "por MORTE = 1. Painel inferior: mortalidade = pct_morte_administrativa "
                 "(100 × mortes_administrativas / atendimentos), já calculada em SQL por query_ciha_indicators "
                 "e reaproveitada do indicador 'Atendimentos e mortes administrativas', mais acima nesta página "
                 "— por isso a consulta SQL não é repetida aqui."
             )
-            render_plotly_chart(fig_obitos_ciha, calc_title="Óbitos CIHA por ano, modalidade e letalidade")
+            render_plotly_chart(fig_obitos_ciha, calc_title="Óbitos CIHA por ano, modalidade e mortalidade")
             if not obitos_modalidade.empty:
                 render_interval_total(obitos_modalidade, value_col="n", by_col="categoria", value_label="óbitos")
                 copyable_dataframe(obitos_modalidade, width="stretch", hide_index=True)
                 download_button(obitos_modalidade, "ciha_obitos_por_modalidade_ano.csv")
-            if not letalidade_df.empty:
-                copyable_dataframe(letalidade_df.drop(columns=["texto_letalidade"]), width="stretch", hide_index=True)
-                download_button(letalidade_df.drop(columns=["texto_letalidade"]), "ciha_letalidade_por_ano.csv")
+            if not mortalidade_df.empty:
+                copyable_dataframe(mortalidade_df.drop(columns=["texto_mortalidade"]), width="stretch", hide_index=True)
+                download_button(mortalidade_df.drop(columns=["texto_mortalidade"]), "ciha_mortalidade_por_ano.csv")
 
     dias_dist = query_ciha_dias_perm_distribution(table, exprs, base_where)
     if not dias_dist.empty:
@@ -13852,6 +13790,7 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                     cid_dist_plot,
                     x="n",
                     y="grupo_plot",
+                    color="grupo_plot",
                     orientation="h",
                     text="texto",
                     title="Distribuição por tipo CID-10",
@@ -13860,14 +13799,23 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                 )
                 fig.update_layout(
                     yaxis={"categoryorder": "total ascending"},
-                    height=max(420, 26 * len(cid_dist_plot) + 160),
+                    height=cid10_bar_chart_height(len(cid_dist_plot)),
+                    showlegend=False,
                 )
+                # Mesma lógica de "CID-10 mais frequentes por papel na Declaração de Óbito":
+                # cor por categoria de CID-10 aciona a regra global de vermelho para óbito/letalidade/
+                # mortalidade quando há só 1 tipo no recorte, então desativamos essa regra aqui e
+                # preservamos as cores por CID-10 atribuídas pelo Plotly.
+                disable_death_red(fig)
+                preserve_trace_colors(fig)
                 add_calc_note(
                     "O gráfico lista todos os tipos de CID-10 (`grupo`) encontrados no recorte atual, sem "
                     "agrupar os menos frequentes em 'Outros CID-10' — a altura do gráfico cresce "
-                    "proporcionalmente à quantidade de tipos distintos para manter a leitura legível. O eixo "
-                    "mostra só o código do CID-10 — a descrição completa aparece ao passar o mouse e na tabela "
-                    "de referência acima. A tabela e o CSV abaixo trazem a mesma distribuição completa."
+                    "proporcionalmente à quantidade de tipos distintos para manter a leitura legível. Cada "
+                    "tipo de CID-10 recebe uma cor própria, como no gráfico 'CID-10 mais frequentes por papel "
+                    "na Declaração de Óbito'; a legenda é omitida porque o eixo já identifica cada código. O "
+                    "eixo mostra só o código do CID-10 — a descrição completa aparece ao passar o mouse e na "
+                    "tabela de referência acima. A tabela e o CSV abaixo trazem a mesma distribuição completa."
                 )
                 render_plotly_chart(fig, calc_title="Distribuição por tipo CID-10")
                 render_interval_total(cid_dist, value_col="n")
@@ -13910,7 +13858,6 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                         causabas_cid,
                         non_basic_cols,
                         graph_where,
-                        top_n=20,
                     )
                     if role_df.empty:
                         st.info("Sem dados suficientes para tabular CID-10 por papel com os filtros atuais.")
@@ -13942,7 +13889,11 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                             labels={"tipo": "CID-10", "n": _n_label, "pct": "% do total", "cid": "Código CID-10", "denominador": "Total de menções"},
                             hover_data={"texto": False, "pct": ":.2f", "cid": True, "denominador": True},
                         )
-                        fig_role.update_layout(yaxis={"categoryorder": "total ascending"}, showlegend=False)
+                        fig_role.update_layout(
+                            yaxis={"categoryorder": "total ascending"},
+                            height=cid10_bar_chart_height(len(role_df)),
+                            showlegend=False,
+                        )
                         # O título deste gráfico contém "óbito", o que aciona a regra global
                         # de forçar vermelho em gráficos de óbito/letalidade quando há apenas
                         # 1 categoria (traço) — típico de "causa básica", que costuma
@@ -13950,6 +13901,13 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                         # todas as barras saíam com a mesma cor (vermelha) em vez da cor por CID-10.
                         disable_death_red(fig_role)
                         preserve_trace_colors(fig_role)
+                        add_calc_note(
+                            "O gráfico lista todos os tipos de CID-10 encontrados no papel selecionado "
+                            "(causa básica ou causa não-básica), sem agrupar os menos frequentes em 'Outros "
+                            "CID' — mesmo comportamento do gráfico 'Distribuição por tipo CID-10' do CIHA. A "
+                            "altura do gráfico cresce proporcionalmente à quantidade de tipos distintos "
+                            "exibidos para manter a leitura legível."
+                        )
                         render_plotly_chart(fig_role, calc_title=_role_title)
                         render_interval_total(role_df, value_col="n", value_label=_n_label.lower())
                         _role_export = role_df.drop(columns=["texto"], errors="ignore")
@@ -13992,7 +13950,10 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                                 labels={"tipo": "Tipo CID-10", "n": "Óbitos CIHA", "pct": "% dos óbitos"},
                                 hover_data={"texto": False, "pct": ":.2f", "cids_encontrados": True, "campos_origem": True},
                             )
-                            fig_death.update_layout(yaxis={"categoryorder": "total ascending"})
+                            fig_death.update_layout(
+                                yaxis={"categoryorder": "total ascending"},
+                                height=cid10_bar_chart_height(len(death_cid)),
+                            )
                             render_plotly_chart(fig_death, calc_title="CID-10 dos registros com morte administrativa")
                             render_interval_total(death_cid, value_col="n", value_label="óbitos CIHA")
                             copyable_dataframe(death_cid, width="stretch", hide_index=True)
@@ -14027,7 +13988,10 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                             "campos_origem": True,
                         },
                     )
-                    fig_conv.update_layout(yaxis={"categoryorder": "total ascending"})
+                    fig_conv.update_layout(
+                        yaxis={"categoryorder": "total ascending"},
+                        height=cid10_bar_chart_height(len(conv_adequacy_plot)),
+                    )
                     add_calc_note(
                         "A consulta SQL abaixo traz o detalhe por CID-10 original. O passo em pandas "
                         "(summarize_cid10_adequacy_plot: groupby por CID-10 adequado final) soma os códigos "
@@ -14501,7 +14465,10 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                 labels={"cid10_classificacao": "CID-10 convertido", "n": "Confirmados", "pct": "%"},
                 hover_data={"texto": False, "pct": ":.2f", "denominador": True, "grupos_sinan": True, "conclusoes_sinan": True},
             )
-            fig_conv.update_layout(yaxis={"categoryorder": "total ascending"})
+            fig_conv.update_layout(
+                yaxis={"categoryorder": "total ascending"},
+                height=cid10_bar_chart_height(len(conv_yes)),
+            )
             render_plotly_chart(fig_conv, calc_title="Classificação etiológica convertida para CID-10")
             render_interval_total(conv_yes, value_col="n", value_label="confirmados")
 
