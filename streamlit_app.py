@@ -68,7 +68,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-09-01-v80-metodo-unico-resultados-validos"
+APP_VERSION = "2026-09-02-v81-completude-quadros-raincloud"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos
@@ -5802,7 +5802,7 @@ def make_weighted_raincloud_halfeye(
             x=rain_values,
             y=baseline - rain_offsets,
             mode="markers",
-            marker={"color": color, "size": 4, "opacity": 0.30},
+            marker={"color": color, "size": 5, "opacity": 0.34},
             name=f"{group} — observações",
             legendgroup=group,
             showlegend=False,
@@ -5833,10 +5833,14 @@ def make_weighted_raincloud_halfeye(
             "title": "Grupo",
             "zeroline": False,
         },
-        height=max(420, 235 * max(1, len(groups_present))),
+        height=max(560, 315 * max(1, len(groups_present))),
         showlegend=False,
         hovermode="closest",
     )
+    fig.update_xaxes(tickfont={"size": 13}, title_font={"size": 14}, automargin=True)
+    fig.update_yaxes(tickfont={"size": 13}, title_font={"size": 14}, automargin=True)
+    if lower_bound is not None and upper_bound is not None:
+        fig.update_xaxes(range=[float(lower_bound), float(upper_bound)])
     return fig, pd.DataFrame(summary_rows), sampled_rain
 
 
@@ -15234,7 +15238,46 @@ def query_sinan_sheet_column_completeness(
         ORDER BY CASE status_preenchimento WHEN 'Válida' THEN 1 WHEN 'Vazia' THEN 2 ELSE 3 END,
                  n DESC, categoria
     """
-    return run_query(table, sql)
+    result = run_query(table, sql)
+    if result.empty:
+        return result
+
+    # O SQL acima resume apenas categorias observadas. Para a auditoria de
+    # completude, porém, o gráfico deve mostrar TODO o domínio oficial do quadro
+    # correspondente, inclusive possibilidades com contagem zero. Isso evita que
+    # códigos válidos (p.ex. 03/08/28 na bacterioscopia) desapareçam visualmente
+    # apenas porque não ocorreram no recorte atual.
+    total_elegivel = int(pd.to_numeric(result["total_elegivel"], errors="coerce").max() or 0)
+    total_validamente_preenchido = int(
+        pd.to_numeric(result["total_validamente_preenchido"], errors="coerce").max() or 0
+    )
+    observed = {str(row.categoria): row for row in result.itertuples(index=False)}
+    expanded_rows: List[Dict[str, object]] = []
+
+    def append_category(categoria: str, status: str) -> None:
+        row = observed.get(categoria)
+        n = int(getattr(row, "n", 0) or 0) if row is not None else 0
+        pct_valid = (
+            round(100.0 * n / total_validamente_preenchido, 2)
+            if status == "Válida" and total_validamente_preenchido > 0
+            else np.nan
+        )
+        pct_total = round(100.0 * n / total_elegivel, 2) if total_elegivel > 0 else np.nan
+        expanded_rows.append({
+            "categoria": categoria,
+            "status_preenchimento": status,
+            "n": n,
+            "total_elegivel": total_elegivel,
+            "total_validamente_preenchido": total_validamente_preenchido,
+            "pct_entre_validamente_preenchidos": pct_valid,
+            "pct_total_elegivel": pct_total,
+        })
+
+    for code, label in mapping.items():
+        append_category(f"{code} — {label}", "Válida")
+    append_category("Célula vazia", "Vazia")
+    append_category("Valor fora do dicionário", "Fora do dicionário")
+    return pd.DataFrame(expanded_rows)
 
 
 def query_sinan_sheet_column_errors(
@@ -15627,6 +15670,62 @@ def query_sinan_lcr_raincloud_frequency(
         WHERE grupo IS NOT NULL AND valor IS NOT NULL AND valor >= 0
         GROUP BY 1, 2
         ORDER BY grupo, valor
+    """
+    return run_query(table, sql)
+
+
+def query_sinan_lcr_aberrant_cases(
+    table: LoadedTable,
+    exprs: Dict[str, Optional[str]],
+    where_sql: str,
+    parameter_label: str,
+    upper_bound: float,
+) -> pd.DataFrame:
+    """Lista valores acima do limite operacional exibido no raincloud.
+
+    Os registros não são corrigidos nem descartados do arquivo-fonte. A tabela
+    existe justamente para tornar visíveis os valores que ficam fora do eixo
+    solicitado (0-100% para diferenciais celulares; 0-999 mg/dL para glicose).
+    """
+    param_key = SINAN_LCR_COMPLETENESS_PARAMS.get(parameter_label)
+    raw_expr = _sinan_lcr_completeness_param_expr(exprs, parameter_label)
+    value_expr = exprs.get(f"lab_{param_key}") if param_key else None
+    classi_expr = exprs.get("classi_raw") or exprs.get("classi_code")
+    if not param_key or not raw_expr or not value_expr or not classi_expr:
+        return pd.DataFrame()
+    identifiers = _sinan_sheet_identifier_select(exprs)
+    field_name = str(SINAN_QUIMIO_PARAMS.get(param_key, {}).get("default_col", param_key))
+    group_sql = f"""
+        CASE
+            WHEN ({classi_expr}) = '1' THEN 'Casos confirmados'
+            WHEN ({classi_expr}) = '2' THEN 'Casos descartados'
+            ELSE NULL
+        END
+    """
+    sql = f"""
+        WITH fonte AS (
+            SELECT ROW_NUMBER() OVER () AS __linha_fonte, *
+            FROM {table.ref_sql}
+        ), avaliados AS (
+            SELECT __linha_fonte AS linha_fonte,
+                   {qstr(loaded_table_origin_format(table))} AS formato_origem,
+                   {qstr(table.label or table.source)} AS origem,
+                   {identifiers},
+                   {group_sql} AS grupo,
+                   {raw_expr} AS valor_informado,
+                   ({value_expr}) AS valor_numerico
+            FROM fonte
+            {where_sql}
+        )
+        SELECT linha_fonte, formato_origem, origem, NU_NOTIFIC, NM_PACIENT,
+               CLASSI_FIN, CON_DIAGES, grupo,
+               {qstr(field_name)} AS campo, valor_informado, valor_numerico,
+               {float(upper_bound)} AS limite_maximo_exibido
+        FROM avaliados
+        WHERE grupo IS NOT NULL
+          AND valor_numerico IS NOT NULL
+          AND valor_numerico > {float(upper_bound)}
+        ORDER BY valor_numerico DESC, linha_fonte
     """
     return run_query(table, sql)
 
@@ -16460,6 +16559,19 @@ def render_detailed_lcr_analysis_tab(
                 continue
             coverage = query_sinan_lcr_parameter_coverage(table, exprs, rain_where, rain_label)
             frequency = query_sinan_lcr_raincloud_frequency(table, exprs, rain_where, rain_label)
+            fixed_upper_bound = {
+                "glico": 999.0,
+                "neutro": 100.0,
+                "linfo": 100.0,
+                "eosi": 100.0,
+            }.get(rain_param_key)
+            aberrant_df = (
+                query_sinan_lcr_aberrant_cases(
+                    table, exprs, rain_where, rain_label, fixed_upper_bound
+                )
+                if fixed_upper_bound is not None
+                else pd.DataFrame()
+            )
             if coverage.empty:
                 st.info("Não há casos confirmados ou descartados com punção no recorte atual.")
                 continue
@@ -16482,8 +16594,43 @@ def render_detailed_lcr_analysis_tab(
             else:
                 st.caption("Preenchimento do parâmetro — " + coverage_text)
             copyable_dataframe(coverage, width="stretch", hide_index=True)
+
+            if fixed_upper_bound is not None:
+                if not aberrant_df.empty:
+                    if rain_param_key in {"neutro", "linfo", "eosi"}:
+                        limit_text = "100%"
+                        warning_text = (
+                            f"⚠️ ATENÇÃO: foram encontrados {format_int_br(len(aberrant_df))} caso(s) com "
+                            f"{rain_label.lower()} acima de {limit_text}. Esses valores são incompatíveis com uma "
+                            "proporção percentual e foram retirados apenas do raincloud; permanecem preservados no banco "
+                            "e estão listados integralmente abaixo."
+                        )
+                    else:
+                        limit_text = "999 mg/dL"
+                        warning_text = (
+                            f"⚠️ ATENÇÃO: foram encontrados {format_int_br(len(aberrant_df))} caso(s) com "
+                            f"{rain_label.lower()} acima de {limit_text}. O raincloud é limitado a 0-999 mg/dL; "
+                            "os valores acima desse teto não são alterados no banco e estão listados integralmente abaixo."
+                        )
+                    st.error(warning_text)
+                    copyable_dataframe(aberrant_df, width="stretch", hide_index=True)
+                    download_button(
+                        aberrant_df,
+                        f"sinan_lcr_{rain_param_key}_casos_aberrantes.csv",
+                        label="Baixar casos aberrantes (CSV)",
+                        max_rows=len(aberrant_df),
+                    )
+                else:
+                    st.success(
+                        f"Nenhum caso acima do limite de {format_int_br(int(fixed_upper_bound))}"
+                        + ("%" if rain_param_key in {"neutro", "linfo", "eosi"} else " mg/dL")
+                        + " foi encontrado no recorte atual."
+                    )
+                if not frequency.empty:
+                    frequency = frequency[pd.to_numeric(frequency["valor"], errors="coerce") <= fixed_upper_bound].copy()
+
             if frequency.empty:
-                st.info("Não há valores numéricos válidos para gerar o raincloud deste parâmetro.")
+                st.info("Não há valores numéricos dentro do intervalo exibido para gerar o raincloud deste parâmetro.")
                 continue
             unit = meta_rain.unidade if meta_rain else "valor registrado"
             title_rain = f"Raincloud half-eye de {rain_label.lower()} — confirmados e descartados"
@@ -16497,6 +16644,7 @@ def render_detailed_lcr_analysis_tab(
                 summary_prefix=rain_param_key,
                 unit_suffix=f" {unit}",
                 lower_bound=0.0,
+                upper_bound=fixed_upper_bound,
             )
             render_plotly_chart(fig_rain, calc_title=title_rain)
             if sampled_rain:
@@ -16594,8 +16742,9 @@ def render_spreadsheet_analysis_tab(
             category_order = completeness_df["categoria"].tolist()
             fig_complete = px.bar(
                 completeness_df,
-                x="categoria",
-                y="n",
+                x="n",
+                y="categoria",
+                orientation="h",
                 color="status_preenchimento",
                 text="texto",
                 title=f"Completude e conteúdo de {selected_method} — {completeness_group.lower()}",
@@ -16615,13 +16764,21 @@ def render_spreadsheet_analysis_tab(
                     "pct_entre_validamente_preenchidos": ":.2f",
                     "pct_total_elegivel": ":.2f",
                 },
-                category_orders={"categoria": category_order, "status_preenchimento": ["Válida", "Vazia", "Fora do dicionário"]},
+                category_orders={"status_preenchimento": ["Válida", "Vazia", "Fora do dicionário"]},
                 color_discrete_map={"Válida": PLOTLY_DEFAULT_BLUE, "Vazia": "#7F7F7F", "Fora do dicionário": "#D62728"},
             )
-            fig_complete.update_xaxes(tickangle=-35)
+            fig_complete.update_yaxes(
+                categoryorder="array",
+                categoryarray=list(reversed(category_order)),
+                automargin=True,
+                tickfont={"size": 12},
+            )
+            fig_complete.update_xaxes(automargin=True)
+            fig_complete.update_layout(height=max(560, 36 * len(category_order) + 190))
             fig_complete.update_traces(textposition="outside", cliponaxis=False)
             render_plotly_chart(fig_complete, calc_title=f"Completude de {selected_method}")
             st.caption(
+                "Todas as possibilidades previstas no quadro oficial correspondente são exibidas, inclusive categorias com contagem zero. "
                 "Para códigos válidos, a porcentagem usa exclusivamente as células validamente preenchidas como denominador. "
                 "Para ‘Célula vazia’ e ‘Valor fora do dicionário’, a porcentagem usa todos os casos elegíveis, "
                 "pois essas células não podem integrar o denominador dos valores válidos."
