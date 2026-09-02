@@ -68,7 +68,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-09-02-v81-completude-quadros-raincloud"
+APP_VERSION = "2026-09-02-v82-analise-bacteriologica"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos
@@ -16669,6 +16669,265 @@ def render_detailed_lcr_analysis_tab(
             )
 
 
+def query_sinan_bacteriology_cases(
+    table: LoadedTable,
+    exprs: Dict[str, Optional[str]],
+    where_sql: str,
+    diagnosis_codes: Sequence[str],
+    *,
+    include_bacteria_specification: bool = False,
+) -> pd.DataFrame:
+    """Lista caso a caso diagnósticos bacterianos definidos por CON_DIAGES.
+
+    A seleção diagnóstica replica a mesma fonte do gráfico "Conclusão diagnóstica
+    entre casos confirmados": CLASSI_FIN=1 e CON_DIAGES. Para meningites por
+    outras bactérias (CON_DIAGES=05), CLA_ME_BAC é acrescentado para discriminar
+    o agente do Quadro II. O arquivo de origem nunca é alterado.
+    """
+    con_code = exprs.get("con_code")
+    con_label = exprs.get("con_label")
+    if not con_code or not con_label:
+        return pd.DataFrame()
+
+    codes_sql = ", ".join(qstr(str(code).zfill(2)) for code in diagnosis_codes)
+    identifiers = _sinan_sheet_identifier_select(exprs)
+    bac_code = exprs.get("cla_me_bac_code")
+    bac_label = exprs.get("cla_me_bac_label")
+    bac_code_select = bac_code or "CAST(NULL AS VARCHAR)"
+    bac_label_select = bac_label or "CAST(NULL AS VARCHAR)"
+    where_diag = append_clause(where_sql, f"{con_code} IN ({codes_sql})")
+
+    sql = f"""
+        WITH fonte AS (
+            SELECT ROW_NUMBER() OVER () AS __linha_fonte, *
+            FROM {table.ref_sql}
+        ), casos AS (
+            SELECT __linha_fonte AS linha_fonte,
+                   {qstr(loaded_table_origin_format(table))} AS formato_origem,
+                   {qstr(table.label or table.source)} AS origem,
+                   {identifiers},
+                   {con_code} AS CON_DIAGES_CODIGO,
+                   {con_label} AS conclusao_diagnostica,
+                   {bac_code_select} AS CLA_ME_BAC_CODIGO,
+                   {bac_label_select} AS bacteria_especificada
+            FROM fonte
+            {where_diag}
+        )
+        SELECT *
+        FROM casos
+        ORDER BY
+            CASE WHEN bacteria_especificada IS NULL THEN 1 ELSE 0 END,
+            bacteria_especificada,
+            NU_NOTIFIC,
+            NM_PACIENT,
+            linha_fonte
+    """
+    result = run_query(table, sql)
+    if result.empty:
+        return result
+    if not include_bacteria_specification:
+        result = result.drop(columns=["CLA_ME_BAC_CODIGO", "bacteria_especificada"], errors="ignore")
+    return result
+
+
+def render_bacteriological_analysis_tab(
+    table: LoadedTable,
+    exprs: Dict[str, Optional[str]],
+    base_where: str,
+) -> None:
+    """Análise bacteriológica centrada em CLASSI_FIN/CON_DIAGES e CLA_ME_BAC."""
+    st.markdown("### Análise bacteriológica")
+    st.info(
+        "Esta seção replica a lógica de **Conclusão diagnóstica entre casos confirmados**: primeiro restringe "
+        "a `CLASSI_FIN = 1` e, em seguida, usa `CON_DIAGES` para definir o diagnóstico. Para `CON_DIAGES = 05` "
+        "(meningite por outras bactérias), `CLA_ME_BAC` discrimina a bactéria conforme o Quadro II do dicionário SINAN. "
+        "As tabelas preservam `NU_NOTIFIC`, nome do paciente e a linha devolvida pela leitura para facilitar a localização "
+        "do registro no Parquet, CSV, DBF ou DuckDB carregado."
+    )
+
+    classi_code = exprs.get("classi_code")
+    con_code = exprs.get("con_code")
+    con_label = exprs.get("con_label")
+    if not classi_code or not con_code or not con_label:
+        st.warning(
+            "A análise bacteriológica exige que CLASSI_FIN e CON_DIAGES sejam detectados. "
+            "Revise a configuração de colunas da base SINAN."
+        )
+        return
+
+    confirmed_where = append_clause(base_where, f"{classi_code} = '1'")
+
+    def br_int(value: object) -> str:
+        if pd.isna(value):
+            return "—"
+        return f"{int(value):,}".replace(",", ".")
+
+    def br_pct(value: object) -> str:
+        if pd.isna(value):
+            return "—"
+        return f"{float(value):.2f}%".replace(".", ",")
+
+    def add_text(df: pd.DataFrame, pct_col: str = "pct") -> pd.DataFrame:
+        out = df.copy()
+        out["texto"] = [
+            f"{br_int(n)} ({br_pct(pct)})"
+            for n, pct in zip(out["n"], out[pct_col])
+        ]
+        return out
+
+    st.markdown("#### Conclusão diagnóstica entre casos confirmados")
+    con_coverage_df = query_field_coverage(table, con_code, confirmed_where)
+    con_coverage_text = coverage_subtitle_from_df(con_coverage_df) if not con_coverage_df.empty else ""
+    conclusao_df = query_category(table, con_label, confirmed_where, top_n=40)
+    if conclusao_df.empty:
+        st.info("Não há casos confirmados suficientes para tabular CON_DIAGES no recorte atual.")
+    else:
+        conclusao_df = add_text(conclusao_df)
+        fig_conclusao = px.bar(
+            conclusao_df,
+            x="n",
+            y="categoria",
+            orientation="h",
+            text="texto",
+            title="Conclusão diagnóstica entre casos confirmados"
+            + (f"<br><sup>{con_coverage_text}</sup>" if con_coverage_text else ""),
+            labels={
+                "categoria": "Conclusão diagnóstica",
+                "n": "Casos confirmados",
+                "pct": "% dos confirmados",
+            },
+            hover_data={"texto": False, "pct": ":.2f"},
+        )
+        fig_conclusao.update_layout(yaxis={"categoryorder": "total ascending"})
+        render_field_completeness_warning(con_coverage_df, "CON_DIAGES (conclusão diagnóstica)")
+        render_plotly_chart(fig_conclusao, calc_title="Conclusão diagnóstica entre casos confirmados")
+        st.caption(
+            "Mesma definição usada na análise etiológica: prevalência das categorias de CON_DIAGES exclusivamente "
+            "entre registros com CLASSI_FIN=1."
+        )
+        render_interval_total(conclusao_df, value_col="n", value_label="casos confirmados")
+        copyable_dataframe(conclusao_df, width="stretch", hide_index=True)
+        download_button(conclusao_df, "sinan_bacteriologia_conclusao_diagnostica_confirmados.csv")
+
+    st.markdown("#### Especificação de meningite por outras bactérias")
+    bac_label = exprs.get("cla_me_bac_label")
+    bac_code = exprs.get("cla_me_bac_code")
+    other_bacteria_where = append_clause(confirmed_where, f"{con_code} = '05'")
+    total_confirmados = count_rows(table, confirmed_where)
+    total_outras_bacterias = count_rows(table, other_bacteria_where)
+
+    if not bac_label:
+        st.warning(
+            "CLA_ME_BAC não foi detectado. É possível identificar CON_DIAGES=05, mas não discriminar as bactérias do Quadro II."
+        )
+    elif total_outras_bacterias <= 0:
+        st.info("Nenhum caso confirmado com CON_DIAGES=05 (meningite por outras bactérias) no recorte atual.")
+    else:
+        bacteria_df = query_category(table, bac_label, other_bacteria_where, top_n=40)
+        if not bacteria_df.empty:
+            bacteria_df = bacteria_df.copy()
+            bacteria_df["pct_confirmados"] = (
+                (bacteria_df["n"] / total_confirmados * 100).round(2)
+                if total_confirmados
+                else np.nan
+            )
+            bacteria_df["texto"] = [
+                f"{br_int(n)} ({br_pct(pct_g)} do grupo; {br_pct(pct_c)} dos confirmados)"
+                for n, pct_g, pct_c in zip(
+                    bacteria_df["n"], bacteria_df["pct"], bacteria_df["pct_confirmados"]
+                )
+            ]
+            bac_coverage_df = query_field_coverage(table, bac_code, other_bacteria_where) if bac_code else pd.DataFrame()
+            bac_coverage_text = coverage_subtitle_from_df(bac_coverage_df) if not bac_coverage_df.empty else ""
+            fig_bacteria = px.bar(
+                bacteria_df,
+                x="n",
+                y="categoria",
+                orientation="h",
+                text="texto",
+                title="Especificação de meningite por outras bactérias"
+                + (f"<br><sup>{bac_coverage_text}</sup>" if bac_coverage_text else ""),
+                labels={
+                    "categoria": "Bactéria (CLA_ME_BAC — Quadro II)",
+                    "n": "Casos",
+                    "pct": "% do grupo",
+                    "pct_confirmados": "% dos confirmados",
+                },
+                hover_data={"texto": False, "pct": ":.2f", "pct_confirmados": ":.2f"},
+            )
+            fig_bacteria.update_layout(yaxis={"categoryorder": "total ascending"})
+            if not bac_coverage_df.empty:
+                render_field_completeness_warning(bac_coverage_df, "CLA_ME_BAC")
+            render_plotly_chart(fig_bacteria, calc_title="Especificação de meningite por outras bactérias")
+            st.caption(
+                f"Grupo de referência: {br_int(total_outras_bacterias)} caso(s) confirmado(s) com CON_DIAGES=05; "
+                f"o total geral de confirmados no recorte é {br_int(total_confirmados)}."
+            )
+            render_interval_total(bacteria_df, value_col="n", value_label="casos")
+            copyable_dataframe(bacteria_df, width="stretch", hide_index=True)
+            download_button(bacteria_df, "sinan_bacteriologia_especificacao_outras_bacterias.csv")
+
+    st.markdown("#### Casos individuais — meningite por outras bactérias")
+    st.caption(
+        "Uma linha por registro confirmado com CON_DIAGES=05. A coluna `bacteria_especificada` deriva de CLA_ME_BAC; "
+        "NU_NOTIFIC e NM_PACIENT são mantidos para localização direta na base."
+    )
+    other_bacteria_cases = query_sinan_bacteriology_cases(
+        table,
+        exprs,
+        confirmed_where,
+        ["05"],
+        include_bacteria_specification=True,
+    )
+    if other_bacteria_cases.empty:
+        st.info("Nenhum caso individual de meningite por outras bactérias no recorte atual.")
+    else:
+        copyable_dataframe(other_bacteria_cases, width="stretch", hide_index=True)
+        download_button(
+            other_bacteria_cases,
+            "sinan_bacteriologia_casos_outras_bacterias.csv",
+            label="Baixar casos de outras bactérias (CSV)",
+            max_rows=len(other_bacteria_cases),
+        )
+
+    st.markdown("#### Tabelas discriminatórias por diagnóstico bacteriano")
+    st.caption(
+        "Os quatro grupos abaixo são definidos diretamente por CON_DIAGES entre casos confirmados, para manter total "
+        "coerência com o gráfico de conclusão diagnóstica. `Meningite por Streptococcus pneumoniae` corresponde à "
+        "categoria oficial `Meningite por Pneumococo` (CON_DIAGES=10)."
+    )
+    diagnosis_specs = [
+        ("Meningite por Haemophilus influenzae", "09", "sinan_bacteriologia_casos_haemophilus.csv"),
+        ("Meningite por Streptococcus pneumoniae (pneumococo)", "10", "sinan_bacteriologia_casos_streptococcus_pneumoniae.csv"),
+        ("Meningite meningocócica", "02", "sinan_bacteriologia_casos_meningite_meningococica.csv"),
+        ("Meningite meningocócica com meningococcemia", "03", "sinan_bacteriologia_casos_meningococica_com_meningococcemia.csv"),
+    ]
+    tabs = st.tabs([label for label, _, _ in diagnosis_specs])
+    for tab, (diagnosis_label, diagnosis_code, filename) in zip(tabs, diagnosis_specs):
+        with tab:
+            diagnosis_cases = query_sinan_bacteriology_cases(
+                table,
+                exprs,
+                confirmed_where,
+                [diagnosis_code],
+                include_bacteria_specification=False,
+            )
+            st.caption(
+                f"Definição: CLASSI_FIN=1 e CON_DIAGES={diagnosis_code}. "
+                "A seleção é independente dos resultados laboratoriais individuais."
+            )
+            if diagnosis_cases.empty:
+                st.info(f"Nenhum caso de {diagnosis_label.lower()} no recorte atual.")
+            else:
+                st.metric("Casos no recorte", format_int_br(len(diagnosis_cases)))
+                copyable_dataframe(diagnosis_cases, width="stretch", hide_index=True)
+                download_button(
+                    diagnosis_cases,
+                    filename,
+                    label="Baixar tabela de casos (CSV)",
+                    max_rows=len(diagnosis_cases),
+                )
+
 def render_spreadsheet_analysis_tab(
     table: LoadedTable,
     exprs: Dict[str, Optional[str]],
@@ -17154,6 +17413,7 @@ def render_source(source: str) -> Optional[Dict[str, object]]:
     if source == "SINAN":
         analysis_sections.append("Análise detalhada do líquor")
         analysis_sections.append("Análise de planilha")
+        analysis_sections.append("Análise bacteriológica")
         analysis_sections.append("Análise de possível sobreposição de casos")
     analysis_sections.extend([
         "Campos importantes não preenchidos",
@@ -17183,6 +17443,8 @@ def render_source(source: str) -> Optional[Dict[str, object]]:
         render_detailed_lcr_analysis_tab(table, exprs, base_where)
     elif selected_section == "Análise de planilha" and source == "SINAN":
         render_spreadsheet_analysis_tab(table, exprs, base_where)
+    elif selected_section == "Análise bacteriológica" and source == "SINAN":
+        render_bacteriological_analysis_tab(table, exprs, base_where)
     elif selected_section == "Análise de possível sobreposição de casos" and source == "SINAN":
         render_sinan_overlap_tab(table, base_where, exprs)
     elif selected_section == "Campos importantes não preenchidos":
@@ -17373,8 +17635,9 @@ def render_methodology():
         4. Use **Análise demográfica e territorial** para levantar hipóteses por idade, sexo, residência e atendimento.
         5. Use **Análise detalhada do líquor** para comparar completude, compatibilidade com faixas da literatura e distribuições de parâmetros entre confirmados e descartados puncionados.
         6. Use **Análise de planilha** para auditar os métodos diagnósticos em todos os registros filtrados, sem exigir punção lombar, localizar problemas e verificar compatibilidade etiológica.
-        7. Use **Prévia** para inspecionar casos filtrados e exportar a planilha completa quando necessário.
-        8. Use **SQL Lab** para transformar a hipótese em uma consulta reprodutível.
+        7. Use **Análise bacteriológica** para reproduzir a conclusão diagnóstica e a especificação de outras bactérias e localizar, caso a caso, registros bacterianos por NU_NOTIFIC e NM_PACIENT.
+        8. Use **Prévia** para inspecionar casos filtrados e exportar a planilha completa quando necessário.
+        9. Use **SQL Lab** para transformar a hipótese em uma consulta reprodutível.
         """
     )
     st.info(
