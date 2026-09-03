@@ -68,7 +68,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-09-03-v86-codigos-sinan-e-rainclouds"
+APP_VERSION = "2026-09-03-v87-sobreposicao-simplificada"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos
@@ -13606,103 +13606,8 @@ def render_sinan_overlap_tab(table: LoadedTable, base_where: str, exprs: Dict[st
         if not date_coverage.empty:
             copyable_dataframe(date_coverage, width="stretch", hide_index=True)
 
-        p1, p2 = st.columns(2)
-        max_pairs = int(
-            p1.number_input(
-                "Máximo total de pares classificados",
-                min_value=100,
-                max_value=1000000,
-                value=int(st.session_state.get("sinan_overlap_max_pairs", DEFAULT_SINAN_OVERLAP_MAX_PAIRS)),
-                step=1000,
-                key="sinan_overlap_max_pairs",
-                help="Protege memória e navegador em bases com muitos nomes ou números repetidos.",
-            )
-        )
-        max_pairs_per_key = int(
-            p2.number_input(
-                "Máximo de pares por chave/bloco",
-                min_value=10,
-                max_value=100000,
-                value=int(st.session_state.get("sinan_overlap_max_pairs_per_key", DEFAULT_SINAN_OVERLAP_MAX_PAIRS_PER_KEY)),
-                step=100,
-                key="sinan_overlap_max_pairs_per_key",
-                help="Evita que uma única chave ou bloco de nome frequente consuma toda a auditoria.",
-            )
-        )
-
-        f1, f2, f3 = st.columns(3)
-        enable_fuzzy_names = bool(
-            f1.checkbox(
-                "Incluir comparação fuzzy de nomes",
-                value=bool(st.session_state.get("sinan_overlap_enable_fuzzy_names", False)),
-                key="sinan_overlap_enable_fuzzy_names",
-                help="Funcionalidade opcional, mais custosa, que só produz pares para revisão manual.",
-            )
-        )
-        fuzzy_threshold = float(
-            f2.slider(
-                "Limiar Jaro-Winkler",
-                min_value=0.80,
-                max_value=0.99,
-                value=float(st.session_state.get("sinan_overlap_fuzzy_threshold", DEFAULT_SINAN_OVERLAP_FUZZY_THRESHOLD)),
-                step=0.01,
-                key="sinan_overlap_fuzzy_threshold",
-                disabled=not enable_fuzzy_names,
-            )
-        )
-        fuzzy_max_records = int(
-            f3.number_input(
-                "Máximo de registros no fuzzy",
-                min_value=1000,
-                max_value=500000,
-                value=int(st.session_state.get("sinan_overlap_fuzzy_max_records", DEFAULT_SINAN_OVERLAP_FUZZY_MAX_RECORDS)),
-                step=5000,
-                key="sinan_overlap_fuzzy_max_records",
-                disabled=not enable_fuzzy_names,
-            )
-        )
-
-        criteria_table = pd.DataFrame(
-            [
-                {
-                    "Ordem": 1,
-                    "Critério": "Identidade estável",
-                    "Campos": "NM_PACIENT, DT_NASC (fallback ANO_NASC), CS_SEXO e NM_MAE_PAC complementar",
-                    "Regra": "Conflito em nome/data de nascimento/sexo afasta duplicidade; sexo ignorado é ausência. NM_MAE_PAC isolado conduz à revisão.",
-                },
-                {
-                    "Ordem": 2,
-                    "Critério": "Episódio temporal",
-                    "Campos": "DT_NOTIFIC, DT_DIGITA, DT_INVEST, ATE_INTERN, DT_SIN_PRI e LAB_DTPUNC",
-                    "Regra": f"Qualquer diferença > {distinct_days} dias favorece outro atendimento; DT_DIGITA ou LAB_DTPUNC exata reforça o mesmo registro.",
-                },
-                {
-                    "Ordem": 3,
-                    "Critério": "Atualização entre extrações",
-                    "Campos": "CLASSI_FIN, CON_DIAGES e LAB_PUNCAO",
-                    "Regra": "Mudança não define outro atendimento sozinha; com NU_NOTIFIC/identidade/datas compatíveis gera categoria de provável mesmo registro atualizado.",
-                },
-                {
-                    "Ordem": 4,
-                    "Critério": "Escopo administrativo",
-                    "Campos": "Ano, UF, município e unidade notificadora; município de residência",
-                    "Regra": "Ano restringe a chave de NU_NOTIFIC; os demais campos reforçam ou contradizem o contexto em combinação com as outras evidências.",
-                },
-                {
-                    "Ordem": 5,
-                    "Critério": "Duplicidade provável",
-                    "Campos": "Identidade suficiente + cronologia curta ou âncora temporal exata",
-                    "Regra": f"Usa no mínimo {min_dates} data(s) comparável(is), salvo DT_DIGITA/LAB_DTPUNC exata com identidade suficiente.",
-                },
-                {
-                    "Ordem": 6,
-                    "Critério": "Nome quase igual (opcional)",
-                    "Campos": "Jaro-Winkler + ANO_NASC + sexo + bloqueio por iniciais",
-                    "Regra": "Apenas amplia a triagem; todo par fuzzy permanece em revisão manual e prioridade inferior.",
-                },
-            ]
-        )
-        copyable_dataframe(criteria_table, width="stretch", hide_index=True)
+        max_pairs = DEFAULT_SINAN_OVERLAP_MAX_PAIRS
+        max_pairs_per_key = DEFAULT_SINAN_OVERLAP_MAX_PAIRS_PER_KEY
 
     if not nu_col:
         st.warning("Não localizei o campo `NU_NOTIFIC` no SINAN carregado.")
@@ -13753,23 +13658,6 @@ def render_sinan_overlap_tab(table: LoadedTable, base_where: str, exprs: Dict[st
             max_pairs=max_pairs,
             max_pairs_per_key=max_pairs_per_key,
         )
-        st.caption(
-            "Limitação da triagem exata: grafias realmente diferentes não entram no mesmo grupo. A opção fuzzy abaixo é separada, "
-            "mais custosa e deliberadamente restrita à revisão manual."
-        )
-        if enable_fuzzy_names:
-            st.markdown("---")
-            _render_sinan_fuzzy_name_block(
-                table,
-                base_where,
-                exprs,
-                context_cols,
-                name_col=nm_col,
-                similarity_threshold=fuzzy_threshold,
-                max_records=fuzzy_max_records,
-                max_pairs=max_pairs,
-                max_pairs_per_block=max_pairs_per_key,
-            )
 
     with st.expander("Campos de referência e efeito na classificação", expanded=False):
         st.caption(
