@@ -68,7 +68,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-09-03-v83-analise-etiologica-detalhada"
+APP_VERSION = "2026-09-03-v84-composicao-criterios-diagnosticos"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos
@@ -5173,6 +5173,164 @@ def query_sinan_criterion_presence_by_classification(
         ORDER BY ordem_estrato, ordem_presenca
     """
     return run_query(table, sql)
+
+
+def query_sinan_criterion_distribution(
+    table: LoadedTable,
+    classi_sql: str,
+    criterion_sql: str,
+    where_sql: str,
+    stratum: str,
+) -> pd.DataFrame:
+    """Distribui os dez critérios oficiais no estrato válido selecionado."""
+    if stratum == "Casos confirmados":
+        stratum_clause = f"({classi_sql}) = '1'"
+    elif stratum == "Casos descartados":
+        stratum_clause = f"({classi_sql}) = '2'"
+    else:
+        stratum_clause = f"({classi_sql}) IN ('1', '2')"
+    selected_where = append_clause(where_sql, stratum_clause)
+    criterion_rows_sql = ",\n                ".join(
+        f"({qstr(code)}, {qstr(label)}, {order})"
+        for order, (code, label) in enumerate(SINAN_CRITERIO.items(), start=1)
+    )
+    valid_codes_sql = ", ".join(qstr(code) for code in SINAN_CRITERIO)
+    sql = f"""
+        WITH criterios(codigo, criterio, ordem) AS (
+            VALUES {criterion_rows_sql}
+        ), universo AS (
+            SELECT ({criterion_sql}) AS codigo
+            FROM {table.ref_sql}
+            {selected_where}
+        ), agregado AS (
+            SELECT codigo, COUNT(*) AS n
+            FROM universo
+            WHERE codigo IN ({valid_codes_sql})
+            GROUP BY 1
+        ), totais AS (
+            SELECT COUNT(*) AS denominador_estrato,
+                   COUNT(*) FILTER (WHERE codigo IN ({valid_codes_sql})) AS criterios_validos
+            FROM universo
+        )
+        SELECT c.codigo,
+               c.criterio,
+               COALESCE(a.n, 0) AS n,
+               t.denominador_estrato,
+               t.criterios_validos,
+               CASE WHEN t.denominador_estrato > 0
+                    THEN ROUND(100.0 * COALESCE(a.n, 0) / t.denominador_estrato, 2)
+                    ELSE NULL END AS pct_estrato,
+               CASE WHEN t.criterios_validos > 0
+                    THEN ROUND(100.0 * COALESCE(a.n, 0) / t.criterios_validos, 2)
+                    ELSE NULL END AS pct_criterios_validos,
+               c.ordem
+        FROM criterios c
+        CROSS JOIN totais t
+        LEFT JOIN agregado a USING (codigo)
+        ORDER BY c.ordem
+    """
+    return run_query(table, sql)
+
+
+def render_sinan_criterion_distribution_chart(
+    table: LoadedTable,
+    exprs: Dict[str, Optional[str]],
+    where_sql: str,
+    key_prefix: str,
+) -> None:
+    """Renderiza a composição de CRITERIO, com o mesmo cálculo em diferentes seções."""
+    st.markdown("#### Composição dos critérios diagnósticos registrados")
+    st.caption(
+        "Este gráfico é diferente da análise de presença de critério: aqui cada barra corresponde a um dos "
+        "dez critérios oficiais do Quadro V e mostra sua participação no estrato selecionado."
+    )
+    classi_literal = exprs.get("classi_raw")
+    criterion_literal = exprs.get("criterio_raw")
+    if not classi_literal or not criterion_literal:
+        st.warning(
+            "CLASSI_FIN e CRITERIO precisam estar presentes para distribuir os critérios diagnósticos."
+        )
+        return
+
+    stratum_options = ["Total de casos", "Casos confirmados", "Casos descartados"]
+    stratum = st.radio(
+        "Estratificação da composição dos critérios diagnósticos",
+        stratum_options,
+        horizontal=True,
+        key=f"{key_prefix}_criterion_distribution_stratum",
+    )
+    criterion_df = query_sinan_criterion_distribution(
+        table,
+        classi_literal,
+        criterion_literal,
+        where_sql,
+        stratum,
+    )
+    denominator = (
+        int(pd.to_numeric(criterion_df.get("denominador_estrato"), errors="coerce").fillna(0).max())
+        if not criterion_df.empty
+        else 0
+    )
+    if denominator <= 0:
+        st.info(f"Não há registros válidos em {stratum.lower()} no recorte atual.")
+        return
+
+    criterion_df = criterion_df.copy()
+    criterion_df["texto"] = [
+        f"{int(n):,} ({float(pct):.2f}%)".replace(",", "X").replace(".", ",").replace("X", ".")
+        for n, pct in zip(criterion_df["n"], criterion_df["pct_estrato"])
+    ]
+    plotted = criterion_df.loc[pd.to_numeric(criterion_df["n"], errors="coerce").fillna(0) > 0].copy()
+    denominator_text = f"{denominator:,}".replace(",", ".")
+    if plotted.empty:
+        st.info(
+            f"Há {denominator_text} caso(s) no estrato, mas nenhum possui CRITERIO válido do Quadro V."
+        )
+    else:
+        fig = px.bar(
+            plotted,
+            x="n",
+            y="criterio",
+            orientation="h",
+            text="texto",
+            title=f"Critérios diagnósticos registrados — {stratum.lower()}",
+            labels={
+                "criterio": "Critério diagnóstico",
+                "n": "Casos",
+                "pct_estrato": "% do estrato",
+                "pct_criterios_validos": "% entre critérios válidos",
+                "denominador_estrato": "Total do estrato",
+                "criterios_validos": "Casos com critério válido",
+            },
+            hover_data={
+                "texto": False,
+                "codigo": True,
+                "pct_estrato": ":.2f",
+                "pct_criterios_validos": ":.2f",
+                "denominador_estrato": True,
+                "criterios_validos": True,
+                "ordem": False,
+            },
+        )
+        fig.update_layout(yaxis={"categoryorder": "total ascending"})
+        render_plotly_chart(fig, calc_title="Composição dos critérios diagnósticos registrados")
+
+    valid_count = int(
+        pd.to_numeric(criterion_df.get("criterios_validos"), errors="coerce").fillna(0).max()
+    )
+    valid_count_text = f"{valid_count:,}".replace(",", ".")
+    st.caption(
+        f"Denominador: {denominator_text} caso(s) em {stratum.lower()}, considerando apenas CLASSI_FIN literal 1 ou 2; "
+        f"{valid_count_text} possuem um código CRITERIO oficial de 01 a 10. O percentual exibido nas barras usa todos "
+        "os casos do estrato, inclusive aqueles sem critério válido; por isso, a soma pode ser inferior a 100%. "
+        "A tabela também informa o percentual calculado somente entre os critérios válidos."
+    )
+    display_df = criterion_df.drop(columns=["ordem", "texto"], errors="ignore")
+    copyable_dataframe(display_df, width="stretch", hide_index=True)
+    download_button(
+        display_df,
+        f"sinan_composicao_criterios_{stratum.lower().replace(' ', '_')}.csv",
+    )
 
 
 def query_category_top_with_outros(table: LoadedTable, category_sql: str, where_sql: str, top_n: int = 15, outros_label: str = "Outros municípios") -> pd.DataFrame:
@@ -14804,6 +14962,13 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
             "CLASSI_FIN e CRITERIO precisam estar presentes para comparar a existência de critério diagnóstico."
         )
 
+    render_sinan_criterion_distribution_chart(
+        table,
+        exprs,
+        conversion_base_where,
+        key_prefix="sinan_cid_etiology",
+    )
+
     if exprs.get("con_label"):
         con_coverage_text = ""
         con_coverage_df = pd.DataFrame()
@@ -17076,6 +17241,14 @@ def render_detailed_etiology_analysis_tab(
         "facilitar a localização e a revisão do registro no Parquet, CSV, DBF ou DuckDB carregado."
     )
 
+    render_sinan_criterion_distribution_chart(
+        table,
+        exprs,
+        base_where,
+        key_prefix="sinan_detailed_etiology",
+    )
+    st.divider()
+
     classi_code = exprs.get("classi_code")
     con_code = exprs.get("con_code")
     con_label = exprs.get("con_label")
@@ -18122,6 +18295,11 @@ def render_methodology():
         "parâmetro escolhido: podem comparar confirmados e descartados, estratificar confirmados por CON_DIAGES sem "
         "critério quimiocitológico ou comparar os três graus de definição etiológica das meningites bacterianas e "
         "assépticas, excluindo critérios clínico, quimiocitológico e clínico-epidemiológico nesta última análise."
+    )
+    st.markdown(
+        "A composição de `CRITERIO`, disponível em **Análise etiológica e CID-10** e **Análise etiológica detalhada**, "
+        "pode ser alternada entre total válido (`CLASSI_FIN` 1 ou 2), confirmados e descartados. As barras exibem "
+        "contagem e percentual do estrato completo; a tabela também apresenta o percentual entre critérios válidos."
     )
     st.markdown("### Referência CID-10")
     render_cid_reference()
