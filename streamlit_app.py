@@ -68,7 +68,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-09-03-v85-serie-temporal-criterios"
+APP_VERSION = "2026-09-03-v86-codigos-sinan-e-rainclouds"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos
@@ -601,7 +601,7 @@ PLOT_EXPLANATION_RULES: List[Tuple[str, str]] = [
     ("completude", "Compara quantos registros foram preenchidos, ficaram ausentes ou falharam na regra de validade indicada; as barras mostram números absolutos e o detalhe informa o denominador."),
     ("apenas um método", "Conta os registros em que somente um método possui resultado válido segundo o dicionário - inclusive 'nenhum agente' ou 'não identificado' - e os demais não contam como diagnóstico."),
     ("compatibilidade da bacterioscopia", "Compara o agente sugerido pela morfologia da bacterioscopia com cultura e PCR nos casos em que os resultados necessários são específicos e comparáveis."),
-    ("presença de critério", "Verifica se CRITERIO contém literalmente um dos códigos oficiais do Quadro V; vazio ou qualquer outro conteúdo é agrupado como ausência/preenchimento errado."),
+    ("presença de critério", "Verifica se CRITERIO corresponde a um dos códigos oficiais do Quadro V; códigos numéricos sem zero à esquerda são padronizados, enquanto vazio, texto malformado ou código não previsto contam como ausência/preenchimento errado."),
     ("critério de confirmação", "Mostra quais critérios do campo CRITERIO foram registrados no estrato selecionado, permitindo comparar o peso relativo de cultura, PCR, clínica e demais critérios oficiais."),
     ("série temporal", "Mostra como o número de registros varia ao longo do tempo no recorte filtrado; quando há estratos, cada linha representa uma categoria calculada com o mesmo eixo temporal."),
     ("sazonalidade", "Cruza ano e período do calendário para destacar concentrações sazonais de registros; células mais intensas representam maiores contagens."),
@@ -3004,6 +3004,43 @@ def clean_code_expr(col: str, pad2: bool = False) -> str:
     return code
 
 
+def dictionary_code_expr(col: str, pad2: bool = False) -> str:
+    """Padroniza códigos sem transformar texto malformado em valor válido.
+
+    Colunas numéricas de Parquet/planilha perdem zeros à esquerda por definição;
+    por isso, inteiros como 1 e 7 podem representar os códigos 01 e 07. Em
+    colunas textuais, somente dígitos sem espaços ou pontuação são aceitos para
+    essa padronização. O conteúdo inválido é preservado para a auditoria contra
+    o domínio do dicionário.
+    """
+    quoted = qident(col)
+    raw = f"CAST({quoted} AS VARCHAR)"
+    numeric_type = (
+        f"regexp_matches(UPPER(typeof({quoted})), "
+        "'^(UTINYINT|USMALLINT|UINTEGER|UBIGINT|TINYINT|SMALLINT|INTEGER|BIGINT|HUGEINT|UHUGEINT|FLOAT|REAL|DOUBLE|DECIMAL)')"
+    )
+    decimal_value = f"TRY_CAST({quoted} AS DECIMAL(38,10))"
+    candidate = f"""
+        CASE
+            WHEN {raw} IS NULL OR TRIM({raw}) = '' THEN NULL
+            WHEN {numeric_type}
+                 AND {decimal_value} IS NOT NULL
+                 AND {decimal_value} = TRUNC({decimal_value})
+                 AND {decimal_value} >= 0
+                THEN CAST(TRY_CAST({quoted} AS HUGEINT) AS VARCHAR)
+            WHEN NOT ({numeric_type}) AND regexp_matches({raw}, '^[0-9]+$') THEN {raw}
+            ELSE {raw}
+        END
+    """
+    if pad2:
+        return (
+            f"CASE WHEN ({candidate}) IS NULL THEN NULL "
+            f"WHEN regexp_matches(({candidate}), '^[0-9]$') THEN '0' || ({candidate}) "
+            f"ELSE ({candidate}) END"
+        )
+    return candidate
+
+
 
 def sqlsafe(expr: object) -> str:
     if expr is None:
@@ -4799,19 +4836,19 @@ def build_expressions(source: str, sel: ColumnSelection) -> Dict[str, Optional[s
         exprs["nu_notific_raw"] = clean_str_expr(sel.nu_notific_col) if sel.nu_notific_col else None
         exprs["nm_pacient_raw"] = clean_str_expr(sel.nm_pacient_col) if sel.nm_pacient_col else None
         exprs["classi_raw"] = literal_str_expr(sel.classi_fin_col) if sel.classi_fin_col else None
-        exprs["classi_code"] = clean_code_expr(sel.classi_fin_col) if sel.classi_fin_col else None
+        exprs["classi_code"] = dictionary_code_expr(sel.classi_fin_col) if sel.classi_fin_col else None
         exprs["classi_label"] = case_from_mapping(exprs["classi_code"], SINAN_CLASSI_FIN, "Sem classificação / ignorados") if exprs["classi_code"] else None
         exprs["evol_code"] = clean_code_expr(sel.evolucao_col) if sel.evolucao_col else None
         exprs["evol_label"] = case_from_mapping(exprs["evol_code"], SINAN_EVOLUCAO, "Sem evolução/ignorado") if exprs["evol_code"] else None
         exprs["con_raw"] = literal_str_expr(sel.con_diages_col) if sel.con_diages_col else None
-        exprs["con_code"] = clean_code_expr(sel.con_diages_col, pad2=True) if sel.con_diages_col else None
+        exprs["con_code"] = dictionary_code_expr(sel.con_diages_col, pad2=True) if sel.con_diages_col else None
         exprs["con_label"] = case_from_mapping(exprs["con_code"], SINAN_CON_DIAGES, "Sem conclusão diagnóstica/ignorado") if exprs["con_code"] else None
         exprs["con_group"] = case_from_mapping(exprs["con_code"], SINAN_CON_GROUP, "Sem conclusão diagnóstica/ignorado") if exprs["con_code"] else None
         exprs["cla_me_bac_raw"] = literal_str_expr(sel.cla_me_bac_col) if sel.cla_me_bac_col else None
-        exprs["cla_me_bac_code"] = clean_code_expr(sel.cla_me_bac_col, pad2=True) if sel.cla_me_bac_col else None
+        exprs["cla_me_bac_code"] = dictionary_code_expr(sel.cla_me_bac_col, pad2=True) if sel.cla_me_bac_col else None
         exprs["cla_me_bac_label"] = case_from_mapping(exprs["cla_me_bac_code"], SINAN_CLA_ME_BAC, "Sem bactéria especificada/ignorado") if exprs["cla_me_bac_code"] else None
         exprs["cla_me_ass_raw"] = literal_str_expr(sel.cla_me_ass_col) if sel.cla_me_ass_col else None
-        exprs["cla_me_ass_code"] = clean_code_expr(sel.cla_me_ass_col, pad2=True) if sel.cla_me_ass_col else None
+        exprs["cla_me_ass_code"] = dictionary_code_expr(sel.cla_me_ass_col, pad2=True) if sel.cla_me_ass_col else None
         exprs["cla_me_ass_label"] = case_from_mapping(exprs["cla_me_ass_code"], SINAN_CLA_ME_ASS, "Sem agente viral/asséptico especificado") if exprs["cla_me_ass_code"] else None
         exprs["cla_me_eti_code"] = clean_code_expr(sel.cla_me_eti_col, pad2=True) if sel.cla_me_eti_col else None
         exprs["cla_me_eti_label"] = case_from_mapping(exprs["cla_me_eti_code"], SINAN_CLA_ME_ETI, "Sem outra etiologia especificada") if exprs["cla_me_eti_code"] else None
@@ -4831,10 +4868,8 @@ def build_expressions(source: str, sel: ColumnSelection) -> Dict[str, Optional[s
             exprs["sinan_cid10_conversion_include"] = None
             exprs["sinan_g01_base_disease"] = None
         exprs["criterio_raw"] = literal_str_expr(sel.criterio_col) if sel.criterio_col else None
-        exprs["criterio_code"] = clean_code_expr(sel.criterio_col, pad2=True) if sel.criterio_col else None
-        # CRITERIO é auditado literalmente contra o Quadro V. Assim, "1", "01.0"
-        # ou " 01 " não são promovidos silenciosamente ao código oficial "01".
-        exprs["criterio_label"] = case_from_mapping(exprs["criterio_raw"], SINAN_CRITERIO, "Sem preenchimento / preenchimento errado") if exprs["criterio_raw"] else None
+        exprs["criterio_code"] = dictionary_code_expr(sel.criterio_col, pad2=True) if sel.criterio_col else None
+        exprs["criterio_label"] = case_from_mapping(exprs["criterio_code"], SINAN_CRITERIO, "Sem preenchimento / preenchimento errado") if exprs["criterio_code"] else None
         exprs["expected_etiology_group"] = (
             sinan_expected_etiology_group_expr(exprs["con_code"], exprs.get("cla_me_eti_code"))
             if exprs.get("con_code")
@@ -4872,7 +4907,7 @@ def build_expressions(source: str, sel: ColumnSelection) -> Dict[str, Optional[s
             ("lab_pcliqu", sel.lab_pcliqu_col),
         ]:
             exprs[f"{method_key}_raw"] = literal_str_expr(method_col) if method_col else None
-            exprs[f"{method_key}_code"] = clean_code_expr(method_col, pad2=True) if method_col else None
+            exprs[f"{method_key}_code"] = dictionary_code_expr(method_col, pad2=True) if method_col else None
         exprs["hospital_label"] = case_from_mapping(clean_code_expr(sel.ate_hospit_col), YES_NO_IGN, "Sem informação") if sel.ate_hospit_col else None
         exprs["dt_encerramento"] = date_expr(sel.dt_encerramento_col) if sel.dt_encerramento_col else None
         exprs["dt_notificacao"] = date_expr(sel.dt_notificacao_col) if sel.dt_notificacao_col else None
@@ -5317,9 +5352,9 @@ def render_sinan_criterion_distribution_chart(
         "Este gráfico é diferente da análise de presença de critério: aqui cada barra corresponde a um dos "
         "dez critérios oficiais do Quadro V e mostra sua participação no estrato selecionado."
     )
-    classi_literal = exprs.get("classi_raw")
-    criterion_literal = exprs.get("criterio_raw")
-    if not classi_literal or not criterion_literal:
+    classi_code = exprs.get("classi_code")
+    criterion_code = exprs.get("criterio_code")
+    if not classi_code or not criterion_code:
         st.warning(
             "CLASSI_FIN e CRITERIO precisam estar presentes para distribuir os critérios diagnósticos."
         )
@@ -5334,8 +5369,8 @@ def render_sinan_criterion_distribution_chart(
     )
     criterion_df = query_sinan_criterion_distribution(
         table,
-        classi_literal,
-        criterion_literal,
+        classi_code,
+        criterion_code,
         where_sql,
         stratum,
     )
@@ -5393,7 +5428,7 @@ def render_sinan_criterion_distribution_chart(
     )
     valid_count_text = f"{valid_count:,}".replace(",", ".")
     st.caption(
-        f"Denominador: {denominator_text} caso(s) em {stratum.lower()}, considerando apenas CLASSI_FIN literal 1 ou 2; "
+        f"Denominador: {denominator_text} caso(s) em {stratum.lower()}, considerando apenas CLASSI_FIN válido (1 ou 2); "
         f"{valid_count_text} possuem um código CRITERIO oficial de 01 a 10. O percentual exibido nas barras usa todos "
         "os casos do estrato, inclusive aqueles sem critério válido; por isso, a soma pode ser inferior a 100%. "
         "A tabela também informa o percentual calculado somente entre os critérios válidos."
@@ -5419,14 +5454,14 @@ def render_sinan_criterion_timeseries_chart(
         "permitindo distinguir mudança na composição dos critérios de simples mudança no volume de casos."
     )
     dt_sql = exprs.get("dt")
-    classi_literal = exprs.get("classi_raw")
-    criterion_literal = exprs.get("criterio_raw")
+    classi_code = exprs.get("classi_code")
+    criterion_code = exprs.get("criterio_code")
     missing_fields = [
         label
         for label, expression in (
             ("data principal", dt_sql),
-            ("CLASSI_FIN", classi_literal),
-            ("CRITERIO", criterion_literal),
+            ("CLASSI_FIN", classi_code),
+            ("CRITERIO", criterion_code),
         )
         if not expression
     ]
@@ -5455,8 +5490,8 @@ def render_sinan_criterion_timeseries_chart(
     temporal_df = query_sinan_criterion_timeseries(
         table,
         dt_sql,
-        classi_literal,
-        criterion_literal,
+        classi_code,
+        criterion_code,
         where_sql,
         stratum,
     )
@@ -5511,7 +5546,7 @@ def render_sinan_criterion_timeseries_chart(
         render_plotly_chart(fig, calc_title="Série temporal dos critérios diagnósticos")
 
     st.caption(
-        "O denominador de cada ano inclui todos os casos do estrato com data válida e CLASSI_FIN literal 1 ou 2, "
+        "O denominador de cada ano inclui todos os casos do estrato com data válida e CLASSI_FIN válido (1 ou 2), "
         "mesmo quando CRITERIO está vazio ou fora de 01–10. Esses registros não são atribuídos a nenhuma linha; "
         "portanto, no modo percentual, a soma dos critérios pode ser inferior a 100%."
     )
@@ -15074,13 +15109,13 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
         if exprs.get("classi_code")
         else conversion_base_where
     )
-    classi_literal = exprs.get("classi_raw")
-    criterio_literal = exprs.get("criterio_raw")
-    if classi_literal and criterio_literal:
+    classi_code = exprs.get("classi_code")
+    criterio_code = exprs.get("criterio_code")
+    if classi_code and criterio_code:
         criterio_presenca = query_sinan_criterion_presence_by_classification(
             table,
-            classi_literal,
-            criterio_literal,
+            classi_code,
+            criterio_code,
             conversion_base_where,
         )
         if criterio_presenca.empty or pd.to_numeric(
@@ -15133,10 +15168,11 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                 calc_title="Presença de critério diagnóstico por classificação final",
             )
             st.caption(
-                "Primeiro, `CLASSI_FIN` é lido literalmente: somente `1` (confirmado) e `2` (descartado) entram na "
+                "Primeiro, `CLASSI_FIN` é padronizado como código: somente `1` (confirmado) e `2` (descartado) entram na "
                 "análise; valores vazios ou diferentes desses códigos ficam fora. Em seguida, cada registro é classificado "
-                "como 'com critério' apenas se `CRITERIO` contiver literalmente um código oficial do Quadro V (`01` a "
-                "`10`). Vazio, espaços, decimais ou qualquer código não previsto contam como 'sem critério válido'. "
+                "como 'com critério' apenas se `CRITERIO` corresponder a um código oficial do Quadro V (`01` a `10`). "
+                "Em colunas numéricas, valores como 1 e 7 são equivalentes a 01 e 07 porque o formato não preserva zero à "
+                "esquerda; conteúdo textual malformado e códigos não previstos contam como 'sem critério válido'. "
                 "O total é exatamente a soma de confirmados e descartados, e cada barra usa seu próprio denominador."
             )
             display_criterion_presence = criterio_presenca.drop(
@@ -15541,7 +15577,7 @@ def _sinan_sheet_method_presence_condition(
 ) -> Optional[str]:
     """Resultado válido de exame realizado, excluindo somente estados administrativos."""
     spec = SINAN_DIAGNOSTIC_METHOD_SPECS.get(method_label, {})
-    expr = _sinan_sheet_method_expr(exprs, method_label, raw=True)
+    expr = _sinan_sheet_method_expr(exprs, method_label)
     if not expr:
         return None
     criterion_code = spec.get("criterion_code")
@@ -15562,7 +15598,7 @@ def _sinan_sheet_method_inactive_condition(
     exprs: Dict[str, Optional[str]], method_label: str
 ) -> Optional[str]:
     """Estado que não conta como método diagnóstico na regra de método único."""
-    expr = _sinan_sheet_method_expr(exprs, method_label, raw=True)
+    expr = _sinan_sheet_method_expr(exprs, method_label)
     mapping = _sinan_sheet_method_mapping(method_label)
     if not expr or not mapping:
         return None
@@ -15595,45 +15631,38 @@ def query_sinan_sheet_column_completeness(
 ) -> pd.DataFrame:
     """Distribuição de códigos válidos, vazios e valores fora do dicionário."""
     raw_expr = _sinan_sheet_method_expr(exprs, method_label, raw=True)
+    code_expr = _sinan_sheet_method_expr(exprs, method_label)
     mapping = _sinan_sheet_method_mapping(method_label)
-    if not raw_expr or not mapping:
+    if not raw_expr or not code_expr or not mapping:
         return pd.DataFrame()
     valid_codes_sql = ", ".join(qstr(code) for code in mapping)
-    label_case = "CASE " + " ".join(
-        f"WHEN valor_bruto = {qstr(code)} THEN {qstr(code + ' — ' + label)}"
-        for code, label in mapping.items()
-    ) + " ELSE NULL END"
     sql = f"""
         WITH base AS (
-            SELECT {raw_expr} AS valor_bruto
+            SELECT {raw_expr} AS valor_bruto,
+                   {code_expr} AS codigo_padronizado
             FROM {table.ref_sql}
             {where_sql}
         ), classificados AS (
-            SELECT valor_bruto,
+            SELECT valor_bruto, codigo_padronizado,
                    CASE
-                       WHEN valor_bruto IS NULL THEN 'Célula vazia'
-                       WHEN valor_bruto IN ({valid_codes_sql}) THEN {label_case}
-                       ELSE 'Valor fora do dicionário'
-                   END AS categoria,
+                        WHEN valor_bruto IS NULL THEN 'Célula vazia'
+                        WHEN codigo_padronizado IN ({valid_codes_sql}) THEN 'Preenchida corretamente'
+                        ELSE 'Preenchida com valor fora do dicionário'
+                    END AS categoria,
                    CASE
-                       WHEN valor_bruto IS NULL THEN 'Vazia'
-                       WHEN valor_bruto IN ({valid_codes_sql}) THEN 'Válida'
-                       ELSE 'Fora do dicionário'
-                   END AS status_preenchimento
+                        WHEN valor_bruto IS NULL THEN 'Vazia'
+                        WHEN codigo_padronizado IN ({valid_codes_sql}) THEN 'Válida'
+                        ELSE 'Fora do dicionário'
+                    END AS status_preenchimento
             FROM base
         ), totais AS (
-            SELECT COUNT(*) AS total_elegivel,
-                   COUNT(*) FILTER (WHERE status_preenchimento = 'Válida') AS total_validamente_preenchido
+            SELECT COUNT(*) AS total_elegivel
             FROM classificados
         )
         SELECT categoria,
                status_preenchimento,
                COUNT(*) AS n,
                MAX(total_elegivel) AS total_elegivel,
-               MAX(total_validamente_preenchido) AS total_validamente_preenchido,
-               CASE WHEN status_preenchimento = 'Válida' AND MAX(total_validamente_preenchido) > 0
-                    THEN ROUND(100.0 * COUNT(*) / MAX(total_validamente_preenchido), 2)
-                    ELSE NULL END AS pct_entre_validamente_preenchidos,
                CASE WHEN MAX(total_elegivel) > 0
                     THEN ROUND(100.0 * COUNT(*) / MAX(total_elegivel), 2)
                     ELSE NULL END AS pct_total_elegivel
@@ -15646,43 +15675,25 @@ def query_sinan_sheet_column_completeness(
     result = run_query(table, sql)
     if result.empty:
         return result
-
-    # O SQL acima resume apenas categorias observadas. Para a auditoria de
-    # completude, porém, o gráfico deve mostrar TODO o domínio oficial do quadro
-    # correspondente, inclusive possibilidades com contagem zero. Isso evita que
-    # códigos válidos (p.ex. 03/08/28 na bacterioscopia) desapareçam visualmente
-    # apenas porque não ocorreram no recorte atual.
+    category_status = [
+        ("Preenchida corretamente", "Válida"),
+        ("Célula vazia", "Vazia"),
+        ("Preenchida com valor fora do dicionário", "Fora do dicionário"),
+    ]
     total_elegivel = int(pd.to_numeric(result["total_elegivel"], errors="coerce").max() or 0)
-    total_validamente_preenchido = int(
-        pd.to_numeric(result["total_validamente_preenchido"], errors="coerce").max() or 0
-    )
     observed = {str(row.categoria): row for row in result.itertuples(index=False)}
-    expanded_rows: List[Dict[str, object]] = []
-
-    def append_category(categoria: str, status: str) -> None:
+    rows: List[Dict[str, object]] = []
+    for categoria, status in category_status:
         row = observed.get(categoria)
         n = int(getattr(row, "n", 0) or 0) if row is not None else 0
-        pct_valid = (
-            round(100.0 * n / total_validamente_preenchido, 2)
-            if status == "Válida" and total_validamente_preenchido > 0
-            else np.nan
-        )
-        pct_total = round(100.0 * n / total_elegivel, 2) if total_elegivel > 0 else np.nan
-        expanded_rows.append({
+        rows.append({
             "categoria": categoria,
             "status_preenchimento": status,
             "n": n,
             "total_elegivel": total_elegivel,
-            "total_validamente_preenchido": total_validamente_preenchido,
-            "pct_entre_validamente_preenchidos": pct_valid,
-            "pct_total_elegivel": pct_total,
+            "pct_total_elegivel": round(100.0 * n / total_elegivel, 2) if total_elegivel else np.nan,
         })
-
-    for code, label in mapping.items():
-        append_category(f"{code} — {label}", "Válida")
-    append_category("Célula vazia", "Vazia")
-    append_category("Valor fora do dicionário", "Fora do dicionário")
-    return pd.DataFrame(expanded_rows)
+    return pd.DataFrame(rows)
 
 
 def query_sinan_sheet_column_errors(
@@ -15693,8 +15704,9 @@ def query_sinan_sheet_column_errors(
 ) -> pd.DataFrame:
     """Casos cuja célula está vazia ou fora dos códigos do dicionário."""
     raw_expr = _sinan_sheet_method_expr(exprs, method_label, raw=True)
+    code_expr = _sinan_sheet_method_expr(exprs, method_label)
     mapping = _sinan_sheet_method_mapping(method_label)
-    if not raw_expr or not mapping:
+    if not raw_expr or not code_expr or not mapping:
         return pd.DataFrame()
     valid_codes_sql = ", ".join(qstr(code) for code in mapping)
     identifiers = _sinan_sheet_identifier_select(exprs)
@@ -15707,7 +15719,8 @@ def query_sinan_sheet_column_errors(
                    {qstr(loaded_table_origin_format(table))} AS formato_origem,
                    {qstr(table.label or table.source)} AS origem,
                    {identifiers},
-                   {raw_expr} AS valor_informado
+                   {raw_expr} AS valor_informado,
+                   {code_expr} AS codigo_padronizado
             FROM fonte
             {where_sql}
         )
@@ -15718,7 +15731,7 @@ def query_sinan_sheet_column_errors(
                END AS tipo_erro,
                {qstr(', '.join(mapping.keys()))} AS codigos_validos
         FROM avaliados
-        WHERE valor_informado IS NULL OR valor_informado NOT IN ({valid_codes_sql})
+        WHERE valor_informado IS NULL OR codigo_padronizado NOT IN ({valid_codes_sql})
         ORDER BY linha_fonte
     """
     return run_query(table, sql)
@@ -15804,23 +15817,20 @@ def query_sinan_bacterioscopy_compatibility(
 ) -> pd.DataFrame:
     """Compatibilidade estrita entre bacterioscopia, culturas, PCR e diagnóstico final."""
     required_keys = [
-        "lab_bcliqu_raw",
-        "lab_ctliqu_raw",
-        "lab_ctsang_raw",
-        "lab_pcliqu_raw",
-        "con_raw",
-        "classi_raw",
+        "lab_bcliqu_code",
+        "lab_ctliqu_code",
+        "lab_ctsang_code",
+        "lab_pcliqu_code",
+        "con_code",
+        "classi_code",
     ]
     if any(not exprs.get(key) for key in required_keys):
         return pd.DataFrame()
-    # A comparação é feita sobre a representação literal do arquivo. Assim, um
-    # valor "1" não é promovido silenciosamente a "01" e permanece inelegível,
-    # coerentemente com a auditoria de completude e com a fidelidade do registro.
-    bacter = exprs["lab_bcliqu_raw"]
-    cult_lcr = exprs["lab_ctliqu_raw"]
-    cult_sang = exprs["lab_ctsang_raw"]
-    pcr = exprs["lab_pcliqu_raw"]
-    con_code = exprs["con_raw"]
+    bacter = exprs["lab_bcliqu_code"]
+    cult_lcr = exprs["lab_ctliqu_code"]
+    cult_sang = exprs["lab_ctsang_code"]
+    pcr = exprs["lab_pcliqu_code"]
+    con_code = exprs["con_code"]
     precise_codes_sql = ", ".join(qstr(code) for code in SINAN_PRECISE_BACTERIAL_AGENT_LABELS)
     bacter_codes_sql = ", ".join(qstr(code) for code in SINAN_BACTERIOSCOPY_PRECISE_AGENT)
     bacter_agent_case = "CASE " + " ".join(
@@ -16267,6 +16277,25 @@ def render_sinan_lcr_raincloud_chart(
     coverage["__ordem"] = coverage["grupo"].astype(str).map(order_index).fillna(len(order_index))
     coverage = coverage.sort_values(["__ordem", "grupo"]).drop(columns="__ordem")
     coverage["pct_nao_preenchidos"] = pd.to_numeric(coverage["pct_nao_preenchidos"], errors="coerce")
+    observed_groups = set(coverage["grupo"].astype(str))
+    groups_without_cases = [str(group) for group in group_order if str(group) not in observed_groups]
+    groups_without_numeric = coverage.loc[
+        pd.to_numeric(coverage["disponiveis_no_raincloud"], errors="coerce").fillna(0).eq(0),
+        "grupo",
+    ].astype(str).tolist()
+    if groups_without_cases:
+        st.caption(
+            "Categorias previstas sem casos elegíveis após as regras deste recorte: "
+            + "; ".join(groups_without_cases)
+            + "."
+        )
+    if groups_without_numeric:
+        st.caption(
+            "Categorias com casos elegíveis, mas sem valor numérico disponível para este parâmetro — por isso não "
+            "é possível desenhar sua densidade: "
+            + "; ".join(groups_without_numeric)
+            + "."
+        )
     coverage_messages = [
         f"{row.grupo}: {format_pct_br(row.pct_nao_preenchidos)} não preenchidos "
         f"({format_int_br(int(row.nao_preenchidos))}/{format_int_br(int(row.total_casos))})"
@@ -16359,19 +16388,19 @@ def render_sinan_lcr_raincloud_chart(
 def _sinan_lcr_detailed_etiology_group_spec(
     exprs: Dict[str, Optional[str]], analysis_kind: str
 ) -> Tuple[Optional[str], List[str], Optional[str], List[str]]:
-    """Define grupos etiológicos estritos com os códigos literais do dicionário."""
-    classi_raw = exprs.get("classi_raw")
-    con_raw = exprs.get("con_raw")
-    criterio_raw = exprs.get("criterio_raw")
+    """Define grupos etiológicos estritos após padronizar códigos do dicionário."""
+    classi_code = exprs.get("classi_code")
+    con_code = exprs.get("con_code")
+    criterio_code = exprs.get("criterio_code")
     required = {
-        "CLASSI_FIN": classi_raw,
-        "CON_DIAGES": con_raw,
-        "CRITERIO": criterio_raw,
+        "CLASSI_FIN": classi_code,
+        "CON_DIAGES": con_code,
+        "CRITERIO": criterio_code,
     }
     if analysis_kind == "Bacterianas":
-        required["CLA_ME_BAC"] = exprs.get("cla_me_bac_raw")
+        required["CLA_ME_BAC"] = exprs.get("cla_me_bac_code")
     else:
-        required["CLA_ME_ASS"] = exprs.get("cla_me_ass_raw")
+        required["CLA_ME_ASS"] = exprs.get("cla_me_ass_code")
     missing = [name for name, expression in required.items() if not expression]
     if missing:
         return None, [], None, missing
@@ -16380,11 +16409,11 @@ def _sinan_lcr_detailed_etiology_group_spec(
         qstr(code) for code in SINAN_CRITERIO if code not in {"04", "06", "07"}
     )
     common_eligibility = (
-        f"({classi_raw}) = '1' AND ({criterio_raw}) IN ({accepted_criteria_sql})"
+        f"({classi_code}) = '1' AND ({criterio_code}) IN ({accepted_criteria_sql})"
     )
 
     if analysis_kind == "Bacterianas":
-        bac_raw = exprs["cla_me_bac_raw"]
+        bac_code = exprs["cla_me_bac_code"]
         direct_codes = ["02", "03", "09", "10"]
         direct_codes_sql = ", ".join(qstr(code) for code in direct_codes)
         valid_bac_codes_sql = ", ".join(qstr(code) for code in SINAN_CLA_ME_BAC)
@@ -16398,22 +16427,22 @@ def _sinan_lcr_detailed_etiology_group_spec(
         ]
         group_sql = f"""
             CASE
-                WHEN ({con_raw}) IN ({direct_codes_sql})
-                    OR (({con_raw}) = '05' AND ({bac_raw}) IN ({defined_bac_codes_sql}))
+                WHEN ({con_code}) IN ({direct_codes_sql})
+                    OR (({con_code}) = '05' AND ({bac_code}) IN ({defined_bac_codes_sql}))
                     THEN {qstr(group_order[0])}
-                WHEN ({con_raw}) = '05' AND ({bac_raw}) = '81' THEN {qstr(group_order[1])}
-                WHEN ({con_raw}) = '05' AND ({bac_raw}) = '28' THEN {qstr(group_order[2])}
+                WHEN ({con_code}) = '05' AND ({bac_code}) = '81' THEN {qstr(group_order[1])}
+                WHEN ({con_code}) = '05' AND ({bac_code}) = '28' THEN {qstr(group_order[2])}
                 ELSE NULL
             END
         """
         eligibility = (
-            f"{common_eligibility} AND ({con_raw}) IN ('02', '03', '05', '09', '10') AND "
-            f"(({con_raw}) IN ({direct_codes_sql}) OR "
-            f"(({con_raw}) = '05' AND ({bac_raw}) IN ({valid_bac_codes_sql})))"
+            f"{common_eligibility} AND ({con_code}) IN ('02', '03', '05', '09', '10') AND "
+            f"(({con_code}) IN ({direct_codes_sql}) OR "
+            f"(({con_code}) = '05' AND ({bac_code}) IN ({valid_bac_codes_sql})))"
         )
         return group_sql, group_order, eligibility, []
 
-    ass_raw = exprs["cla_me_ass_raw"]
+    ass_code = exprs["cla_me_ass_code"]
     valid_ass_codes_sql = ", ".join(qstr(code) for code in SINAN_CLA_ME_ASS)
     defined_ass_codes_sql = ", ".join(
         qstr(code) for code in SINAN_CLA_ME_ASS if code not in {"59", "73", "74", "75"}
@@ -16425,15 +16454,15 @@ def _sinan_lcr_detailed_etiology_group_spec(
     ]
     group_sql = f"""
         CASE
-            WHEN ({ass_raw}) IN ({defined_ass_codes_sql}) THEN {qstr(group_order[0])}
-            WHEN ({ass_raw}) = '75' THEN {qstr(group_order[1])}
-            WHEN ({ass_raw}) IN ('59', '73', '74') THEN {qstr(group_order[2])}
+            WHEN ({ass_code}) IN ({defined_ass_codes_sql}) THEN {qstr(group_order[0])}
+            WHEN ({ass_code}) = '75' THEN {qstr(group_order[1])}
+            WHEN ({ass_code}) IN ('59', '73', '74') THEN {qstr(group_order[2])}
             ELSE NULL
         END
     """
     eligibility = (
-        f"{common_eligibility} AND ({con_raw}) = '07' "
-        f"AND ({ass_raw}) IN ({valid_ass_codes_sql})"
+        f"{common_eligibility} AND ({con_code}) = '07' "
+        f"AND ({ass_code}) IN ({valid_ass_codes_sql})"
     )
     return group_sql, group_order, eligibility, []
 
@@ -17064,8 +17093,8 @@ def render_detailed_lcr_analysis_tab(
     base_where: str,
 ) -> None:
     """Completude em três classes e rainclouds dos parâmetros do LCR."""
-    puncao_code = exprs.get("puncao_raw") or exprs.get("puncao_code")
-    classi_code = exprs.get("classi_raw") or exprs.get("classi_code")
+    puncao_code = exprs.get("puncao_code") or exprs.get("puncao_raw")
+    classi_code = exprs.get("classi_code") or exprs.get("classi_raw")
     st.info(
         "Esta seção mantém o recorte de registros com punção lombar realizada (`LAB_PUNCAO = 1`). A completude separa "
         "células não preenchidas, valores preenchidos incompatíveis com a regra operacional da tabela-resumo do LCR e "
@@ -17208,7 +17237,7 @@ def render_detailed_lcr_analysis_tab(
         )
 
     st.divider()
-    st.markdown("### Raincloud plots half-eye dos parâmetros liquóricos")
+    st.markdown("### Raincloud plots half-eye dos parâmetros liquóricos sem estratificação etiológica")
     st.caption(
         "Selecione um único parâmetro por vez: somente o gráfico escolhido é consultado e calculado. A linha fina representa P2,5-P97,5; a "
         "grossa, P25–P75; losangos marcam P2,5/P97,5, quadrados marcam P25/P75 e o ponto branco marca a mediana. "
@@ -17223,56 +17252,18 @@ def render_detailed_lcr_analysis_tab(
         list(SINAN_LCR_COMPLETENESS_PARAMS.keys()),
         key="sinan_lcr_raincloud_parameter",
     )
-    stratify_by_etiology = st.toggle(
-        "Estratificar os confirmados por classificação etiológica",
-        value=False,
-        key="sinan_lcr_raincloud_etiology_toggle",
-        help=(
-            "Quando ativado, usa as categorias oficiais de CON_DIAGES e exclui CRITERIO=06 "
-            "(quimiocitológico), além de critérios vazios ou fora do Quadro V."
-        ),
-    )
     rain_where = append_clause(base_where, f"{puncao_code} = '1'")
-    if stratify_by_etiology:
-        con_for_group = exprs.get("con_code")
-        criterio_raw = exprs.get("criterio_raw")
-        if not con_for_group or not criterio_raw:
-            st.warning(
-                "Para estratificar por etiologia, CON_DIAGES e CRITERIO precisam estar presentes."
-            )
-            return
-        valid_con_sql = ", ".join(qstr(code) for code in SINAN_CON_DIAGES)
-        accepted_criteria_sql = ", ".join(
-            qstr(code) for code in SINAN_CRITERIO if code != "06"
-        )
-        rain_where = append_clause(rain_where, f"{classi_code} = '1'")
-        rain_where = append_clause(rain_where, f"{con_for_group} IN ({valid_con_sql})")
-        rain_where = append_clause(rain_where, f"{criterio_raw} IN ({accepted_criteria_sql})")
-        group_sql = "CASE " + " ".join(
-            f"WHEN ({con_for_group}) = {qstr(code)} THEN {qstr(label)}"
-            for code, label in SINAN_CON_DIAGES.items()
-        ) + " ELSE NULL END"
-        group_order = list(SINAN_CON_DIAGES.values())
-        title = f"Raincloud half-eye de {rain_label.lower()} - confirmados por classificação etiológica"
-        file_prefix = "sinan_raincloud_etiologia"
-        st.info(
-            "Neste modo, cada linha corresponde a uma categoria oficial de `CON_DIAGES`. São mantidos apenas casos "
-            "confirmados com critério válido no Quadro V e diferente de 06 (quimiocitológico). A exclusão evita "
-            "usar a quimiocitologia isolada como confirmação da etiologia."
-        )
-        empty_message = "Não há casos confirmados elegíveis para estratificação etiológica no recorte atual."
-    else:
-        group_sql = f"""
-            CASE
-                WHEN ({classi_code}) = '1' THEN 'Casos confirmados'
-                WHEN ({classi_code}) = '2' THEN 'Casos descartados'
-                ELSE NULL
-            END
-        """
-        group_order = ["Casos confirmados", "Casos descartados"]
-        title = f"Raincloud half-eye de {rain_label.lower()} - confirmados e descartados"
-        file_prefix = "sinan_raincloud_classificacao_final"
-        empty_message = "Não há casos confirmados ou descartados com punção no recorte atual."
+    group_sql = f"""
+        CASE
+            WHEN ({classi_code}) = '1' THEN 'Casos confirmados'
+            WHEN ({classi_code}) = '2' THEN 'Casos descartados'
+            ELSE NULL
+        END
+    """
+    group_order = ["Casos confirmados", "Casos descartados"]
+    title = f"Raincloud half-eye de {rain_label.lower()} - confirmados e descartados"
+    file_prefix = "sinan_raincloud_classificacao_final"
+    empty_message = "Não há casos confirmados ou descartados com punção no recorte atual."
 
     render_sinan_lcr_raincloud_chart(
         table,
@@ -17289,7 +17280,7 @@ def render_detailed_lcr_analysis_tab(
     st.divider()
     st.markdown("### Raincloud plots half-eye dos parâmetros liquóricos por definição etiológica")
     st.info(
-        "Estes gráficos usam apenas casos com `CLASSI_FIN = 1`, punção lombar realizada e códigos literais válidos "
+        "Estes gráficos usam apenas casos com `CLASSI_FIN = 1`, punção lombar realizada e códigos válidos "
         "nos campos necessários. Casos confirmados exclusivamente por critério clínico (`04`), quimiocitológico (`06`) "
         "ou clínico-epidemiológico (`07`) são excluídos porque esses critérios, isoladamente, não determinam a "
         "etiologia. Também são excluídos critérios vazios ou fora do Quadro V. Um seletor de tipo e outro de parâmetro "
@@ -17379,7 +17370,7 @@ def query_sinan_etiology_cases(
     ass_label = exprs.get("cla_me_ass_label")
     ass_code_select = ass_code or "CAST(NULL AS VARCHAR)"
     ass_label_select = ass_label or "CAST(NULL AS VARCHAR)"
-    criterio_code_select = exprs.get("criterio_raw") or exprs.get("criterio_code") or "CAST(NULL AS VARCHAR)"
+    criterio_code_select = exprs.get("criterio_code") or exprs.get("criterio_raw") or "CAST(NULL AS VARCHAR)"
     criterio_label_select = exprs.get("criterio_label") or "CAST(NULL AS VARCHAR)"
     where_diag = append_clause(where_sql, f"{con_code} IN ({codes_sql})")
 
@@ -17567,29 +17558,50 @@ def render_detailed_etiology_analysis_tab(
             copyable_dataframe(bacteria_df, width="stretch", hide_index=True)
             download_button(bacteria_df, "sinan_bacteriologia_especificacao_outras_bacterias.csv")
 
-    st.markdown("#### Casos individuais — meningite por outras bactérias")
+    st.markdown("#### Tabelas discriminatórias por diagnóstico bacteriano")
     st.caption(
-        "Uma linha por registro confirmado com CON_DIAGES=05. A coluna `bacteria_especificada` deriva de CLA_ME_BAC; "
-        "`CRITERIO_CODIGO` e `criterio_confirmacao` aparecem ao lado da classificação; NU_NOTIFIC e NM_PACIENT "
-        "são mantidos para localização direta na base."
+        "Os cinco grupos abaixo são definidos diretamente por CON_DIAGES entre casos confirmados. `Meningite por "
+        "Streptococcus pneumoniae` corresponde à categoria oficial `Meningite por Pneumococo` (CON_DIAGES=10). "
+        "Todas as tabelas mostram código e descrição de `CRITERIO`; a tabela de CON_DIAGES=05 mostra também código e "
+        "descrição de `CLA_ME_BAC`, conforme o Quadro II."
     )
-    other_bacteria_cases = query_sinan_etiology_cases(
-        table,
-        exprs,
-        confirmed_where,
-        ["05"],
-        include_bacteria_specification=True,
-    )
-    if other_bacteria_cases.empty:
-        st.info("Nenhum caso individual de meningite por outras bactérias no recorte atual.")
-    else:
-        copyable_dataframe(other_bacteria_cases, width="stretch", hide_index=True)
-        download_button(
-            other_bacteria_cases,
-            "sinan_bacteriologia_casos_outras_bacterias.csv",
-            label="Baixar casos de outras bactérias (CSV)",
-            max_rows=len(other_bacteria_cases),
-        )
+    diagnosis_specs = [
+        ("Meningite por outras bactérias", "05", "sinan_bacteriologia_casos_outras_bacterias.csv", True),
+        ("Meningite por Haemophilus influenzae", "09", "sinan_bacteriologia_casos_haemophilus.csv", False),
+        ("Meningite por Streptococcus pneumoniae (pneumococo)", "10", "sinan_bacteriologia_casos_streptococcus_pneumoniae.csv", False),
+        ("Meningite meningocócica", "02", "sinan_bacteriologia_casos_meningite_meningococica.csv", False),
+        ("Meningite meningocócica com meningococcemia", "03", "sinan_bacteriologia_casos_meningococica_com_meningococcemia.csv", False),
+    ]
+    tabs = st.tabs([label for label, _, _, _ in diagnosis_specs])
+    for tab, (diagnosis_label, diagnosis_code, filename, include_bacteria) in zip(tabs, diagnosis_specs):
+        with tab:
+            diagnosis_cases = query_sinan_etiology_cases(
+                table,
+                exprs,
+                confirmed_where,
+                [diagnosis_code],
+                include_bacteria_specification=include_bacteria,
+            )
+            detail_note = (
+                " Para este grupo, `CLA_ME_BAC_CODIGO` e `bacteria_especificada` detalham o tipo de bactéria."
+                if include_bacteria else ""
+            )
+            st.caption(
+                f"Definição: CLASSI_FIN=1 e CON_DIAGES={diagnosis_code}. "
+                "A seleção é independente dos resultados laboratoriais individuais."
+                + detail_note
+            )
+            if diagnosis_cases.empty:
+                st.info(f"Nenhum caso de {diagnosis_label.lower()} no recorte atual.")
+            else:
+                st.metric("Casos no recorte", format_int_br(len(diagnosis_cases)))
+                copyable_dataframe(diagnosis_cases, width="stretch", hide_index=True)
+                download_button(
+                    diagnosis_cases,
+                    filename,
+                    label="Baixar tabela de casos (CSV)",
+                    max_rows=len(diagnosis_cases),
+                )
 
     st.markdown("#### Especificação de meningite asséptica")
     ass_label = exprs.get("cla_me_ass_label")
@@ -17670,66 +17682,30 @@ def render_detailed_etiology_analysis_tab(
             max_rows=len(aseptic_cases),
         )
 
-    st.markdown("#### Tabelas discriminatórias por diagnóstico bacteriano")
-    st.caption(
-        "Os quatro grupos abaixo são definidos diretamente por CON_DIAGES entre casos confirmados, para manter total "
-        "coerência com o gráfico de conclusão diagnóstica. `Meningite por Streptococcus pneumoniae` corresponde à "
-        "categoria oficial `Meningite por Pneumococo` (CON_DIAGES=10). Todas as tabelas mostram também o código e "
-        "a descrição de `CRITERIO`."
-    )
-    diagnosis_specs = [
-        ("Meningite por Haemophilus influenzae", "09", "sinan_bacteriologia_casos_haemophilus.csv"),
-        ("Meningite por Streptococcus pneumoniae (pneumococo)", "10", "sinan_bacteriologia_casos_streptococcus_pneumoniae.csv"),
-        ("Meningite meningocócica", "02", "sinan_bacteriologia_casos_meningite_meningococica.csv"),
-        ("Meningite meningocócica com meningococcemia", "03", "sinan_bacteriologia_casos_meningococica_com_meningococcemia.csv"),
-    ]
-    tabs = st.tabs([label for label, _, _ in diagnosis_specs])
-    for tab, (diagnosis_label, diagnosis_code, filename) in zip(tabs, diagnosis_specs):
-        with tab:
-            diagnosis_cases = query_sinan_etiology_cases(
-                table,
-                exprs,
-                confirmed_where,
-                [diagnosis_code],
-                include_bacteria_specification=False,
-            )
-            st.caption(
-                f"Definição: CLASSI_FIN=1 e CON_DIAGES={diagnosis_code}. "
-                "A seleção é independente dos resultados laboratoriais individuais."
-            )
-            if diagnosis_cases.empty:
-                st.info(f"Nenhum caso de {diagnosis_label.lower()} no recorte atual.")
-            else:
-                st.metric("Casos no recorte", format_int_br(len(diagnosis_cases)))
-                copyable_dataframe(diagnosis_cases, width="stretch", hide_index=True)
-                download_button(
-                    diagnosis_cases,
-                    filename,
-                    label="Baixar tabela de casos (CSV)",
-                    max_rows=len(diagnosis_cases),
-                )
-
 def render_spreadsheet_analysis_tab(
     table: LoadedTable,
     exprs: Dict[str, Optional[str]],
     base_where: str,
 ) -> None:
     """Auditoria dos métodos diagnósticos do SINAN segundo o dicionário v5.0."""
-    classi_code = exprs.get("classi_raw") or exprs.get("classi_code")
+    classi_code = exprs.get("classi_code") or exprs.get("classi_raw")
 
     def group_where(selection: str) -> str:
         where_sql = base_where
         if selection == "Casos confirmados" and classi_code:
             where_sql = append_clause(where_sql, f"{classi_code} = '1'")
+        elif selection == "Casos descartados" and classi_code:
+            where_sql = append_clause(where_sql, f"{classi_code} = '2'")
         return where_sql
 
-    group_options = ["Todos os casos"] + (["Casos confirmados"] if classi_code else [])
+    group_options = ["Todos os casos"] + (["Casos confirmados", "Casos descartados"] if classi_code else [])
 
     st.info(
         "Esta verificação usa todos os registros que atendem aos filtros atuais; `LAB_PUNCAO` não é pré-requisito. "
-        "Ela compara o conteúdo literal de cada método com os códigos do Dicionário de Dados SINAN NET — "
+        "Ela compara cada método com os códigos do Dicionário de Dados SINAN NET — "
         "Meningite v5.0. Valores vazios e códigos não previstos são erros de preenchimento; códigos como "
-        "‘não realizado’, ‘ignorado’ ou ‘nenhum agente’ continuam sendo preenchimentos válidos quando constam no quadro correspondente."
+        "‘não realizado’, ‘ignorado’ ou ‘nenhum agente’ continuam sendo preenchimentos válidos quando constam no quadro "
+        "correspondente. Em campos numéricos, a ausência do zero à esquerda é apenas uma propriedade do formato e não um erro."
     )
     st.markdown("### Verificação de completude de colunas")
     c1, c2 = st.columns(2)
@@ -17747,10 +17723,10 @@ def render_spreadsheet_analysis_tab(
         )
     completeness_where = group_where(completeness_group)
     selected_spec = SINAN_DIAGNOSTIC_METHOD_SPECS[selected_method]
-    selected_expr = _sinan_sheet_method_expr(exprs, selected_method, raw=True)
+    selected_expr = _sinan_sheet_method_expr(exprs, selected_method)
     st.caption(
-        f"Fonte normativa: {selected_spec.get('dictionary_source')}. A célula é avaliada sem corrigir ou "
-        "transformar seu conteúdo antes da comparação com o dicionário."
+        f"Fonte normativa: {selected_spec.get('dictionary_source')}. O gráfico agrega o método em três situações: "
+        "preenchida corretamente, vazia ou preenchida com valor fora do dicionário."
     )
     if not selected_expr:
         st.warning(
@@ -17765,19 +17741,9 @@ def render_spreadsheet_analysis_tab(
             st.info("Não há registros elegíveis para a coluna e o estrato selecionados.")
         else:
             completeness_df = completeness_df.copy()
-            completeness_df["percentual_exibido"] = np.where(
-                completeness_df["status_preenchimento"].eq("Válida"),
-                completeness_df["pct_entre_validamente_preenchidos"],
-                completeness_df["pct_total_elegivel"],
-            )
-            completeness_df["referencia_percentual"] = np.where(
-                completeness_df["status_preenchimento"].eq("Válida"),
-                "Entre células validamente preenchidas",
-                "Entre todos os casos elegíveis",
-            )
             completeness_df["texto"] = [
                 f"{format_int_br(int(n))} ({format_pct_br(p)})"
-                for n, p in zip(completeness_df["n"], completeness_df["percentual_exibido"])
+                for n, p in zip(completeness_df["n"], completeness_df["pct_total_elegivel"])
             ]
             category_order = completeness_df["categoria"].tolist()
             fig_complete = px.bar(
@@ -17792,16 +17758,11 @@ def render_spreadsheet_analysis_tab(
                     "categoria": "Conteúdo da célula segundo o dicionário",
                     "n": "Casos elegíveis",
                     "status_preenchimento": "Situação",
-                    "percentual_exibido": "Percentual exibido",
-                    "referencia_percentual": "Denominador do percentual",
+                    "pct_total_elegivel": "% entre todos os casos elegíveis",
                 },
                 hover_data={
                     "texto": False,
-                    "percentual_exibido": ":.2f",
-                    "referencia_percentual": True,
                     "total_elegivel": True,
-                    "total_validamente_preenchido": True,
-                    "pct_entre_validamente_preenchidos": ":.2f",
                     "pct_total_elegivel": ":.2f",
                 },
                 category_orders={"status_preenchimento": ["Válida", "Vazia", "Fora do dicionário"]},
@@ -17818,10 +17779,9 @@ def render_spreadsheet_analysis_tab(
             fig_complete.update_traces(textposition="outside", cliponaxis=False)
             render_plotly_chart(fig_complete, calc_title=f"Completude de {selected_method}")
             st.caption(
-                "Todas as possibilidades previstas no quadro oficial correspondente são exibidas, inclusive categorias com contagem zero. "
-                "Para códigos válidos, a porcentagem usa exclusivamente as células validamente preenchidas como denominador. "
-                "Para ‘Célula vazia’ e ‘Valor fora do dicionário’, a porcentagem usa todos os casos elegíveis, "
-                "pois essas células não podem integrar o denominador dos valores válidos."
+                "As três categorias são mutuamente exclusivas e usam o mesmo denominador: todos os casos elegíveis do "
+                "estrato. Os nomes de bactérias ou vírus previstos nos quadros são usados apenas para validar o código; "
+                "eles não são tratados como categorias deste gráfico de completude."
             )
             complete_export = completeness_df.drop(columns=["texto"], errors="ignore")
             copyable_dataframe(complete_export, width="stretch", hide_index=True)
@@ -17839,7 +17799,7 @@ def render_spreadsheet_analysis_tab(
                 st.success("Nenhuma célula vazia ou fora do dicionário foi encontrada no recorte selecionado.")
             else:
                 st.caption(
-                    "A tabela contém todos os registros com célula vazia ou valor literal não previsto no dicionário. "
+                    "A tabela contém todos os registros com célula vazia ou código não previsto no dicionário. "
                     "A linha é calculada antes dos filtros. Em tabelas DuckDB e em relações reordenadas, ela representa "
                     "a sequência devolvida pela relação, não uma chave permanente; use também NU_NOTIFIC/NM_PACIENT para localizar o caso."
                 )
@@ -17920,8 +17880,8 @@ def render_spreadsheet_analysis_tab(
         "exige diagnóstico final "
         "bacteriano específico e resultados específicos preenchidos nos quatro exames. A bacterioscopia é comparável "
         "quando mostra diplococos Gram-negativos (meningococo), cocobacilos (H. influenzae) ou diplococos Gram-positivos "
-        "(pneumococo). Categorias amplas, vazias, ignoradas, não realizadas ou sem agente são excluídas. Os códigos são "
-        "comparados literalmente: por exemplo, `01` é válido, enquanto `1` é mantido como preenchido e não é corrigido."
+        "(pneumococo). Categorias amplas, vazias, ignoradas, não realizadas ou sem agente são excluídas. Códigos de "
+        "colunas numéricas são padronizados antes da comparação, preservando o valor bruto nas tabelas de auditoria."
     )
     st.markdown("### Compatibilidade da bacterioscopia do líquor com culturas e PCR")
     compatibility_where = base_where
@@ -18453,26 +18413,32 @@ def render_methodology():
         por coincidirem com esse limite técnico.
         """
     )
-    st.markdown("### Raincloud plot half-eye da idade")
+    st.markdown("### Raincloud plots half-eye da idade e dos parâmetros liquóricos")
     st.markdown(
-        "O raincloud combina a meia densidade da idade, os intervalos P2,5–P97,5 e Q1–Q3, a mediana e as observações. "
+        "Os rainclouds combinam a meia densidade, os intervalos P2,5–P97,5 e Q1–Q3, a mediana e as observações. "
         "Losangos marcam P2,5/P97,5, quadrados marcam P25/P75 e o ponto branco marca P50; o cursor e a tabela abaixo "
-        "fornecem os valores exatos, e uma segunda tabela conta quantas vezes cada idade aparece. "
-        "No SINAN, o gráfico compara casos confirmados e descartados. SIM e CIHA não possuem uma classificação final "
-        "equivalente a `CLASSI_FIN`; nessas bases, o gráfico representa o conjunto definido pelos filtros. A densidade e "
-        "os resumos sempre usam todos os registros com idade válida entre 0 e 130 anos. Referência visual e conceitual: "
+        "fornecem os valores exatos, e a tabela de frequências registra a repetição de cada valor. No gráfico da idade, "
+        "o SINAN compara confirmados e descartados; SIM e CIHA representam o conjunto definido pelos filtros, pois não "
+        "possuem equivalente a `CLASSI_FIN`. São usados todos os registros com idade válida entre 0 e 130 anos.\n\n"
+        "Nos parâmetros liquóricos do SINAN, exige-se punção lombar e seleciona-se um único parâmetro por vez para reduzir "
+        "o custo de carregamento. O raincloud **sem estratificação etiológica** compara confirmados e descartados e não "
+        "oferece divisão por `CON_DIAGES`. O raincloud **por definição etiológica** separa meningites bacterianas ou "
+        "assépticas nos três graus de definição descritos na própria seção e exclui os critérios 04, 06 e 07, que "
+        "isoladamente não determinam etiologia. Em todos os rainclouds, os percentis ponderados 0,5% e 99,5% limitam "
+        "somente a janela desenhada da densidade; chuva de pontos, média, mediana, quartis e demais estatísticas continuam "
+        "usando 100% dos dados elegíveis. Referência visual e conceitual: "
         "[Cédric Scherer — Visualizing Distributions with Raincloud Plots]"
         "(https://www.cedricscherer.com/2021/06/06/visualizing-distributions-with-raincloud-plots-and-how-to-create-them-with-ggplot2/)."
     )
     st.markdown("### Auditoria dos métodos diagnósticos na Análise de planilha")
     st.markdown(
         "A seção usa todos os registros definidos pelos filtros e não exige `LAB_PUNCAO = 1`. Na auditoria "
-        "de completude, a representação literal da célula é comparada com o quadro correspondente do Dicionário "
-        "de Dados SINAN NET — Meningite v5.0: não há preenchimento automático, arredondamento nem inclusão de zero "
-        "à esquerda. Assim, se o dicionário prevê `62`, esse é um preenchimento válido; uma célula vazia é classificada "
-        "como vazia e um conteúdo como `620` é classificado como fora do dicionário. Para cada código válido, o "
-        "percentual usa somente o conjunto de células validamente preenchidas; vazios e valores inválidos são também "
-        "mostrados, mas não entram nesse denominador.\n\n"
+        "de completude, o código é comparado com o quadro correspondente do Dicionário de Dados SINAN NET — Meningite "
+        "v5.0. Colunas numéricas podem perder o zero à esquerda durante a conversão para Parquet; nesses casos, 1 e 7 "
+        "são padronizados como 01 e 07. Em colunas textuais, espaços, decimais e pontuação não são corrigidos. O gráfico "
+        "mostra três situações mutuamente exclusivas — preenchida corretamente, vazia e fora do dicionário — todas com "
+        "o total de casos elegíveis como denominador. Os agentes listados nos quadros servem somente para validar o código, "
+        "não para criar categorias etiológicas nesse gráfico.\n\n"
         "Os seletores não incluem `Clínico`, `Quimiocitológico` nem `Aspecto do Líquor`. Na análise de método único, "
         "exatamente um método deve ter resultado válido de exame realizado; `Nenhum agente` (`51`) e `Não identificado` "
         "(`75`) contam como resultado diagnóstico válido. Os demais métodos precisam estar vazios, ignorados, não "
@@ -18488,8 +18454,8 @@ def render_methodology():
         "registros com `LAB_PUNCAO = 1` e separa três situações mutuamente exclusivas: não preenchidos, preenchidos "
         "com valores distantes da literatura e preenchidos compatíveis. Confirmados com etiologia comparável usam "
         "a faixa específica; os demais usam a união das faixas da tabela-resumo. Os rainclouds calculam somente o "
-        "parâmetro escolhido: podem comparar confirmados e descartados, estratificar confirmados por CON_DIAGES sem "
-        "critério quimiocitológico ou comparar os três graus de definição etiológica das meningites bacterianas e "
+        "parâmetro escolhido: o gráfico sem estratificação etiológica compara confirmados e descartados; o gráfico "
+        "etiológico compara os três graus de definição das meningites bacterianas e "
         "assépticas, excluindo critérios clínico, quimiocitológico e clínico-epidemiológico nesta última análise."
     )
     st.markdown(
