@@ -68,7 +68,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-09-03-v84-composicao-criterios-diagnosticos"
+APP_VERSION = "2026-09-03-v85-serie-temporal-criterios"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos
@@ -5232,6 +5232,79 @@ def query_sinan_criterion_distribution(
     return run_query(table, sql)
 
 
+def query_sinan_criterion_timeseries(
+    table: LoadedTable,
+    dt_sql: str,
+    classi_sql: str,
+    criterion_sql: str,
+    where_sql: str,
+    stratum: str,
+) -> pd.DataFrame:
+    """Série anual dos critérios oficiais no estrato de CLASSI_FIN selecionado."""
+    if stratum == "Casos confirmados":
+        stratum_clause = f"({classi_sql}) = '1'"
+    elif stratum == "Casos descartados":
+        stratum_clause = f"({classi_sql}) = '2'"
+    else:
+        stratum_clause = f"({classi_sql}) IN ('1', '2')"
+    selected_where = append_clause(where_sql, stratum_clause)
+    criterion_rows_sql = ",\n                ".join(
+        f"({qstr(code)}, {qstr(label)}, {order})"
+        for order, (code, label) in enumerate(SINAN_CRITERIO.items(), start=1)
+    )
+    valid_codes_sql = ", ".join(qstr(code) for code in SINAN_CRITERIO)
+    sql = f"""
+        WITH criterios(codigo, criterio, ordem) AS (
+            VALUES {criterion_rows_sql}
+        ), universo AS (
+            SELECT ({dt_sql}) AS dt,
+                   ({criterion_sql}) AS codigo
+            FROM {table.ref_sql}
+            {selected_where}
+        ), casos_com_data AS (
+            SELECT CAST(EXTRACT(YEAR FROM dt) AS INTEGER) AS ano,
+                   codigo
+            FROM universo
+            WHERE dt IS NOT NULL
+        ), anos AS (
+            SELECT DISTINCT ano FROM casos_com_data
+        ), agregado AS (
+            SELECT ano, codigo, COUNT(*) AS n
+            FROM casos_com_data
+            WHERE codigo IN ({valid_codes_sql})
+            GROUP BY 1, 2
+        ), totais AS (
+            SELECT ano,
+                   COUNT(*) AS denominador_ano,
+                   COUNT(*) FILTER (WHERE codigo IN ({valid_codes_sql})) AS criterios_validos_ano
+            FROM casos_com_data
+            GROUP BY 1
+        ), grade AS (
+            SELECT a.ano, c.codigo, c.criterio, c.ordem
+            FROM anos a
+            CROSS JOIN criterios c
+        )
+        SELECT g.ano,
+               g.codigo,
+               g.criterio,
+               COALESCE(a.n, 0) AS n,
+               t.denominador_ano,
+               t.criterios_validos_ano,
+               CASE WHEN t.denominador_ano > 0
+                    THEN ROUND(100.0 * COALESCE(a.n, 0) / t.denominador_ano, 2)
+                    ELSE NULL END AS pct_ano,
+               CASE WHEN t.criterios_validos_ano > 0
+                    THEN ROUND(100.0 * COALESCE(a.n, 0) / t.criterios_validos_ano, 2)
+                    ELSE NULL END AS pct_criterios_validos_ano,
+               g.ordem
+        FROM grade g
+        JOIN totais t USING (ano)
+        LEFT JOIN agregado a USING (ano, codigo)
+        ORDER BY g.ano, g.ordem
+    """
+    return run_query(table, sql)
+
+
 def render_sinan_criterion_distribution_chart(
     table: LoadedTable,
     exprs: Dict[str, Optional[str]],
@@ -5330,6 +5403,123 @@ def render_sinan_criterion_distribution_chart(
     download_button(
         display_df,
         f"sinan_composicao_criterios_{stratum.lower().replace(' ', '_')}.csv",
+    )
+
+
+def render_sinan_criterion_timeseries_chart(
+    table: LoadedTable,
+    exprs: Dict[str, Optional[str]],
+    where_sql: str,
+    key_prefix: str,
+) -> None:
+    """Renderiza a evolução anual da composição de CRITERIO."""
+    st.markdown("#### Comportamento dos critérios diagnósticos ao longo do tempo")
+    st.caption(
+        "Cada linha representa um código oficial do Quadro V. O percentual é recalculado dentro de cada ano, "
+        "permitindo distinguir mudança na composição dos critérios de simples mudança no volume de casos."
+    )
+    dt_sql = exprs.get("dt")
+    classi_literal = exprs.get("classi_raw")
+    criterion_literal = exprs.get("criterio_raw")
+    missing_fields = [
+        label
+        for label, expression in (
+            ("data principal", dt_sql),
+            ("CLASSI_FIN", classi_literal),
+            ("CRITERIO", criterion_literal),
+        )
+        if not expression
+    ]
+    if missing_fields:
+        st.warning(
+            "Não foi possível gerar a série temporal porque faltam: " + ", ".join(missing_fields) + "."
+        )
+        return
+
+    c_stratum, c_measure = st.columns(2)
+    with c_stratum:
+        stratum = st.radio(
+            "Estratificação temporal dos critérios diagnósticos",
+            ["Total de casos", "Casos confirmados", "Casos descartados"],
+            horizontal=True,
+            key=f"{key_prefix}_criterion_timeseries_stratum",
+        )
+    with c_measure:
+        measure = st.radio(
+            "Medida exibida",
+            ["Percentual no ano", "Número absoluto"],
+            horizontal=True,
+            key=f"{key_prefix}_criterion_timeseries_measure",
+        )
+
+    temporal_df = query_sinan_criterion_timeseries(
+        table,
+        dt_sql,
+        classi_literal,
+        criterion_literal,
+        where_sql,
+        stratum,
+    )
+    if temporal_df.empty:
+        st.info(f"Não há registros com data válida em {stratum.lower()} no recorte atual.")
+        return
+
+    temporal_df = temporal_df.copy()
+    temporal_df["ano"] = pd.to_numeric(temporal_df["ano"], errors="coerce").astype("Int64")
+    temporal_df["n"] = pd.to_numeric(temporal_df["n"], errors="coerce").fillna(0)
+    active_codes = temporal_df.groupby("codigo", dropna=False)["n"].sum()
+    active_codes = set(active_codes.loc[active_codes > 0].index.astype(str))
+    plotted = temporal_df.loc[temporal_df["codigo"].astype(str).isin(active_codes)].copy()
+    if plotted.empty:
+        st.info(
+            "Há casos com data válida no estrato, mas nenhum possui um código CRITERIO oficial do Quadro V."
+        )
+    else:
+        y_col = "pct_ano" if measure == "Percentual no ano" else "n"
+        y_label = "% dos casos no ano" if measure == "Percentual no ano" else "Casos"
+        fig = px.line(
+            plotted,
+            x="ano",
+            y=y_col,
+            color="criterio",
+            markers=True,
+            title=f"Critérios diagnósticos ao longo do tempo — {stratum.lower()}",
+            labels={
+                "ano": "Ano",
+                y_col: y_label,
+                "criterio": "Critério diagnóstico",
+                "n": "Casos",
+                "pct_ano": "% dos casos no ano",
+                "pct_criterios_validos_ano": "% entre critérios válidos no ano",
+                "denominador_ano": "Total de casos no ano",
+                "criterios_validos_ano": "Casos com critério válido no ano",
+            },
+            category_orders={"criterio": list(SINAN_CRITERIO.values())},
+            hover_data={
+                "codigo": True,
+                "n": True,
+                "pct_ano": ":.2f",
+                "pct_criterios_validos_ano": ":.2f",
+                "denominador_ano": True,
+                "criterios_validos_ano": True,
+                "ordem": False,
+            },
+        )
+        fig.update_xaxes(dtick=1)
+        if measure == "Percentual no ano":
+            fig.update_yaxes(range=[0, 100])
+        render_plotly_chart(fig, calc_title="Série temporal dos critérios diagnósticos")
+
+    st.caption(
+        "O denominador de cada ano inclui todos os casos do estrato com data válida e CLASSI_FIN literal 1 ou 2, "
+        "mesmo quando CRITERIO está vazio ou fora de 01–10. Esses registros não são atribuídos a nenhuma linha; "
+        "portanto, no modo percentual, a soma dos critérios pode ser inferior a 100%."
+    )
+    display_df = temporal_df.drop(columns=["ordem"], errors="ignore")
+    copyable_dataframe(display_df, width="stretch", hide_index=True)
+    download_button(
+        display_df,
+        f"sinan_criterios_tempo_{stratum.lower().replace(' ', '_')}.csv",
     )
 
 
@@ -14968,6 +15158,12 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
         conversion_base_where,
         key_prefix="sinan_cid_etiology",
     )
+    render_sinan_criterion_timeseries_chart(
+        table,
+        exprs,
+        conversion_base_where,
+        key_prefix="sinan_cid_etiology",
+    )
 
     if exprs.get("con_label"):
         con_coverage_text = ""
@@ -18300,6 +18496,11 @@ def render_methodology():
         "A composição de `CRITERIO`, disponível em **Análise etiológica e CID-10** e **Análise etiológica detalhada**, "
         "pode ser alternada entre total válido (`CLASSI_FIN` 1 ou 2), confirmados e descartados. As barras exibem "
         "contagem e percentual do estrato completo; a tabela também apresenta o percentual entre critérios válidos."
+    )
+    st.markdown(
+        "Em **Análise etiológica e CID-10**, a série anual de `CRITERIO` reutiliza esses mesmos estratos e permite "
+        "alternar entre percentual dentro de cada ano e número absoluto. Anos sem um critério específico são "
+        "mantidos com zero para não interromper artificialmente a linha temporal."
     )
     st.markdown("### Referência CID-10")
     render_cid_reference()
