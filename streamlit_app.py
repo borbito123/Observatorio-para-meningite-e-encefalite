@@ -601,7 +601,7 @@ def _render_calc_expander(calc_title: Optional[str] = None) -> None:
 PLOT_EXPLANATION_RULES: List[Tuple[str, str]] = [
     ("raincloud", "Combina a distribuição suavizada, os percentis e as observações para mostrar centro, dispersão, assimetria e valores extremos sem esconder os dados individuais."),
     ("completude", "Compara o preenchimento segundo a regra declarada no próprio gráfico; as barras mostram números absolutos e percentuais calculados sobre o denominador informado."),
-    ("total de critérios diagnósticos", "Distribui os casos conforme nenhum, exatamente um ou dois ou mais dos sete campos laboratoriais possuam resultado oficial de exame realizado; as três barras são mutuamente exclusivas e reconciliam o total do estrato."),
+    ("total de métodos laboratoriais registrados", "Distribui os casos conforme nenhum, exatamente um ou dois ou mais dos sete campos laboratoriais possuam resultado oficial de exame realizado; as três barras são mutuamente exclusivas e reconciliam o total do estrato."),
     ("compatibilidade da bacterioscopia", "Compara o agente sugerido pela morfologia da bacterioscopia com cultura e PCR nos casos em que os resultados necessários são específicos e comparáveis."),
     ("preenchimento válido do campo criterio", "Verifica se CRITERIO contém um código oficial do Quadro V; o campo registra critério de confirmação, portanto sua ausência em descartados não permite concluir que não houve investigação ou fundamento para o descarte."),
     ("critério de confirmação", "Mostra quais critérios do campo CRITERIO foram registrados no estrato selecionado, permitindo comparar o peso relativo de cultura, PCR, clínica e demais critérios oficiais."),
@@ -2466,7 +2466,10 @@ SINAN_LCR_PARAM_METADATA: Dict[str, SinanLcrParameterMetadata] = {
         sentinel_codes=tuple(sorted(SINAN_LCR_SENTINEL_CODES)),
         teto_plausivel=SINAN_LCR_PLAUSIBLE_MAX["glico"],
         teto_sistema=(99,),
-        comportamento_truncamento="Dicionário operacional indicou máximo 99; sinalizar possível truncamento/teto.",
+        comportamento_truncamento=(
+            "Dicionário operacional indicou máximo 99, mas 7,2% dos valores registrados "
+            "ultrapassam esse limite — não deve ser tratado como teto confiável do campo real."
+        ),
         uso_permitido="distribuição, tabela-resumo e classificação exploratória; limpeza somente sob opt-in",
     ),
     "leuco": SinanLcrParameterMetadata(
@@ -2538,7 +2541,11 @@ SINAN_LCR_PARAM_METADATA: Dict[str, SinanLcrParameterMetadata] = {
         sentinel_codes=tuple(sorted(SINAN_LCR_SENTINEL_CODES)),
         teto_plausivel=SINAN_LCR_PLAUSIBLE_MAX["clor"],
         teto_sistema=(99,),
-        comportamento_truncamento="Dicionário operacional mostrou inconsistência entre máximo 99 e top valores 120-122; sinalizar e auditar.",
+        comportamento_truncamento=(
+            "Dicionário operacional indicou máximo 99, mas 93,8% dos valores registrados "
+            "ultrapassam esse limite — o campo real opera na faixa clínica usual de cloreto "
+            "(~120 mEq/L); o teto de 99 não deve ser usado como referência de plausibilidade."
+        ),
         uso_permitido="auditoria/completude; uso clínico limitado pela alta ausência",
     ),
 }
@@ -16350,7 +16357,7 @@ def render_sinan_diagnostic_method_count_analysis(
     )
     fig.update_layout(
         title=(
-            "Verificação de casos conforme o total de critérios diagnósticos — "
+            "Verificação de casos conforme o total de métodos laboratoriais registrados — "
             f"{group_label.lower()}"
         ),
         xaxis_title="Casos",
@@ -16362,7 +16369,7 @@ def render_sinan_diagnostic_method_count_analysis(
         categoryarray=list(reversed(category_order)),
         automargin=True,
     )
-    render_plotly_chart(fig, calc_title="Casos conforme o total de critérios diagnósticos")
+    render_plotly_chart(fig, calc_title="Casos conforme o total de métodos laboratoriais registrados")
     st.caption(
         f"Foram avaliados {format_int_br(total_eligible)} caso(s) em {group_label.lower()}; as três barras somam "
         f"{format_int_br(reconciled_total)} e são mutuamente exclusivas. A categoria depende apenas da quantidade de "
@@ -18806,7 +18813,7 @@ def render_spreadsheet_analysis_tab(
         "reprodutível. No Quadro XI, qualquer código oficial, inclusive 75, conta como isolamento viral realizado; apenas "
         "a célula vazia conta zero, porque o quadro não oferece 61/62."
     )
-    st.markdown("### Verificação de casos conforme o total de critérios diagnósticos")
+    st.markdown("### Verificação de casos conforme o total de métodos laboratoriais registrados")
     method_count_group = st.selectbox(
         "Estrato de casos para contagem dos métodos diagnósticos",
         group_options,
