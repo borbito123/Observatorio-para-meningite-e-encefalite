@@ -69,7 +69,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-09-04-v90-auditoria-metodos-etiologias-tukey"
+APP_VERSION = "2026-09-04-v91-raincloud-foco-robusto-dominios-loess"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos
@@ -1351,6 +1351,7 @@ SINAN_CLA_ME_BAC = {
 SINAN_CLA_ME_BAC_G01_CODES = {"11", "21", "45", "49"}
 
 SINAN_CLA_ME_ASS = {
+    "75": "75 — não identificado",
     "37": "37 — caxumba",
     "38": "38 — sarampo",
     "39": "39 — herpes simples",
@@ -1365,7 +1366,6 @@ SINAN_CLA_ME_ASS = {
     "72": "72 — dengue",
     "73": "73 — outros arbovírus",
     "74": "74 — outros vírus",
-    "75": "75 — não identificado",
 }
 
 SINAN_CLA_ME_ETI = {
@@ -5010,6 +5010,75 @@ def query_category(table: LoadedTable, category_sql: str, where_sql: str, top_n:
     return df
 
 
+def query_sinan_domain_distribution(
+    table: LoadedTable,
+    code_sql: str,
+    mapping: Dict[str, str],
+    where_sql: str,
+) -> pd.DataFrame:
+    """Distribui um campo codificado preservando todo o domínio oficial, inclusive zeros."""
+    if not code_sql or not mapping:
+        return pd.DataFrame()
+    domain_rows_sql = ",\n                ".join(
+        f"({qstr(code)}, {qstr(label)}, {order})"
+        for order, (code, label) in enumerate(mapping.items(), start=1)
+    )
+    valid_codes_sql = ", ".join(qstr(code) for code in mapping)
+    sql = f"""
+        WITH dominio(codigo, categoria, ordem) AS (
+            VALUES {domain_rows_sql}
+        ), universo AS (
+            SELECT ({code_sql}) AS codigo
+            FROM {table.ref_sql}
+            {where_sql}
+        ), agregado AS (
+            SELECT codigo, COUNT(*) AS n
+            FROM universo
+            WHERE codigo IN ({valid_codes_sql})
+            GROUP BY 1
+        ), totais AS (
+            SELECT COUNT(*) AS total_grupo,
+                   COUNT(*) FILTER (WHERE codigo IN ({valid_codes_sql})) AS total_validamente_preenchido,
+                   COUNT(*) FILTER (WHERE codigo IS NULL OR codigo NOT IN ({valid_codes_sql})) AS sem_codigo_valido
+            FROM universo
+        ), linhas AS (
+            SELECT d.codigo,
+                   d.categoria,
+                   'Código oficial' AS status_preenchimento,
+                   COALESCE(a.n, 0) AS n,
+                   t.total_grupo,
+                   t.total_validamente_preenchido,
+                   d.ordem
+            FROM dominio d
+            CROSS JOIN totais t
+            LEFT JOIN agregado a USING (codigo)
+            UNION ALL
+            SELECT '',
+                   'Sem código válido (célula vazia ou fora do dicionário)',
+                   'Sem código válido',
+                   t.sem_codigo_valido,
+                   t.total_grupo,
+                   t.total_validamente_preenchido,
+                   {len(mapping) + 1}
+            FROM totais t
+        )
+        SELECT codigo,
+               categoria,
+               status_preenchimento,
+               n,
+               total_grupo,
+               total_validamente_preenchido,
+               CASE WHEN total_grupo > 0 THEN ROUND(100.0 * n / total_grupo, 2) ELSE NULL END AS pct,
+               CASE WHEN status_preenchimento = 'Código oficial' AND total_validamente_preenchido > 0
+                    THEN ROUND(100.0 * n / total_validamente_preenchido, 2)
+                    ELSE NULL END AS pct_entre_validamente_preenchidos,
+               ordem
+        FROM linhas
+        ORDER BY ordem
+    """
+    return run_query(table, sql)
+
+
 def query_field_coverage(table: LoadedTable, field_sql: str, where_sql: str) -> pd.DataFrame:
     """Total, preenchidos, ausentes e cobertura para subtítulos de gráficos."""
     sql = f"""
@@ -5515,6 +5584,7 @@ def render_sinan_criterion_timeseries_chart(
     criterion_codes: Optional[Sequence[str]] = None,
     scope_label: Optional[str] = None,
     population_note: Optional[str] = None,
+    show_zero_series: bool = False,
 ) -> None:
     """Renderiza pontos anuais e tendência LOESS da composição de CRITERIO."""
     heading_context = scope_label or (fixed_stratum.lower() if fixed_stratum else "")
@@ -5525,7 +5595,8 @@ def render_sinan_criterion_timeseries_chart(
         "anuais efetivamente observados; a linha é uma tendência LOESS descritiva traçada sobre esses pontos, e não "
         "uma contagem observada adicional. Em **Percentual no ano**, cada ponto é `casos daquele critério no ano ÷ "
         "todos os casos elegíveis daquele ano × 100`; em **Número absoluto**, mostra-se diretamente a contagem anual. "
-        "O denominador é, portanto, recalculado ano a ano."
+        "O denominador é, portanto, recalculado ano a ano. Uma explicação didática do algoritmo, das escolhas e das "
+        "limitações está na seção **Metodologia — Gráficos de linha com suavização LOESS**."
     )
     dt_sql = exprs.get("dt")
     classi_code = exprs.get("classi_code")
@@ -5581,9 +5652,12 @@ def render_sinan_criterion_timeseries_chart(
     temporal_df = temporal_df.copy()
     temporal_df["ano"] = pd.to_numeric(temporal_df["ano"], errors="coerce").astype("Int64")
     temporal_df["n"] = pd.to_numeric(temporal_df["n"], errors="coerce").fillna(0)
-    active_codes = temporal_df.groupby("codigo", dropna=False)["n"].sum()
-    active_codes = set(active_codes.loc[active_codes > 0].index.astype(str))
-    plotted = temporal_df.loc[temporal_df["codigo"].astype(str).isin(active_codes)].copy()
+    if show_zero_series:
+        plotted = temporal_df.copy()
+    else:
+        active_codes = temporal_df.groupby("codigo", dropna=False)["n"].sum()
+        active_codes = set(active_codes.loc[active_codes > 0].index.astype(str))
+        plotted = temporal_df.loc[temporal_df["codigo"].astype(str).isin(active_codes)].copy()
     if plotted.empty:
         st.info(
             "Há casos com data válida no estrato, mas nenhum possui um código CRITERIO oficial do Quadro V."
@@ -5704,6 +5778,14 @@ def render_sinan_criterion_timeseries_chart(
         "teste de significância ou evidência causal. Oscilações em anos com denominadores pequenos exigem cautela; "
         "confira no cursor e na tabela o total anual, os casos do critério e a quantidade com `CRITERIO` válido."
     )
+    if show_zero_series:
+        first_year = int(pd.to_numeric(temporal_df["ano"], errors="coerce").min())
+        last_year = int(pd.to_numeric(temporal_df["ano"], errors="coerce").max())
+        st.caption(
+            f"Domínio completo ativado: todos os critérios elegíveis são exibidos de {first_year} a {last_year}, "
+            "inclusive como séries horizontais em zero quando não houve registro. O intervalo começa no primeiro ano "
+            "em que existe ao menos um caso que satisfaz integralmente o recorte, não no primeiro ano bruto da base."
+        )
     if "valor_loess" in plotted.columns:
         temporal_df["valor_loess"] = pd.to_numeric(plotted["valor_loess"], errors="coerce")
     display_df = temporal_df.drop(columns=["ordem"], errors="ignore")
@@ -6285,15 +6367,26 @@ def _weighted_density(
     std = float(np.sqrt(max(variance, 0.0)))
     q1 = _weighted_quantile(values, weights, 0.25)
     q3 = _weighted_quantile(values, weights, 0.75)
-    robust_sigma = (q3 - q1) / 1.34 if q3 > q1 else std
-    span = max(float(values.max()) - float(values.min()), 1.0)
-    scale = min(x for x in [std, robust_sigma] if x > 0) if any(x > 0 for x in [std, robust_sigma]) else span / 20.0
-    bandwidth = 0.9 * scale * max(total, 2.0) ** (-0.2)
-    bandwidth = max(float(min_bandwidth if min_bandwidth is not None else span / 2000.0), bandwidth)
-    bandwidth = min(float(max_bandwidth if max_bandwidth is not None else max(span / 3.0, bandwidth)), bandwidth)
-    # Cerca de Tukey de 3×IQR — Steyerberg, Clinical Prediction Models, cap. 9.4.
-    # Limita somente a janela visual; estatísticas e chuva mantêm 100% dos dados.
     iqr = q3 - q1
+    central_low = _weighted_quantile(values, weights, 0.005)
+    central_high = _weighted_quantile(values, weights, 0.995)
+    central_span = max(central_high - central_low, 1.0)
+    if iqr > 0:
+        robust_sigma = iqr / 1.34
+        scale_candidates = [candidate for candidate in (std, robust_sigma) if candidate > 0]
+        scale = min(scale_candidates) if scale_candidates else central_span / 20.0
+    else:
+        # Em distribuições zero-infladas, um extremo isolado pode dominar o desvio-padrão.
+        # O fallback usa uma escala global robusta; não se trata de KDE adaptativo.
+        median = _weighted_quantile(values, weights, 0.50)
+        mad = _weighted_quantile(np.abs(values - median), weights, 0.50)
+        mad_sigma = mad / 0.6744897501960817 if mad > 0 else 0.0
+        scale = mad_sigma if mad_sigma > 0 else central_span / 20.0
+    bandwidth = 0.9 * scale * max(total, 2.0) ** (-0.2)
+    bandwidth = max(float(min_bandwidth if min_bandwidth is not None else central_span / 2000.0), bandwidth)
+    bandwidth = min(float(max_bandwidth if max_bandwidth is not None else max(central_span / 3.0, bandwidth)), bandwidth)
+    # Cerca de Tukey de 3×IQR — Steyerberg, Clinical Prediction Models, cap. 9.4.
+    # Limita somente a janela visual; estatísticas preservam 100% dos dados.
     if iqr > 0:
         fence_low = q1 - 3.0 * iqr
         fence_high = q3 + 3.0 * iqr
@@ -6332,11 +6425,14 @@ def make_weighted_raincloud_halfeye(
     min_bandwidth: Optional[float] = None,
     max_bandwidth: Optional[float] = None,
     max_rain_points_per_group: int = 2500,
+    show_full_range: bool = False,
 ) -> Tuple[go.Figure, pd.DataFrame, bool]:
-    """Monta raincloud half-eye ponderado, com cinco percentis marcados."""
+    """Monta raincloud half-eye ponderado, com foco robusto e cinco percentis."""
     fig = go.Figure()
     summary_rows: List[Dict[str, object]] = []
     sampled_rain = False
+    visual_lows: List[float] = []
+    visual_highs: List[float] = []
     palette = [PLOTLY_DEFAULT_BLUE, "#FF7F0E", "#2CA02C", "#9467BD"]
     groups_present = [g for g in group_order if g in set(frequency["grupo"].astype(str))]
     for group_index, group in enumerate(groups_present):
@@ -6362,6 +6458,10 @@ def make_weighted_raincloud_halfeye(
             min_bandwidth=min_bandwidth,
             max_bandwidth=max_bandwidth,
         )
+        visual_low = float(grid[0])
+        visual_high = float(grid[-1])
+        visual_lows.append(visual_low)
+        visual_highs.append(visual_high)
         density_scaled = density / max(float(density.max()), 1e-12) * 0.34
         fig.add_trace(go.Scatter(
             x=np.concatenate([grid, grid[::-1]]),
@@ -6380,18 +6480,24 @@ def make_weighted_raincloud_halfeye(
         q3 = _weighted_quantile(values, weights, 0.75)
         q975 = _weighted_quantile(values, weights, 0.975)
         mean = float(np.average(values, weights=weights))
+        percentile_values = np.asarray([q025, q1, median, q3, q975], dtype=float)
+        percentile_display = (
+            percentile_values
+            if show_full_range
+            else np.clip(percentile_values, visual_low, visual_high)
+        )
         fig.add_trace(go.Scatter(
-            x=[q025, q975], y=[baseline, baseline], mode="lines",
+            x=[percentile_display[0], percentile_display[4]], y=[baseline, baseline], mode="lines",
             line={"color": color, "width": 3}, legendgroup=group,
             showlegend=False, hovertemplate=f"P2,5={q025:.2f}; P97,5={q975:.2f}{unit_suffix}<extra>{group}</extra>",
         ))
         fig.add_trace(go.Scatter(
-            x=[q1, q3], y=[baseline, baseline], mode="lines",
+            x=[percentile_display[1], percentile_display[3]], y=[baseline, baseline], mode="lines",
             line={"color": color, "width": 11}, legendgroup=group,
             showlegend=False, hovertemplate=f"Q1={q1:.2f}; Q3={q3:.2f}<extra>{group}</extra>",
         ))
         fig.add_trace(go.Scatter(
-            x=[q025, q1, median, q3, q975],
+            x=percentile_display,
             y=[baseline] * 5,
             mode="markers",
             marker={
@@ -6401,24 +6507,51 @@ def make_weighted_raincloud_halfeye(
                 "symbol": ["diamond-open", "square-open", "circle", "square-open", "diamond-open"],
             },
             text=["P2,5", "Q1 (P25)", "Mediana (P50)", "Q3 (P75)", "P97,5"],
+            customdata=percentile_values,
             legendgroup=group, showlegend=False,
-            hovertemplate=f"%{{text}}: %{{x:.2f}}{unit_suffix}<extra>{group}</extra>",
+            hovertemplate=f"%{{text}}: %{{customdata:.2f}}{unit_suffix}<extra>{group}</extra>",
         ))
         rain_count = min(total, int(max_rain_points_per_group))
         sampled_rain = sampled_rain or total > rain_count
         cumulative = np.cumsum(weights)
-        positions = (np.arange(rain_count, dtype=float) + 0.5) * total / max(rain_count, 1)
+        positions = (
+            np.linspace(0.5, max(total - 0.5, 0.5), rain_count)
+            if rain_count > 1
+            else np.asarray([0.5])
+        )
         rain_values = values[np.searchsorted(cumulative, positions, side="left")]
+        rain_display = (
+            rain_values
+            if show_full_range
+            else np.clip(rain_values, visual_low, visual_high)
+        )
+        rain_position = np.where(
+            rain_values < visual_low,
+            "Abaixo da janela central",
+            np.where(rain_values > visual_high, "Acima da janela central", "Dentro da janela central"),
+        )
+        rain_symbols = np.where(
+            rain_values < visual_low,
+            "triangle-left",
+            np.where(rain_values > visual_high, "triangle-right", "circle"),
+        )
+        rain_customdata = np.empty((rain_count, 2), dtype=object)
+        rain_customdata[:, 0] = rain_values
+        rain_customdata[:, 1] = rain_position
         rain_offsets = 0.10 + 0.18 * np.mod(np.arange(rain_count, dtype=float) * 0.61803398875, 1.0)
         fig.add_trace(go.Scattergl(
-            x=rain_values,
+            x=rain_display,
             y=baseline - rain_offsets,
             mode="markers",
-            marker={"color": color, "size": 5, "opacity": 0.34},
+            marker={"color": color, "size": 5, "opacity": 0.34, "symbol": rain_symbols},
             name=f"{group} — observações",
             legendgroup=group,
             showlegend=False,
-            hovertemplate=f"{value_label}: %{{x:.2f}}{unit_suffix}<extra>Observação</extra>",
+            customdata=rain_customdata,
+            hovertemplate=(
+                f"{value_label} original: %{{customdata[0]:.2f}}{unit_suffix}"
+                "<br>%{customdata[1]}<extra>Observação</extra>"
+            ),
         ))
         summary_rows.append({
             "grupo": group,
@@ -6431,6 +6564,10 @@ def make_weighted_raincloud_halfeye(
             f"p97_5_{summary_prefix}": round(q975, 3),
             f"minimo_{summary_prefix}": round(float(values.min()), 3),
             f"maximo_{summary_prefix}": round(float(values.max()), 3),
+            f"limite_visual_inferior_{summary_prefix}": round(visual_low, 3),
+            f"limite_visual_superior_{summary_prefix}": round(visual_high, 3),
+            "n_abaixo_da_janela_visual": int(weights[values < visual_low].sum()),
+            "n_acima_da_janela_visual": int(weights[values > visual_high].sum()),
             "pontos_visiveis_na_chuva": rain_count,
         })
     tickvals = list(range(len(groups_present)))
@@ -6451,7 +6588,9 @@ def make_weighted_raincloud_halfeye(
     )
     fig.update_xaxes(tickfont={"size": 13}, title_font={"size": 14}, automargin=True)
     fig.update_yaxes(tickfont={"size": 13}, title_font={"size": 14}, automargin=True)
-    if lower_bound is not None and upper_bound is not None:
+    if not show_full_range and visual_lows and visual_highs:
+        fig.update_xaxes(range=[min(visual_lows), max(visual_highs)])
+    elif lower_bound is not None and upper_bound is not None:
         fig.update_xaxes(range=[float(lower_bound), float(upper_bound)])
     return fig, pd.DataFrame(summary_rows), sampled_rain
 
@@ -6461,6 +6600,7 @@ def make_age_raincloud_halfeye(
     title: str,
     group_order: Sequence[str],
     max_rain_points_per_group: int = 2500,
+    show_full_range: bool = False,
 ) -> Tuple[go.Figure, pd.DataFrame, bool]:
     """Raincloud da idade, com limites válidos de 0 a 130 anos."""
     return make_weighted_raincloud_halfeye(
@@ -6477,6 +6617,7 @@ def make_age_raincloud_halfeye(
         min_bandwidth=0.08,
         max_bandwidth=8.0,
         max_rain_points_per_group=max_rain_points_per_group,
+        show_full_range=show_full_range,
     )
 
 
@@ -15226,7 +15367,9 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                 "como 'com código válido registrado' apenas se `CRITERIO` corresponder a um código oficial do Quadro V (`01` a `10`). "
                 "Em colunas numéricas, valores como 1 e 7 são equivalentes a 01 e 07 porque o formato não preserva zero à "
                 "esquerda; conteúdo textual malformado e códigos não previstos contam como ausência de código válido. "
-                "O total é exatamente a soma de confirmados e descartados, e cada barra usa seu próprio denominador."
+                "O gráfico audita exclusivamente o preenchimento do campo `CRITERIO`; ele não procura resultados nos campos "
+                "laboratoriais dos Quadros VII a XII e não os converte em um código de `CRITERIO`. O total é exatamente a "
+                "soma de confirmados e descartados, e cada barra usa seu próprio denominador."
             )
             discarded_rows = criterio_presenca.loc[
                 criterio_presenca["estrato"].astype(str).eq("Casos descartados")
@@ -15254,10 +15397,15 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                 )
                 st.info(
                     f"No recorte atual, nenhum dos {br_int(discarded_total)} casos descartados possui código válido em "
-                    "`CRITERIO`. Isso não demonstra ausência de investigação, exames ou fundamento para o descarte: "
-                    "segundo o dicionário SINAN, `CRITERIO` registra o critério usado para confirmar o caso. "
+                    "`CRITERIO`. Isso é coerente com a lógica condicional da ficha: o campo registra o critério de "
+                    "**confirmação**, não um motivo codificado de descarte, e portanto não deve ser preenchido "
+                    "retroativamente a partir dos exames. O resultado não demonstra ausência de investigação, exames ou "
+                    "fundamento para o descarte. "
                     f"Entre os descartados, {br_int(discarded_with_performed_method)} possuem ao menos um método "
-                    "laboratorial dos Quadros VII a XII marcado com resultado válido de exame realizado."
+                    "laboratorial dos Quadros VII a XII marcado com resultado válido de exame realizado. Esse número "
+                    "documenta investigação laboratorial registrada — inclusive resultados como `Nenhum agente` ou `Não "
+                    "identificado` —, mas não permite afirmar, sozinho, que o exame foi o fundamento decisório do descarte. "
+                    "Por isso esses casos permanecem corretamente em 'Sem código válido registrado em CRITERIO'."
                 )
             display_criterion_presence = criterio_presenca.drop(
                 columns=["ordem_estrato", "ordem_presenca", "texto"], errors="ignore"
@@ -15388,6 +15536,7 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
             con_filter_codes: Sequence[str],
             label_expr: Optional[str],
             label_code_expr: Optional[str],
+            domain_mapping: Dict[str, str],
             campo_nome: str,
             csv_name: str,
         ) -> None:
@@ -15400,7 +15549,9 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
             if grupo_total <= 0:
                 st.caption(f"{titulo}: nenhum caso confirmado com CON_DIAGES em ({', '.join(con_filter_codes)}) no recorte atual.")
                 return
-            especif_df = query_category(table, label_expr, where_grupo, top_n=40)
+            especif_df = query_sinan_domain_distribution(
+                table, label_code_expr, domain_mapping, where_grupo
+            )
             if especif_df.empty:
                 return
             especif_df = especif_df.copy()
@@ -15436,14 +15587,28 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                 },
                 hover_data={"texto": False, "pct": ":.2f", "pct_confirmados": ":.2f"},
             )
-            fig_especif.update_layout(yaxis={"categoryorder": "total ascending"})
+            category_order = especif_df["categoria"].astype(str).tolist()
+            fig_especif.update_yaxes(
+                categoryorder="array",
+                categoryarray=list(reversed(category_order)),
+                automargin=True,
+                tickfont={"size": 11},
+            )
+            fig_especif.update_xaxes(automargin=True)
+            fig_especif.update_layout(
+                height=max(760, 48 * len(category_order) + 220),
+                margin={"l": 340, "r": 210, "t": 115, "b": 80},
+            )
+            fig_especif.update_traces(textposition="outside", cliponaxis=False)
             if not coverage_df.empty:
                 render_field_completeness_warning(coverage_df, campo_nome)
             render_plotly_chart(fig_especif, calc_title=titulo)
             st.caption(
                 f"Grupo de referência: {br_int(grupo_total)} caso(s) confirmado(s) com CON_DIAGES em "
                 f"({', '.join(con_filter_codes)}). % do grupo é calculado sobre esse subtotal; % dos confirmados é "
-                f"calculado sobre o total de {br_int(total_confirmados_especificacao)} caso(s) confirmado(s) do recorte."
+                f"calculado sobre o total de {br_int(total_confirmados_especificacao)} caso(s) confirmado(s) do recorte. "
+                "Todas as opções oficiais do quadro permanecem no gráfico e na tabela, inclusive quando n=0; a linha "
+                "final reúne células sem código válido para que o subtotal do grupo seja reconciliável."
             )
             render_interval_total(especif_df, value_col="n", value_label="casos")
             copyable_dataframe(especif_df, width="stretch", hide_index=True)
@@ -15454,6 +15619,7 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
             ["05"],
             exprs.get("cla_me_bac_label"),
             exprs.get("cla_me_bac_code"),
+            SINAN_CLA_ME_BAC,
             "Bactéria (CLA_ME_BAC — Quadro II)",
             "sinan_especificacao_outras_bacterias.csv",
         )
@@ -15462,6 +15628,7 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
             ["07"],
             exprs.get("cla_me_ass_label"),
             exprs.get("cla_me_ass_code"),
+            SINAN_CLA_ME_ASS,
             "Agente (CLA_ME_ASS — Quadro III)",
             "sinan_especificacao_meningite_asseptica.csv",
         )
@@ -15470,6 +15637,7 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
             ["08"],
             exprs.get("cla_me_eti_label"),
             exprs.get("cla_me_eti_code"),
+            SINAN_CLA_ME_ETI,
             "Etiologia (CLA_ME_ETI — Quadro IV)",
             "sinan_especificacao_outras_etiologias.csv",
         )
@@ -15478,6 +15646,7 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
             ["01", "02", "03"],
             exprs.get("cla_sorogr_label"),
             exprs.get("cla_sorogr_code"),
+            SINAN_CLA_SOROGR,
             "Sorogrupo (CLA_SOROGR — Quadro VI)",
             "sinan_especificacao_sorogrupos_nmeningitidis.csv",
         )
@@ -16436,8 +16605,9 @@ def render_sinan_lcr_raincloud_chart(
             warning_text = (
                 f"⚠️ ATENÇÃO: foram encontrados {format_int_br(len(aberrant_df))} caso(s) com "
                 f"{parameter_label.lower()} acima de {limit_text}. Esses valores são incompatíveis com uma "
-                "proporção percentual e foram retirados apenas do raincloud; permanecem preservados no banco "
-                "e estão listados integralmente abaixo."
+                "proporção percentual, mas permanecem no raincloud, nos resumos e no banco para não transformar "
+                "uma suspeita de erro em exclusão automática. Eles estão listados integralmente abaixo e, no foco "
+                "visual robusto, são representados no limite com o valor original disponível no cursor."
             )
             st.error(warning_text)
             copyable_dataframe(aberrant_df, width="stretch", hide_index=True)
@@ -16453,15 +16623,19 @@ def render_sinan_lcr_raincloud_chart(
                 + "%"
                 + " foi encontrado no recorte atual."
             )
-        if not frequency.empty:
-            frequency = frequency[
-                pd.to_numeric(frequency["valor"], errors="coerce") <= fixed_upper_bound
-            ].copy()
-
     if frequency.empty:
         st.info("Não há valores numéricos dentro do intervalo exibido para gerar este raincloud.")
         return
     unit = meta.unidade if meta else "valor registrado"
+    show_full_range = st.checkbox(
+        "Mostrar a amplitude horizontal completa (inclui extremos na escala)",
+        value=False,
+        key=f"{file_prefix}_{param_key}_raincloud_full_range",
+        help=(
+            "Desligado: usa foco visual robusto e representa extremos nos limites por triângulos. "
+            "Ligado: restaura a escala da amplitude completa; as estatísticas não mudam."
+        ),
+    )
     fig, summary, sampled = make_weighted_raincloud_halfeye(
         frequency,
         title,
@@ -16472,9 +16646,25 @@ def render_sinan_lcr_raincloud_chart(
         summary_prefix=param_key,
         unit_suffix=f" {unit}",
         lower_bound=0.0,
-        upper_bound=fixed_upper_bound,
+        upper_bound=None,
+        show_full_range=show_full_range,
     )
+    if fixed_upper_bound is not None:
+        fig.add_vline(
+            x=float(fixed_upper_bound),
+            line_dash="dash",
+            line_color="#7F7F7F",
+            annotation_text="Limite lógico de 100%",
+            annotation_position="top right",
+        )
     render_plotly_chart(fig, calc_title=title)
+    if not show_full_range:
+        st.caption(
+            "Foco visual robusto ativado: o eixo e o half-eye usam a janela central definida pela cerca de Tukey de "
+            "3×IQR, acrescida de três bandwidths. Observações da chuva além da janela não são apagadas nem alteradas: aparecem "
+            "como triângulos no limite correspondente, com o valor original no cursor, e continuam nas estatísticas e "
+            "nas tabelas. Ative a amplitude completa acima para inspecionar a posição horizontal original dos extremos."
+        )
     if sampled:
         st.caption(
             "A chuva mostra amostra sistemática determinística de até 2.500 observações por grupo; densidade e "
@@ -16721,10 +16911,20 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
         if age_frequency.empty:
             st.info("Sem idades válidas entre 0 e 130 anos para gerar o raincloud plot com os filtros atuais.")
             return
+        show_full_age_range = st.checkbox(
+            "Mostrar a amplitude horizontal completa da idade",
+            value=False,
+            key=f"{source.lower()}_age_raincloud_full_range",
+            help=(
+                "Desligado: usa foco visual robusto; ligado: mostra todo o intervalo observado de 0 a 130 anos. "
+                "A escolha não modifica estatísticas nem registros."
+            ),
+        )
         fig_rain, summary_rain, sampled_rain = make_age_raincloud_halfeye(
             age_frequency,
             title,
             group_order,
+            show_full_range=show_full_age_range,
         )
         if summary_rain.empty:
             st.info("Sem dados suficientes de idade para gerar o raincloud plot.")
@@ -16734,7 +16934,9 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
             "A meia densidade mostra o formato da distribuição; a linha fina representa P2,5–P97,5; a linha grossa, "
             "Q1–Q3; losangos marcam P2,5/P97,5, quadrados marcam P25/P75 e o ponto branco marca a mediana. "
             "Passe o cursor sobre cada marcador para ver o valor exato. Os pontos inferiores representam observações; "
-            "a densidade e os resumos usam todos os registros válidos, sem arredondar ou agrupar a idade em faixas."
+            "a densidade e os resumos usam todos os registros válidos, sem arredondar ou agrupar a idade em faixas. "
+            "No foco visual robusto, valores além da janela central aparecem como triângulos no limite, mantendo o valor "
+            "original no cursor; a amplitude completa pode ser restaurada no controle acima."
         )
         if source != "SINAN":
             st.caption(
@@ -17583,8 +17785,17 @@ def render_detailed_etiology_analysis_tab(
         st.info(
             "Esta série inclui exclusivamente casos confirmados do grupo etiológico selecionado. São excluídos os "
             "casos determinados por critério clínico (`04`), quimiocitológico (`06`) ou clínico-epidemiológico (`07`), "
-            "pois esses três critérios, isoladamente, não demonstram a etiologia bacteriana ou asséptica."
+            "pois esses três critérios, isoladamente, não demonstram a etiologia bacteriana ou asséptica. Permanecem "
+            "no eixo e na legenda todos os demais critérios do Quadro V — cultura (`01`), CIE (`02`), látex (`03`), "
+            "bacterioscopia (`05`), isolamento viral (`08`), PCR (`09`) e outro (`10`) — mesmo quando a série inteira é zero."
         )
+        if temporal_etiology_group == "Meningites assépticas":
+            st.caption(
+                "No Quadro III, as etiologias assépticas nomeadas admitem principalmente os critérios 07, 08 e 09. "
+                "Como 07 é excluído neste recorte por não comprovar sozinho o agente, a informação observada tende a se "
+                "concentrar em isolamento viral (08) e PCR (09); os demais critérios continuam visíveis como referência "
+                "de ausência de registro, e não como métodos esperados para toda meningite asséptica."
+            )
         render_sinan_criterion_timeseries_chart(
             table,
             exprs,
@@ -17596,6 +17807,7 @@ def render_detailed_etiology_analysis_tab(
             population_note=(
                 f"CLASSI_FIN=1, CON_DIAGES em ({', '.join(con_codes)}) e CRITERIO diferente de 04, 06 e 07"
             ),
+            show_zero_series=True,
         )
     else:
         st.warning(
@@ -17680,7 +17892,9 @@ def render_detailed_etiology_analysis_tab(
     elif total_outras_bacterias <= 0:
         st.info("Nenhum caso confirmado com CON_DIAGES=05 (meningite por outras bactérias) no recorte atual.")
     else:
-        bacteria_df = query_category(table, bac_label, other_bacteria_where, top_n=40)
+        bacteria_df = query_sinan_domain_distribution(
+            table, bac_code, SINAN_CLA_ME_BAC, other_bacteria_where
+        )
         if not bacteria_df.empty:
             bacteria_df = bacteria_df.copy()
             bacteria_df["pct_confirmados"] = (
@@ -17712,13 +17926,26 @@ def render_detailed_etiology_analysis_tab(
                 },
                 hover_data={"texto": False, "pct": ":.2f", "pct_confirmados": ":.2f"},
             )
-            fig_bacteria.update_layout(yaxis={"categoryorder": "total ascending"})
+            bacteria_order = bacteria_df["categoria"].astype(str).tolist()
+            fig_bacteria.update_yaxes(
+                categoryorder="array",
+                categoryarray=list(reversed(bacteria_order)),
+                automargin=True,
+                tickfont={"size": 11},
+            )
+            fig_bacteria.update_xaxes(automargin=True)
+            fig_bacteria.update_layout(
+                height=max(760, 48 * len(bacteria_order) + 220),
+                margin={"l": 340, "r": 210, "t": 115, "b": 80},
+            )
+            fig_bacteria.update_traces(textposition="outside", cliponaxis=False)
             if not bac_coverage_df.empty:
                 render_field_completeness_warning(bac_coverage_df, "CLA_ME_BAC")
             render_plotly_chart(fig_bacteria, calc_title="Especificação de meningite por outras bactérias")
             st.caption(
                 f"Grupo de referência: {br_int(total_outras_bacterias)} caso(s) confirmado(s) com CON_DIAGES=05; "
-                f"o total geral de confirmados no recorte é {br_int(total_confirmados)}."
+                f"o total geral de confirmados no recorte é {br_int(total_confirmados)}. Todas as opções do Quadro II "
+                "são mantidas, inclusive as de contagem zero; a linha sem código válido reconcilia o subtotal."
             )
             render_interval_total(bacteria_df, value_col="n", value_label="casos")
             copyable_dataframe(bacteria_df, width="stretch", hide_index=True)
@@ -17781,7 +18008,9 @@ def render_detailed_etiology_analysis_tab(
     elif total_assepticas <= 0:
         st.info("Nenhum caso confirmado com CON_DIAGES=07 (meningite asséptica) no recorte atual.")
     else:
-        aseptic_df = query_category(table, ass_label, aseptic_where, top_n=40)
+        aseptic_df = query_sinan_domain_distribution(
+            table, ass_code, SINAN_CLA_ME_ASS, aseptic_where
+        )
         if not aseptic_df.empty:
             aseptic_df = aseptic_df.copy()
             aseptic_df["pct_confirmados"] = (
@@ -17813,24 +18042,46 @@ def render_detailed_etiology_analysis_tab(
                 },
                 hover_data={"texto": False, "pct": ":.2f", "pct_confirmados": ":.2f"},
             )
-            fig_aseptic.update_layout(yaxis={"categoryorder": "total ascending"})
+            aseptic_order = aseptic_df["categoria"].astype(str).tolist()
+            fig_aseptic.update_yaxes(
+                categoryorder="array",
+                categoryarray=list(reversed(aseptic_order)),
+                automargin=True,
+                tickfont={"size": 11},
+            )
+            fig_aseptic.update_xaxes(automargin=True)
+            fig_aseptic.update_layout(
+                height=max(760, 48 * len(aseptic_order) + 220),
+                margin={"l": 340, "r": 210, "t": 115, "b": 80},
+            )
+            fig_aseptic.update_traces(textposition="outside", cliponaxis=False)
             if not ass_coverage_df.empty:
                 render_field_completeness_warning(ass_coverage_df, "CLA_ME_ASS")
             render_plotly_chart(fig_aseptic, calc_title="Especificação de meningite asséptica")
             st.caption(
                 f"Grupo de referência: {br_int(total_assepticas)} caso(s) confirmado(s) com CON_DIAGES=07; "
-                f"o total geral de confirmados no recorte é {br_int(total_confirmados)}. Os códigos e agentes seguem o Quadro III."
+                f"o total geral de confirmados no recorte é {br_int(total_confirmados)}. Os códigos e agentes seguem o "
+                "Quadro III e permanecem visíveis mesmo quando n=0; a linha sem código válido reconcilia o subtotal."
             )
             render_interval_total(aseptic_df, value_col="n", value_label="casos")
             copyable_dataframe(aseptic_df, width="stretch", hide_index=True)
             download_button(aseptic_df, "sinan_etiologia_especificacao_meningite_asseptica.csv")
 
-    st.markdown("#### Tabelas discriminatórias por diagnóstico viral/asséptico")
+    st.markdown("#### Tabelas discriminatórias por especificação de meningite asséptica")
     st.caption(
         "Selecione uma das etiologias oficiais do Quadro III, inclusive `75 — não identificado`. A tabela mantém "
         "somente casos com CLASSI_FIN=1, CON_DIAGES=07 e o código escolhido em CLA_ME_ASS, exibindo também código e "
         "descrição de CRITERIO para revisão caso a caso. Todas as opções do Quadro III permanecem disponíveis no seletor, "
         "mesmo quando não há casos no recorte atual."
+    )
+    st.info(
+        "Precisão conceitual: esta é uma tabela do **preenchimento de CLA_ME_ASS**, não uma prova de etiologia viral. "
+        "O Quadro III mistura agentes nomeados com categorias amplas (`59`, `73` e `74`) e com `75 — não identificado`; "
+        "para 75, o próprio dicionário admite somente os critérios clínico (`04`) e quimiocitológico (`06`). Assim, a "
+        "opção 75 deve permanecer disponível para auditoria do campo, mas não pode ser interpretada como vírus "
+        "laboratorialmente identificado. A lógica bacteriana não é equivalente: CON_DIAGES 02, 03, 09 e 10 já nomeia "
+        "uma categoria bacteriana, e CON_DIAGES 05 é refinado pelo Quadro II, que também contém as categorias 28 "
+        "(outras bactérias) e 81 (bactéria não especificada)."
     )
     if not ass_code:
         st.warning("CLA_ME_ASS não foi detectado; não é possível criar as tabelas discriminatórias do Quadro III.")
@@ -17878,7 +18129,9 @@ def render_detailed_etiology_analysis_tab(
     elif total_outras_etiologias <= 0:
         st.info("Nenhum caso confirmado com CON_DIAGES=08 (meningite por outra etiologia) no recorte atual.")
     else:
-        other_etiology_df = query_category(table, eti_label, other_etiology_where, top_n=40)
+        other_etiology_df = query_sinan_domain_distribution(
+            table, eti_code, SINAN_CLA_ME_ETI, other_etiology_where
+        )
         if not other_etiology_df.empty:
             other_etiology_df = other_etiology_df.copy()
             other_etiology_df["pct_confirmados"] = (
@@ -17918,7 +18171,19 @@ def render_detailed_etiology_analysis_tab(
                 },
                 hover_data={"texto": False, "pct": ":.2f", "pct_confirmados": ":.2f"},
             )
-            fig_other_etiology.update_layout(yaxis={"categoryorder": "total ascending"})
+            other_etiology_order = other_etiology_df["categoria"].astype(str).tolist()
+            fig_other_etiology.update_yaxes(
+                categoryorder="array",
+                categoryarray=list(reversed(other_etiology_order)),
+                automargin=True,
+                tickfont={"size": 11},
+            )
+            fig_other_etiology.update_xaxes(automargin=True)
+            fig_other_etiology.update_layout(
+                height=max(760, 48 * len(other_etiology_order) + 220),
+                margin={"l": 340, "r": 210, "t": 115, "b": 80},
+            )
+            fig_other_etiology.update_traces(textposition="outside", cliponaxis=False)
             if not eti_coverage_df.empty:
                 render_field_completeness_warning(eti_coverage_df, "CLA_ME_ETI")
             render_plotly_chart(
@@ -17927,7 +18192,8 @@ def render_detailed_etiology_analysis_tab(
             )
             st.caption(
                 f"Grupo de referência: {br_int(total_outras_etiologias)} caso(s) confirmado(s) com CON_DIAGES=08; "
-                f"o total geral de confirmados no recorte é {br_int(total_confirmados)}. Os códigos seguem o Quadro IV."
+                f"o total geral de confirmados no recorte é {br_int(total_confirmados)}. Os códigos seguem o Quadro IV "
+                "e permanecem visíveis mesmo quando n=0; a linha sem código válido reconcilia o subtotal."
             )
             render_interval_total(other_etiology_df, value_col="n", value_label="casos")
             copyable_dataframe(other_etiology_df, width="stretch", hide_index=True)
@@ -18190,12 +18456,16 @@ def render_spreadsheet_analysis_tab(
     st.info(
         "A regra avalia separadamente os sete métodos laboratoriais dos Quadros VII a XII: cultura do líquor, cultura do "
         "sangue, bacterioscopia, CIE, aglutinação pelo látex, isolamento viral e PCR. Um caso entra somente quando "
-        "exatamente um desses campos contém um código válido que documenta exame realizado e todos os outros estão "
+        "exatamente um desses campos contém um código válido que documenta exame realizado — tenha o agente sido "
+        "identificado ou não — e todos os outros estão "
         "vazios ou marcados explicitamente como `Não realizado` (`61`) ou `Ignorado` (`62`), quando essas opções existem "
         "no quadro correspondente. `Nenhum agente` (`51`) e `Não identificado` (`75`) contam como exame realizado, pois "
         "indicam resultado negativo/inespecífico após realização. Valor fora do dicionário não é presumido como exame não "
         "realizado: ele torna o caso indeterminado e impede sua classificação como método único. Não se exige "
-        "`LAB_PUNCAO = 1`, e critérios clínico, quimiocitológico e aspecto do líquor não entram nesta contagem."
+        "`LAB_PUNCAO = 1`, e critérios clínico, quimiocitológico e aspecto do líquor não entram nesta contagem. O Quadro XI "
+        "não oferece os códigos 61/62 para isolamento viral; por isso, nesse campo, somente célula vazia representa método "
+        "inativo e qualquer código oficial, inclusive 75, representa exame realizado. Esta classificação mede padrão de "
+        "preenchimento dos métodos, não suficiência causal nem identificação etiológica."
     )
     st.markdown("### Verificação de casos com apenas um método diagnóstico")
     single_group = st.selectbox(
@@ -18204,6 +18474,18 @@ def render_spreadsheet_analysis_tab(
         key="sinan_sheet_single_group",
     )
     single_where = group_where(single_group)
+    missing_single_method_columns = [
+        method_label
+        for method_label in SINAN_SINGLE_METHOD_OPTIONS
+        if not _sinan_sheet_method_expr(exprs, method_label)
+    ]
+    if missing_single_method_columns:
+        st.warning(
+            "A base não contém todas as sete colunas necessárias. A classificação abaixo fica incompleta porque não é "
+            "possível provar que os métodos ausentes não foram realizados: "
+            + "; ".join(missing_single_method_columns)
+            + "."
+        )
     single_df = query_sinan_single_diagnostic_method_cases(table, exprs, single_where)
     total_single_eligible = count_rows(table, single_where)
     total_single_cases = int(len(single_df))
@@ -18257,7 +18539,12 @@ def render_spreadsheet_analysis_tab(
     render_plotly_chart(fig_single, calc_title="Casos com apenas um método diagnóstico")
     st.caption(
         f"Foram avaliados {format_int_br(total_single_eligible)} caso(s) no estrato; {format_int_br(total_single_cases)} "
-        f"atenderam integralmente à regra ({format_pct_br(pct_total_elegivel)} do total elegível)."
+        f"atenderam integralmente à regra ({format_pct_br(pct_total_elegivel)} do total elegível). "
+        + (
+            "As sete colunas laboratoriais necessárias foram detectadas; nenhum método foi omitido da contagem."
+            if not missing_single_method_columns
+            else "A estimativa deve ser lida como parcial devido às colunas ausentes indicadas acima."
+        )
     )
     st.markdown("**Casos que atendem à regra de método diagnóstico único**")
     if single_df.empty:
@@ -18823,8 +19110,15 @@ def render_methodology():
         "categorias que afirmam etiologia; `CLA_ME_ASS = 75` é a exceção documentada, pois significa agente não identificado "
         "e o Quadro III admite apenas 04 ou 06. Em todos os rainclouds, a janela desenhada da densidade é limitada pela "
         "cerca de Tukey de 3×IQR; quando o IQR é zero, usa-se apenas para essa janela o fallback dos percentis ponderados "
-        "0,5% e 99,5%. Chuva de pontos, média, mediana, quartis e demais estatísticas continuam usando 100% dos dados "
-        "elegíveis. Referência visual e conceitual: "
+        "0,5% e 99,5%. O bandwidth continua único por grupo, mas seus limites passam a usar a amplitude central robusta, "
+        "não a distância entre mínimo e máximo; se o IQR é zero, a escala usa MAD e, quando também é zero, a amplitude "
+        "central. Isso impede que um extremo isolado superdimensione a suavização sem introduzir KDE adaptativo. No modo "
+        "padrão, o eixo recebe o mesmo foco robusto: observações além da janela são representadas por triângulos no limite, "
+        "com o valor original no cursor. A opção de amplitude completa restaura suas posições horizontais. Média, mediana, "
+        "quartis, extremos e tabelas continuam usando todos os dados elegíveis; não há exclusão estatística causada pelo "
+        "foco visual nem alteração do arquivo-fonte. Nos parâmetros declarados como percentuais, valores acima de 100% "
+        "também permanecem nos cálculos, mas são sinalizados em tabela própria e por uma linha de referência no gráfico. "
+        "Referência visual e conceitual: "
         "[Cédric Scherer — Visualizing Distributions with Raincloud Plots]"
         "(https://www.cedricscherer.com/2021/06/06/visualizing-distributions-with-raincloud-plots-and-how-to-create-them-with-ggplot2/)."
     )
@@ -18857,6 +19151,25 @@ def render_methodology():
         "quimiocitológico e clínico-epidemiológico são excluídos quando o grupo afirma etiologia; a categoria asséptica "
         "sem etiologia definida (`CLA_ME_ASS = 75`) preserva 04 e 06, os únicos critérios aceitos para ela no Quadro III."
     )
+    st.markdown("### Gráficos de linha com suavização LOESS")
+    st.markdown(
+        "O LOESS (*locally estimated scatterplot smoothing*) é um suavizador não paramétrico usado para tornar mais "
+        "legível a tendência de uma sequência de pontos sem impor uma única reta ou um polinômio global. Para cada posição "
+        "do eixo temporal, o aplicativo seleciona os 2/3 dos anos mais próximos, ajusta por mínimos quadrados uma reta "
+        "local e atribui pesos tricúbicos: anos próximos recebem mais peso e os situados na borda da vizinhança recebem "
+        "peso progressivamente menor. Essa escolha segue o valor padrão discutido por Frank Harrell e melhora o "
+        "comportamento nas extremidades em comparação com uma média móvel simples. Não se aplica a etapa iterativa de "
+        "reponderação robusta.\n\n"
+        "Os pontos continuam sendo as frequências ou percentuais anuais observados; a linha LOESS é somente uma síntese "
+        "descritiva e não cria novas observações. Para cada critério, combinações ano-critério sem registro são mantidas "
+        "como zero quando o ano possui casos elegíveis; isso é uma ausência observada de registro, não imputação. O "
+        "denominador do percentual é recalculado em cada ano e inclui todo o recorte elegível daquele ano, inclusive casos "
+        "sem CRITERIO válido, salvo quando o próprio gráfico informa um recorte etiológico mais estrito. A curva não "
+        "extrapola, não é previsão, não estima causalidade e não substitui os pontos nem os denominadores. Harrell ressalta "
+        "a utilidade do LOESS para revelar forma e a sensibilidade ao grau de suavização; Steyerberg recomenda cautela com "
+        "comportamentos de cauda. O relatório do projeto também mostrou que anos com poucos casos podem gerar oscilações "
+        "instáveis; por isso, a tabela e o cursor devem ser consultados antes de interpretar mudanças nas bordas da série."
+    )
     st.markdown(
         "A composição de `CRITERIO`, disponível em **Análise etiológica e CID-10** e **Análise etiológica detalhada**, "
         "pode ser alternada entre total válido (`CLASSI_FIN` 1 ou 2), confirmados e descartados. As barras exibem "
@@ -18869,7 +19182,8 @@ def render_methodology():
         "reponderação robusta. Anos sem um critério específico são mantidos com zero para não interromper artificialmente "
         "a série. Em **Análise etiológica detalhada**, a mesma visualização aparece logo abaixo da composição, restrita "
         "aos casos confirmados e alternável entre meningites bacterianas e assépticas; em ambos os recortes são excluídos "
-        "os critérios clínico (04), quimiocitológico (06) e clínico-epidemiológico (07), pois isoladamente não determinam etiologia."
+        "os critérios clínico (04), quimiocitológico (06) e clínico-epidemiológico (07), pois isoladamente não determinam "
+        "etiologia. Os sete critérios restantes permanecem visíveis mesmo quando não houve nenhum registro."
     )
     st.markdown("### Referência CID-10")
     render_cid_reference()
