@@ -69,7 +69,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-09-04-v94-cie-dourada"
+APP_VERSION = "2026-09-04-v95-legenda-interativa-criterios"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos
@@ -5649,7 +5649,8 @@ def render_sinan_criterion_timeseries_chart(
         "anuais efetivamente observados; a linha é uma tendência LOESS descritiva traçada sobre esses pontos, e não "
         "uma contagem observada adicional. Em **Percentual no ano**, cada ponto é `casos daquele critério no ano ÷ "
         "todos os casos elegíveis daquele ano × 100`; em **Número absoluto**, mostra-se diretamente a contagem anual. "
-        "O denominador é, portanto, recalculado ano a ano. Uma explicação didática do algoritmo, das escolhas e das "
+        "O denominador é, portanto, recalculado ano a ano. Na legenda, clique sobre o nome de um critério para ocultar "
+        "sua respectiva linha; clique novamente para restaurá-la. Uma explicação didática do algoritmo, das escolhas e das "
         "limitações está na seção **Metodologia — Gráficos de linha com suavização LOESS**."
     )
     dt_sql = exprs.get("dt")
