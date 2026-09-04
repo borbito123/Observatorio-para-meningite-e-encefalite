@@ -69,7 +69,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-09-04-v96-contagem-metodos-diagnosticos"
+APP_VERSION = "2026-09-04-v97-tetos-plausibilidade-lcr"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos
@@ -16851,11 +16851,11 @@ def render_sinan_lcr_raincloud_chart(
     frequency = query_sinan_lcr_raincloud_frequency(
         table, exprs, where_sql, parameter_label, group_sql=group_sql
     )
-    fixed_upper_bound = {
-        "neutro": 100.0,
-        "linfo": 100.0,
-        "eosi": 100.0,
-    }.get(param_key)
+    fixed_upper_bound = (
+        float(meta.teto_plausivel)
+        if meta and meta.teto_plausivel is not None
+        else None
+    )
     aberrant_df = (
         query_sinan_lcr_aberrant_cases(
             table,
@@ -16915,12 +16915,21 @@ def render_sinan_lcr_raincloud_chart(
     copyable_dataframe(coverage, width="stretch", hide_index=True)
 
     if fixed_upper_bound is not None:
+        limit_text = (
+            format_pct_br(fixed_upper_bound)
+            if meta and "percentual" in meta.tipo_valor
+            else f"{format_int_br(int(fixed_upper_bound))} {meta.unidade}"
+        )
         if not aberrant_df.empty:
-            limit_text = "100%"
+            plausibility_text = (
+                "Esses valores são incompatíveis com uma proporção percentual"
+                if meta and "percentual" in meta.tipo_valor
+                else "Esses valores ultrapassam o teto operacional de plausibilidade definido para o parâmetro"
+            )
             warning_text = (
                 f"⚠️ ATENÇÃO: foram encontrados {format_int_br(len(aberrant_df))} caso(s) com "
-                f"{parameter_label.lower()} acima de {limit_text}. Esses valores são incompatíveis com uma "
-                "proporção percentual, mas permanecem no raincloud, nos resumos e no banco para não transformar "
+                f"{parameter_label.lower()} acima de {limit_text}. {plausibility_text}, mas permanecem no "
+                "raincloud, nos resumos e no banco para não transformar "
                 "uma suspeita de erro em exclusão automática. Eles estão listados integralmente abaixo e, no foco "
                 "visual robusto, são representados no limite com o valor original disponível no cursor."
             )
@@ -16934,9 +16943,7 @@ def render_sinan_lcr_raincloud_chart(
             )
         else:
             st.success(
-                f"Nenhum caso acima do limite de {format_int_br(int(fixed_upper_bound))}"
-                + "%"
-                + " foi encontrado no recorte atual."
+                f"Nenhum caso acima do limite de {limit_text} foi encontrado no recorte atual."
             )
     if frequency.empty:
         st.info("Não há valores numéricos dentro do intervalo exibido para gerar este raincloud.")
@@ -16970,7 +16977,7 @@ def render_sinan_lcr_raincloud_chart(
             x=float(fixed_upper_bound),
             line_dash="dash",
             line_color="#7F7F7F",
-            annotation_text="Limite lógico de 100%",
+            annotation_text=f"Teto de plausibilidade: {limit_text}",
             annotation_position="top right",
         )
     render_plotly_chart(fig, calc_title=title)
