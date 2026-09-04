@@ -17743,8 +17743,7 @@ def render_detailed_etiology_analysis_tab(
     """Análise etiológica detalhada de CON_DIAGES e campos complementares."""
     st.markdown("### Análise etiológica detalhada")
     st.info(
-        "Esta seção replica a lógica de **Conclusão diagnóstica entre casos confirmados**: primeiro restringe "
-        "a `CLASSI_FIN = 1` e, em seguida, usa `CON_DIAGES` para definir o diagnóstico. Para `CON_DIAGES = 05` "
+        "Para `CON_DIAGES = 05` "
         "(meningite por outras bactérias), `CLA_ME_BAC` discrimina a bactéria conforme o Quadro II do dicionário SINAN. "
         "Para `CON_DIAGES = 07` (meningite asséptica), `CLA_ME_ASS` discrimina o agente conforme o Quadro III. "
         "Para `CON_DIAGES = 08` (meningite por outra etiologia), `CLA_ME_ETI` discrimina o agente conforme o Quadro IV. "
