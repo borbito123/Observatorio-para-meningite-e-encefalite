@@ -69,7 +69,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-09-04-v93-cores-criterios-tabela-erros"
+APP_VERSION = "2026-09-04-v94-cie-dourada"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos
@@ -2055,7 +2055,7 @@ SINAN_CRITERIO = {
 # demais categorias recebem cores únicas que permanecem estáveis entre gráficos.
 SINAN_CRITERIO_TIMESERIES_COLOR_BY_CODE = {
     "01": "#0057B8",  # cultura — azul
-    "02": "#5E3C99",  # CIE — violeta
+    "02": "#C69214",  # CIE — dourado
     "03": "#009E73",  # látex — verde
     "04": "#FF7F0E",  # clínico — laranja
     "05": "#8C564B",  # bacterioscopia — marrom
