@@ -69,7 +69,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-09-04-v92-auditoria-criterios-raincloud-jitter"
+APP_VERSION = "2026-09-04-v93-cores-criterios-tabela-erros"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos
@@ -2055,11 +2055,11 @@ SINAN_CRITERIO = {
 # demais categorias recebem cores únicas que permanecem estáveis entre gráficos.
 SINAN_CRITERIO_TIMESERIES_COLOR_BY_CODE = {
     "01": "#0057B8",  # cultura — azul
-    "02": "#E69F00",  # CIE — laranja
+    "02": "#5E3C99",  # CIE — violeta
     "03": "#009E73",  # látex — verde
-    "04": "#CC79A7",  # clínico — magenta
+    "04": "#FF7F0E",  # clínico — laranja
     "05": "#8C564B",  # bacterioscopia — marrom
-    "06": "#E377C2",  # quimiocitológico — rosa
+    "06": "#C51B8A",  # quimiocitológico — magenta
     "07": "#7A8B00",  # clínico-epidemiológico — oliva
     "08": "#00A6D6",  # isolamento viral — ciano
     "09": "#D62728",  # PCR — vermelho
@@ -16182,7 +16182,7 @@ def query_sinan_sheet_column_errors(
             FROM fonte
             {where_sql}
         )
-        SELECT *,
+        SELECT * EXCLUDE (codigo_padronizado),
                CASE
                    WHEN valor_informado IS NULL THEN 'Célula vazia'
                    ELSE 'Valor fora do dicionário para o campo'
