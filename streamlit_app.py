@@ -69,7 +69,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-09-04-v95-legenda-interativa-criterios"
+APP_VERSION = "2026-09-04-v96-contagem-metodos-diagnosticos"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos
@@ -601,7 +601,7 @@ def _render_calc_expander(calc_title: Optional[str] = None) -> None:
 PLOT_EXPLANATION_RULES: List[Tuple[str, str]] = [
     ("raincloud", "Combina a distribuição suavizada, os percentis e as observações para mostrar centro, dispersão, assimetria e valores extremos sem esconder os dados individuais."),
     ("completude", "Compara o preenchimento segundo a regra declarada no próprio gráfico; as barras mostram números absolutos e percentuais calculados sobre o denominador informado."),
-    ("apenas um método", "Conta os registros em que somente um método laboratorial foi marcado como realizado - inclusive 'nenhum agente' ou 'não identificado' - e todos os demais estão vazios, ignorados ou não realizados; valores fora do dicionário tornam o caso indeterminado."),
+    ("total de critérios diagnósticos", "Distribui os casos conforme nenhum, exatamente um ou dois ou mais dos sete campos laboratoriais possuam resultado oficial de exame realizado; as três barras são mutuamente exclusivas e reconciliam o total do estrato."),
     ("compatibilidade da bacterioscopia", "Compara o agente sugerido pela morfologia da bacterioscopia com cultura e PCR nos casos em que os resultados necessários são específicos e comparáveis."),
     ("preenchimento válido do campo criterio", "Verifica se CRITERIO contém um código oficial do Quadro V; o campo registra critério de confirmação, portanto sua ausência em descartados não permite concluir que não houve investigação ou fundamento para o descarte."),
     ("critério de confirmação", "Mostra quais critérios do campo CRITERIO foram registrados no estrato selecionado, permitindo comparar o peso relativo de cultura, PCR, clínica e demais critérios oficiais."),
@@ -1729,11 +1729,11 @@ SINAN_SINGLE_METHOD_OPTIONS = [
     "PCR líquor",
 ]
 
-# Na verificação de método único, todo resultado válido que documenta exame
-# realizado conta como diagnóstico, inclusive 51 (Nenhum agente) e 75 (Não
-# identificado). Apenas célula vazia e estados administrativos que indicam
-# ausência de exame ou informação contam como inativos; valor fora do domínio
-# torna o caso indeterminado e não pode ser presumido como "não realizado".
+# Na estratificação 0/1/2+, todo resultado válido que documenta exame realizado
+# soma um método, inclusive 51 (Nenhum agente) e 75 (Não identificado). Célula
+# vazia, estado administrativo ou valor fora do domínio soma zero; o último
+# permanece identificado separadamente como indeterminado e não é reinterpretado
+# semanticamente como "não realizado".
 SINAN_DIAGNOSTIC_ADMIN_CODES = {"61", "62"}
 
 # Uma ausência de pelo menos 50% é apresentada como baixa completude nos
@@ -16196,102 +16196,67 @@ def query_sinan_sheet_column_errors(
     return run_query(table, sql)
 
 
-def query_sinan_single_diagnostic_method_cases(
+def query_sinan_diagnostic_method_count_cases(
     table: LoadedTable,
     exprs: Dict[str, Optional[str]],
     where_sql: str,
 ) -> pd.DataFrame:
-    """Lista casos com um exame realizado e os demais explicitamente inativos."""
-    available: List[Tuple[str, str, str, str]] = []
+    """Classifica casos pelo número de métodos laboratoriais válidos realizados."""
+    available: List[Tuple[str, str, str, str, str, str]] = []
     for method_label in SINAN_SINGLE_METHOD_OPTIONS:
-        diagnostic_condition = _sinan_sheet_method_presence_condition(exprs, method_label)
-        inactive_condition = _sinan_sheet_method_inactive_condition(exprs, method_label)
-        raw_expr = _sinan_sheet_method_expr(exprs, method_label, raw=True)
-        if diagnostic_condition and inactive_condition and raw_expr:
-            available.append((method_label, diagnostic_condition, inactive_condition, raw_expr))
-    if not available:
-        return pd.DataFrame()
-    flag_items: List[str] = []
-    for idx, (_, diagnostic_condition, inactive_condition, raw_expr) in enumerate(available, start=1):
-        flag_items.append(f"CASE WHEN {diagnostic_condition} THEN 1 ELSE 0 END AS diagnostico_{idx}")
-        flag_items.append(f"CASE WHEN {inactive_condition} THEN 1 ELSE 0 END AS inativo_{idx}")
-        flag_items.append(f"{raw_expr} AS valor_metodo_{idx}")
-    flag_select = ",\n                   ".join(flag_items)
-    exclusive_conditions: List[str] = []
-    for idx in range(1, len(available) + 1):
-        other_inactive = [f"inativo_{other_idx} = 1" for other_idx in range(1, len(available) + 1) if other_idx != idx]
-        exclusive_conditions.append(
-            "(" + " AND ".join([f"diagnostico_{idx} = 1"] + other_inactive) + ")"
-        )
-    exclusive_where = " OR ".join(exclusive_conditions)
-    method_case = "CASE " + " ".join(
-        f"WHEN {exclusive_conditions[idx - 1]} THEN {qstr(label)}"
-        for idx, (label, _, _, _) in enumerate(available, start=1)
-    ) + " ELSE NULL END"
-    value_case = "CASE " + " ".join(
-        f"WHEN {exclusive_conditions[idx - 1]} THEN valor_metodo_{idx}"
-        for idx, _ in enumerate(available, start=1)
-    ) + " ELSE NULL END"
-    method_value_columns = ",\n               ".join(
-        f"valor_metodo_{idx} AS {qident('valor_' + safe_filename(label).replace('-', '_'))}"
-        for idx, (label, _, _, _) in enumerate(available, start=1)
-    )
-    identifiers = _sinan_sheet_identifier_select(exprs)
-    sql = f"""
-        WITH fonte AS (
-            SELECT ROW_NUMBER() OVER () AS __linha_fonte, *
-            FROM {table.ref_sql}
-        ), flags AS (
-            SELECT __linha_fonte AS linha_fonte,
-                   {qstr(loaded_table_origin_format(table))} AS formato_origem,
-                   {qstr(table.label or table.source)} AS origem,
-                   {identifiers},
-                   {flag_select}
-            FROM fonte
-            {where_sql}
-        )
-        SELECT linha_fonte, formato_origem, origem, NU_NOTIFIC, NM_PACIENT, CLASSI_FIN, CON_DIAGES,
-               {method_case} AS metodo_unico,
-               {value_case} AS valor_diagnostico,
-               1 AS numero_metodos_diagnosticos,
-               {method_value_columns}
-        FROM flags
-        WHERE {exclusive_where}
-        ORDER BY metodo_unico, linha_fonte
-    """
-    return run_query(table, sql)
-
-
-def query_sinan_single_diagnostic_indeterminate_cases(
-    table: LoadedTable,
-    exprs: Dict[str, Optional[str]],
-    where_sql: str,
-) -> pd.DataFrame:
-    """Lista casos com ao menos um dos sete campos fora do domínio correspondente."""
-    available: List[Tuple[str, str, str]] = []
-    for method_label in SINAN_SINGLE_METHOD_OPTIONS:
+        performed_condition = _sinan_sheet_method_presence_condition(exprs, method_label)
         invalid_condition = _sinan_sheet_method_invalid_condition(exprs, method_label)
+        code_expr = _sinan_sheet_method_expr(exprs, method_label)
         raw_expr = _sinan_sheet_method_expr(exprs, method_label, raw=True)
-        if invalid_condition and raw_expr:
-            available.append((method_label, invalid_condition, raw_expr))
+        if not performed_condition or not invalid_condition or not code_expr or not raw_expr:
+            continue
+        mapping = _sinan_sheet_method_mapping(method_label)
+        administrative_codes = sorted(set(mapping) & SINAN_DIAGNOSTIC_ADMIN_CODES)
+        administrative_condition = (
+            f"({code_expr}) IN ({', '.join(qstr(code) for code in administrative_codes)})"
+            if administrative_codes
+            else "FALSE"
+        )
+        available.append(
+            (
+                method_label,
+                performed_condition,
+                invalid_condition,
+                code_expr,
+                raw_expr,
+                administrative_condition,
+            )
+        )
     if not available:
         return pd.DataFrame()
 
     flag_items: List[str] = []
-    for idx, (_, invalid_condition, raw_expr) in enumerate(available, start=1):
-        flag_items.append(f"CASE WHEN {invalid_condition} THEN 1 ELSE 0 END AS invalido_{idx}")
-        flag_items.append(f"{raw_expr} AS valor_metodo_{idx}")
+    for idx, (_, performed, invalid, code_expr, raw_expr, administrative) in enumerate(
+        available, start=1
+    ):
+        flag_items.extend(
+            [
+                f"CASE WHEN {performed} THEN 1 ELSE 0 END AS realizado_{idx}",
+                f"CASE WHEN ({code_expr}) IS NULL THEN 1 ELSE 0 END AS vazio_{idx}",
+                f"CASE WHEN {administrative} THEN 1 ELSE 0 END AS administrativo_{idx}",
+                f"CASE WHEN {invalid} THEN 1 ELSE 0 END AS invalido_{idx}",
+                f"{raw_expr} AS valor_metodo_{idx}",
+            ]
+        )
     flag_select = ",\n                   ".join(flag_items)
-    any_invalid_where = " OR ".join(
-        f"invalido_{idx} = 1" for idx in range(1, len(available) + 1)
+    performed_count = " + ".join(
+        f"realizado_{idx}" for idx in range(1, len(available) + 1)
     )
-    labels_concat = " || ".join(
-        f"CASE WHEN invalido_{idx} = 1 THEN {qstr(label + '; ')} ELSE '' END"
-        for idx, (label, _, _) in enumerate(available, start=1)
-    )
+
+    def labels_concat(flag_prefix: str) -> str:
+        return " || ".join(
+            f"CASE WHEN {flag_prefix}_{idx} = 1 THEN {qstr(label + '; ')} ELSE '' END"
+            for idx, (label, *_) in enumerate(available, start=1)
+        )
+
     method_value_columns = ",\n               ".join(
         f"valor_metodo_{idx} AS {qident('valor_' + safe_filename(label).replace('-', '_'))}"
-        for idx, (label, _, _) in enumerate(available, start=1)
+        for idx, (label, *_) in enumerate(available, start=1)
     )
     identifiers = _sinan_sheet_identifier_select(exprs)
     sql = f"""
@@ -16306,15 +16271,188 @@ def query_sinan_single_diagnostic_indeterminate_cases(
                    {flag_select}
             FROM fonte
             {where_sql}
+        ), classificados AS (
+            SELECT *, ({performed_count}) AS numero_metodos_validos
+            FROM flags
         )
         SELECT linha_fonte, formato_origem, origem, NU_NOTIFIC, NM_PACIENT, CLASSI_FIN, CON_DIAGES,
-               TRIM(TRAILING '; ' FROM ({labels_concat})) AS metodos_com_valor_fora_do_dicionario,
+               numero_metodos_validos,
+               CASE
+                   WHEN numero_metodos_validos = 0 THEN '0 métodos válidos'
+                   WHEN numero_metodos_validos = 1 THEN '1 método válido'
+                   ELSE '2+ métodos válidos'
+               END AS categoria_total_metodos,
+               TRIM(TRAILING '; ' FROM ({labels_concat('realizado')})) AS metodos_validos_realizados,
+               CASE WHEN ({labels_concat('vazio')}) <> '' THEN 1 ELSE 0 END AS possui_celula_vazia,
+               TRIM(TRAILING '; ' FROM ({labels_concat('vazio')})) AS campos_com_celula_vazia,
+               CASE WHEN ({labels_concat('administrativo')}) <> '' THEN 1 ELSE 0 END AS possui_ignorado_ou_nao_realizado,
+               TRIM(TRAILING '; ' FROM ({labels_concat('administrativo')})) AS campos_ignorados_ou_nao_realizados,
+               CASE WHEN ({labels_concat('invalido')}) <> '' THEN 1 ELSE 0 END AS possui_valor_fora_dicionario,
+               TRIM(TRAILING '; ' FROM ({labels_concat('invalido')})) AS campos_com_valor_fora_dicionario,
                {method_value_columns}
-        FROM flags
-        WHERE {any_invalid_where}
-        ORDER BY linha_fonte
+        FROM classificados
+        ORDER BY numero_metodos_validos, linha_fonte
     """
     return run_query(table, sql)
+
+
+def render_sinan_diagnostic_method_count_analysis(
+    table: LoadedTable,
+    exprs: Dict[str, Optional[str]],
+    where_sql: str,
+    group_label: str,
+    missing_columns: Sequence[str],
+) -> None:
+    """Renderiza a estratificação 0/1/2+ e as tabelas auditáveis por caso."""
+    cases_df = query_sinan_diagnostic_method_count_cases(table, exprs, where_sql)
+    total_eligible = count_rows(table, where_sql)
+    category_order = ["0 métodos válidos", "1 método válido", "2+ métodos válidos"]
+    category_counts = (
+        cases_df["categoria_total_metodos"].value_counts()
+        if not cases_df.empty
+        else pd.Series(dtype="int64")
+    )
+    plot_df = pd.DataFrame({"categoria_total_metodos": category_order})
+    plot_df["n"] = plot_df["categoria_total_metodos"].map(category_counts).fillna(0).astype(int)
+    plot_df["total_elegivel"] = total_eligible
+    plot_df["pct_total_elegivel"] = np.where(
+        total_eligible > 0,
+        (100.0 * plot_df["n"] / total_eligible).round(2),
+        np.nan,
+    )
+    plot_df["texto"] = [
+        f"{format_int_br(int(n))} ({format_pct_br(pct)})"
+        for n, pct in zip(plot_df["n"], plot_df["pct_total_elegivel"])
+    ]
+    reconciled_total = int(plot_df["n"].sum())
+    if reconciled_total != total_eligible:
+        st.error(
+            "Falha de reconciliação: a soma das categorias 0, 1 e 2+ não corresponde ao total do estrato."
+        )
+
+    fig = go.Figure(
+        go.Bar(
+            x=plot_df["n"],
+            y=plot_df["categoria_total_metodos"],
+            orientation="h",
+            text=plot_df["texto"],
+            textposition="outside",
+            cliponaxis=False,
+            marker_color=["#7F7F7F", PLOTLY_DEFAULT_BLUE, "#FF7F0E"],
+            customdata=np.column_stack(
+                [plot_df["pct_total_elegivel"], plot_df["total_elegivel"]]
+            ),
+            hovertemplate=(
+                "<b>%{y}</b><br>Casos: %{x}<br>% do estrato: %{customdata[0]:.2f}%"
+                "<br>Total do estrato: %{customdata[1]}<extra></extra>"
+            ),
+        )
+    )
+    fig.update_layout(
+        title=(
+            "Verificação de casos conforme o total de critérios diagnósticos — "
+            f"{group_label.lower()}"
+        ),
+        xaxis_title="Casos",
+        yaxis_title="Quantidade de métodos laboratoriais válidos realizados",
+        height=610,
+    )
+    fig.update_yaxes(
+        categoryorder="array",
+        categoryarray=list(reversed(category_order)),
+        automargin=True,
+    )
+    render_plotly_chart(fig, calc_title="Casos conforme o total de critérios diagnósticos")
+    st.caption(
+        f"Foram avaliados {format_int_br(total_eligible)} caso(s) em {group_label.lower()}; as três barras somam "
+        f"{format_int_br(reconciled_total)} e são mutuamente exclusivas. A categoria depende apenas da quantidade de "
+        "campos com resultado oficial de exame realizado. Valores vazios, administrativos ou fora do dicionário não "
+        "aumentam essa quantidade; seus diferentes motivos permanecem nas colunas e tabelas de auditoria. "
+        + (
+            "As sete colunas laboratoriais foram detectadas."
+            if not missing_columns
+            else "A leitura é parcial devido às colunas ausentes informadas acima."
+        )
+    )
+
+    table_specs = [
+        (
+            "0 métodos válidos",
+            "Casos que atendem à regra de 0 métodos diagnósticos feitos",
+            "sinan_planilha_casos_zero_metodos.csv",
+        ),
+        (
+            "1 método válido",
+            "Casos que atendem à regra de método diagnóstico único",
+            "sinan_planilha_casos_um_metodo.csv",
+        ),
+        (
+            "2+ métodos válidos",
+            "Casos que atendem à regra de 2+ métodos diagnósticos feitos",
+            "sinan_planilha_casos_dois_ou_mais_metodos.csv",
+        ),
+    ]
+    for category, heading, filename in table_specs:
+        st.markdown(f"**{heading}**")
+        category_df = (
+            cases_df.loc[cases_df["categoria_total_metodos"].astype(str).eq(category)].copy()
+            if "categoria_total_metodos" in cases_df.columns
+            else pd.DataFrame()
+        )
+        if category_df.empty:
+            st.info(f"Nenhum caso na categoria {category.lower()} no estrato atual.")
+        else:
+            st.caption(
+                f"{format_int_br(len(category_df))} caso(s) no estrato atual. `numero_metodos_validos` informa a "
+                "contagem; as demais colunas identificam métodos realizados, vazios, administrativos e fora do domínio."
+            )
+            copyable_dataframe(category_df, width="stretch", hide_index=True)
+            download_button(
+                category_df,
+                filename,
+                label="Baixar tabela de casos (CSV)",
+                max_rows=len(category_df),
+            )
+
+        if category not in {"0 métodos válidos", "1 método válido"}:
+            continue
+        st.caption(
+            "As três situações abaixo não são mutuamente exclusivas: o mesmo caso pode possuir, em campos diferentes, "
+            "uma célula vazia, um código 61/62 e um valor fora do dicionário."
+        )
+        status_specs = [
+            (
+                "Ignorado ou não realizado",
+                "possui_ignorado_ou_nao_realizado",
+                "ignorados_ou_nao_realizados",
+            ),
+            ("Célula vazia", "possui_celula_vazia", "celulas_vazias"),
+            ("Indeterminado", "possui_valor_fora_dicionario", "indeterminados"),
+        ]
+        status_tabs = st.tabs([label for label, _, _ in status_specs])
+        for status_tab, (status_label, flag_column, file_suffix) in zip(status_tabs, status_specs):
+            with status_tab:
+                status_df = (
+                    category_df.loc[
+                        pd.to_numeric(category_df[flag_column], errors="coerce").fillna(0).eq(1)
+                    ].copy()
+                    if flag_column in category_df.columns
+                    else pd.DataFrame()
+                )
+                if status_df.empty:
+                    st.success(f"Nenhum caso classificado como {status_label.lower()} nesta categoria.")
+                else:
+                    st.caption(
+                        f"{format_int_br(len(status_df))} caso(s) possuem ao menos um campo nesta situação. "
+                        "Consulte as colunas de campos e valores para identificar a origem."
+                    )
+                    copyable_dataframe(status_df, width="stretch", hide_index=True)
+                    download_button(
+                        status_df,
+                        f"sinan_planilha_{safe_filename(category)}_{file_suffix}.csv",
+                        label=f"Baixar casos — {status_label.lower()} (CSV)",
+                        max_rows=len(status_df),
+                    )
 
 
 def count_sinan_cases_with_any_performed_diagnostic_method(
@@ -18649,159 +18787,44 @@ def render_spreadsheet_analysis_tab(
 
     st.divider()
     st.info(
-        "A regra avalia separadamente os sete métodos laboratoriais dos Quadros VII a XII: cultura do líquor, cultura do "
-        "sangue, bacterioscopia, CIE, aglutinação pelo látex, isolamento viral e PCR. Um caso entra somente quando "
-        "exatamente um desses campos contém um código válido que documenta exame realizado — tenha o agente sido "
-        "identificado ou não — e todos os outros estão "
-        "vazios ou marcados explicitamente como `Não realizado` (`61`) ou `Ignorado` (`62`), quando essas opções existem "
-        "no quadro correspondente. `Nenhum agente` (`51`) e `Não identificado` (`75`) contam como exame realizado, pois "
-        "indicam resultado negativo/inespecífico após realização. Valor fora do dicionário não é presumido como exame não "
-        "realizado: ele torna o caso indeterminado e impede sua classificação como método único. Não se exige "
-        "`LAB_PUNCAO = 1`, e critérios clínico, quimiocitológico e aspecto do líquor não entram nesta contagem. O Quadro XI "
-        "não oferece os códigos 61/62 para isolamento viral; por isso, nesse campo, somente célula vazia representa método "
-        "inativo e qualquer código oficial, inclusive 75, representa exame realizado. Esta classificação mede padrão de "
-        "preenchimento dos métodos, não suficiência causal nem identificação etiológica. Os casos indeterminados agora "
-        "têm contagem, reconciliação e tabela próprias logo abaixo do gráfico."
+        "Metodologia: a contagem usa os **sete campos laboratoriais independentes** dos Quadros VII a XII — cultura do "
+        "líquor, cultura do sangue, bacterioscopia, CIE, aglutinação pelo látex, isolamento viral e PCR — e não os dez "
+        "códigos possíveis do campo único `CRITERIO`. Um método soma 1 quando contém um código oficial diferente de "
+        "`Não realizado` (`61`) e `Ignorado` (`62`), quando essas opções existem no quadro. `Nenhum agente` (`51`) e "
+        "`Não identificado` (`75`) também somam 1, pois registram exame realizado sem agente definido. Célula vazia, "
+        "61/62 e valor fora do dicionário somam 0 na estratificação aritmética. Esse zero **não permite afirmar que um "
+        "valor inválido representa exame não realizado**: o caso continua sinalizado como indeterminado nas tabelas de "
+        "auditoria. Não se exige `LAB_PUNCAO=1`; critérios clínico, quimiocitológico, clínico-epidemiológico, `Outros` e "
+        "aspecto do líquor não têm campos independentes equivalentes e, portanto, não podem ser somados de forma "
+        "reprodutível. No Quadro XI, qualquer código oficial, inclusive 75, conta como isolamento viral realizado; apenas "
+        "a célula vazia conta zero, porque o quadro não oferece 61/62."
     )
-    st.markdown("### Verificação de casos com apenas um método diagnóstico")
-    single_group = st.selectbox(
-        "Estrato de casos para método único",
+    st.markdown("### Verificação de casos conforme o total de critérios diagnósticos")
+    method_count_group = st.selectbox(
+        "Estrato de casos para contagem dos métodos diagnósticos",
         group_options,
         key="sinan_sheet_single_group",
     )
-    single_where = group_where(single_group)
-    missing_single_method_columns = [
+    method_count_where = group_where(method_count_group)
+    missing_method_count_columns = [
         method_label
         for method_label in SINAN_SINGLE_METHOD_OPTIONS
         if not _sinan_sheet_method_expr(exprs, method_label)
     ]
-    if missing_single_method_columns:
+    if missing_method_count_columns:
         st.warning(
             "A base não contém todas as sete colunas necessárias. A classificação abaixo fica incompleta porque não é "
-            "possível provar que os métodos ausentes não foram realizados: "
-            + "; ".join(missing_single_method_columns)
+            "possível determinar o estado dos métodos ausentes: "
+            + "; ".join(missing_method_count_columns)
             + "."
         )
-    single_df = query_sinan_single_diagnostic_method_cases(table, exprs, single_where)
-    indeterminate_df = query_sinan_single_diagnostic_indeterminate_cases(
-        table, exprs, single_where
+    render_sinan_diagnostic_method_count_analysis(
+        table,
+        exprs,
+        method_count_where,
+        method_count_group,
+        missing_method_count_columns,
     )
-    total_single_eligible = count_rows(table, single_where)
-    total_single_cases = int(len(single_df))
-    total_indeterminate_cases = int(len(indeterminate_df))
-    total_other_cases = total_single_eligible - total_single_cases - total_indeterminate_cases
-    overlapping_lines = set(
-        pd.to_numeric(single_df.get("linha_fonte"), errors="coerce").dropna().astype(int)
-        if not single_df.empty else []
-    ) & set(
-        pd.to_numeric(indeterminate_df.get("linha_fonte"), errors="coerce").dropna().astype(int)
-        if not indeterminate_df.empty else []
-    )
-    if overlapping_lines or total_other_cases < 0:
-        st.error(
-            "Falha de reconciliação: as categorias de método único, indeterminado e demais casos não ficaram "
-            "mutuamente exclusivas. Revise as condições antes de interpretar o resultado."
-        )
-    pct_total_elegivel = (
-        round(100.0 * total_single_cases / total_single_eligible, 2)
-        if total_single_eligible > 0 else np.nan
-    )
-    method_counts = (
-        single_df.groupby("metodo_unico", dropna=False).size()
-        if not single_df.empty
-        else pd.Series(dtype="int64")
-    )
-    plot_single = pd.DataFrame({"metodo_unico": SINAN_SINGLE_METHOD_OPTIONS})
-    plot_single["n"] = plot_single["metodo_unico"].map(method_counts).fillna(0).astype(int)
-    plot_single["total_elegivel"] = total_single_eligible
-    plot_single["pct_total_elegivel"] = np.where(
-        total_single_eligible > 0,
-        (100.0 * plot_single["n"] / total_single_eligible).round(2),
-        np.nan,
-    )
-    plot_single["texto"] = [
-        f"{format_int_br(int(n))} ({format_pct_br(pct)})"
-        for n, pct in zip(plot_single["n"], plot_single["pct_total_elegivel"])
-    ]
-    m1, m2, m3 = st.columns(3)
-    with m1:
-        st.metric(
-            "Casos com exatamente um método laboratorial marcado como realizado",
-            format_int_br(total_single_cases),
-        )
-    with m2:
-        st.metric(
-            "Casos indeterminados (valor fora do dicionário em algum método)",
-            format_int_br(total_indeterminate_cases),
-        )
-    with m3:
-        st.metric(
-            "Casos com 0 ou 2+ métodos válidos realizados",
-            format_int_br(total_other_cases),
-        )
-    fig_single = px.bar(
-        plot_single,
-        x="n",
-        y="metodo_unico",
-        orientation="h",
-        text="texto",
-        title=f"Casos com exatamente um método laboratorial marcado como realizado — {single_group.lower()}",
-        labels={
-            "metodo_unico": "Único método realizado",
-            "n": "Número bruto de casos",
-            "pct_total_elegivel": "% entre todos os casos elegíveis",
-        },
-        hover_data={"texto": False, "pct_total_elegivel": ":.2f", "total_elegivel": True},
-        color_discrete_sequence=[PLOTLY_DEFAULT_BLUE],
-    )
-    fig_single.update_yaxes(
-        categoryorder="array",
-        categoryarray=list(reversed(SINAN_SINGLE_METHOD_OPTIONS)),
-        automargin=True,
-    )
-    fig_single.update_layout(height=max(620, 58 * len(SINAN_SINGLE_METHOD_OPTIONS) + 210))
-    fig_single.update_traces(textposition="outside", cliponaxis=False)
-    render_plotly_chart(fig_single, calc_title="Casos com apenas um método diagnóstico")
-    st.caption(
-        f"Foram avaliados {format_int_br(total_single_eligible)} caso(s) no estrato. Desses, "
-        f"{format_int_br(total_single_cases)} atenderam à regra de método único "
-        f"({format_pct_br(pct_total_elegivel)}), {format_int_br(total_indeterminate_cases)} ficaram "
-        "indeterminados por conter valor fora do dicionário em ao menos um dos sete campos, e "
-        f"{format_int_br(total_other_cases)} tiveram 0 ou 2 ou mais métodos válidos realizados. "
-        + (
-            "As sete colunas laboratoriais necessárias foram detectadas; nenhum método foi omitido da contagem."
-            if not missing_single_method_columns
-            else "A estimativa deve ser lida como parcial devido às colunas ausentes indicadas acima."
-        )
-    )
-    st.markdown("**Casos que atendem à regra de método diagnóstico único**")
-    if single_df.empty:
-        st.info("Nenhum caso atendeu à regra no recorte atual.")
-    else:
-        copyable_dataframe(single_df, width="stretch", hide_index=True)
-        download_button(
-            single_df,
-            "sinan_planilha_casos_apenas_um_metodo.csv",
-            label="Baixar casos com apenas um método (CSV)",
-            max_rows=len(single_df),
-        )
-
-    st.markdown("**Casos indeterminados (valor fora do dicionário em algum dos sete campos)**")
-    if indeterminate_df.empty:
-        st.success("Nenhum caso indeterminado por valor fora do dicionário no recorte atual.")
-    else:
-        st.caption(
-            "Estes casos não puderam ser classificados como método único porque ao menos um dos sete campos "
-            "laboratoriais contém um código que não consta no quadro correspondente do dicionário. O valor não "
-            "é presumido como 'Não realizado': presumir isso fabricaria uma informação que a célula não contém."
-        )
-        copyable_dataframe(indeterminate_df, width="stretch", hide_index=True)
-        download_button(
-            indeterminate_df,
-            "sinan_planilha_casos_indeterminados_metodo_unico.csv",
-            label="Baixar casos indeterminados (CSV)",
-            max_rows=len(indeterminate_df),
-        )
 
     st.divider()
     st.info(
@@ -19378,11 +19401,13 @@ def render_methodology():
         "mostra três situações mutuamente exclusivas — preenchida corretamente, vazia e fora do dicionário — todas com "
         "o total de casos elegíveis como denominador. Os agentes listados nos quadros servem somente para validar o código, "
         "não para criar categorias etiológicas nesse gráfico.\n\n"
-        "Os seletores não incluem `Clínico`, `Quimiocitológico` nem `Aspecto do Líquor`. Na análise de método único, "
-        "exatamente um método deve ter resultado válido de exame realizado; `Nenhum agente` (`51`) e `Não identificado` "
-        "(`75`) contam como exame realizado. Os demais métodos precisam estar vazios, ignorados ou não realizados. "
-        "Valor fora do domínio do dicionário não é presumido como ausência de realização: torna o caso indeterminado e "
-        "impede sua classificação como método único. A compatibilidade da bacterioscopia é deliberadamente "
+        "A estratificação por quantidade usa sete campos laboratoriais independentes e separa os casos em 0, 1 ou 2+ "
+        "métodos com resultado oficial de exame realizado. `Nenhum agente` (`51`) e `Não identificado` (`75`) contam "
+        "como realizados. Vazios, 61/62 e valores fora do domínio somam zero; entretanto, valores inválidos continuam "
+        "marcados como indeterminados em tabelas específicas, pois zero aritmético não equivale a prova de exame não "
+        "realizado. Os dez códigos do Quadro V não representam dez colunas independentes: `CRITERIO` registra uma única "
+        "modalidade de confirmação. Por isso, clínico, quimiocitológico, clínico-epidemiológico e outros não são somados "
+        "aos sete resultados laboratoriais. A compatibilidade da bacterioscopia é deliberadamente "
         "estrita: exige caso confirmado, quatro resultados "
         "específicos e conclusão diagnóstica específica; compara diplococos Gram-negativos com meningococo, cocobacilos "
         "com *H. influenzae* e diplococos Gram-positivos com pneumococo."
