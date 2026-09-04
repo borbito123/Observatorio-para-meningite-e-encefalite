@@ -26,6 +26,7 @@ import csv
 import hashlib
 import html as html_lib
 import json
+import math
 import re
 import tempfile
 import threading
@@ -68,7 +69,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-09-03-v87-sobreposicao-simplificada"
+APP_VERSION = "2026-09-03-v88-completude-loess-asseptica"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos
@@ -601,8 +602,9 @@ PLOT_EXPLANATION_RULES: List[Tuple[str, str]] = [
     ("completude", "Compara quantos registros foram preenchidos, ficaram ausentes ou falharam na regra de validade indicada; as barras mostram números absolutos e o detalhe informa o denominador."),
     ("apenas um método", "Conta os registros em que somente um método possui resultado válido segundo o dicionário - inclusive 'nenhum agente' ou 'não identificado' - e os demais não contam como diagnóstico."),
     ("compatibilidade da bacterioscopia", "Compara o agente sugerido pela morfologia da bacterioscopia com cultura e PCR nos casos em que os resultados necessários são específicos e comparáveis."),
-    ("presença de critério", "Verifica se CRITERIO corresponde a um dos códigos oficiais do Quadro V; códigos numéricos sem zero à esquerda são padronizados, enquanto vazio, texto malformado ou código não previsto contam como ausência/preenchimento errado."),
+    ("presença de critério", "Verifica se CRITERIO contém um código oficial do Quadro V; o campo registra critério de confirmação, portanto sua ausência em descartados não permite concluir que não houve investigação ou fundamento para o descarte."),
     ("critério de confirmação", "Mostra quais critérios do campo CRITERIO foram registrados no estrato selecionado, permitindo comparar o peso relativo de cultura, PCR, clínica e demais critérios oficiais."),
+    ("critérios diagnósticos ao longo do tempo", "Mostra os valores anuais observados como pontos e a tendência LOESS local linear como curva; a suavização usa 2/3 dos anos vizinhos e deve ser lida junto aos denominadores anuais."),
     ("série temporal", "Mostra como o número de registros varia ao longo do tempo no recorte filtrado; quando há estratos, cada linha representa uma categoria calculada com o mesmo eixo temporal."),
     ("sazonalidade", "Cruza ano e período do calendário para destacar concentrações sazonais de registros; células mais intensas representam maiores contagens."),
     ("faixa etária", "Compara a distribuição dos registros entre grupos de idade, exibindo números absolutos e percentuais calculados no recorte atual."),
@@ -5161,8 +5163,8 @@ def query_sinan_criterion_presence_by_classification(
         WITH casos_validos AS (
             SELECT {classi_sql} AS classificacao,
                    CASE
-                       WHEN ({criterion_sql}) IN ({valid_codes_sql}) THEN 'Com critério diagnóstico válido'
-                       ELSE 'Sem critério diagnóstico válido'
+                       WHEN ({criterion_sql}) IN ({valid_codes_sql}) THEN 'Com código válido registrado em CRITERIO'
+                       ELSE 'Sem código válido registrado em CRITERIO'
                    END AS presenca
             FROM {table.ref_sql}
             {where_sql}
@@ -5190,7 +5192,7 @@ def query_sinan_criterion_presence_by_classification(
         ), ordem_estratos(estrato, ordem_estrato) AS (
             VALUES ('Total de casos', 1), ('Casos confirmados', 2), ('Casos descartados', 3)
         ), ordem_presencas(presenca, ordem_presenca) AS (
-            VALUES ('Com critério diagnóstico válido', 1), ('Sem critério diagnóstico válido', 2)
+            VALUES ('Com código válido registrado em CRITERIO', 1), ('Sem código válido registrado em CRITERIO', 2)
         )
         SELECT e.estrato,
                p.presenca,
@@ -5340,6 +5342,60 @@ def query_sinan_criterion_timeseries(
     return run_query(table, sql)
 
 
+def _loess_predict(
+    x_values: Sequence[float],
+    y_values: Sequence[float],
+    evaluation_x: Optional[Sequence[float]] = None,
+    span: float = 2.0 / 3.0,
+) -> np.ndarray:
+    """LOESS local linear com pesos tricúbicos e sem reponderação robusta."""
+    frame = pd.DataFrame(
+        {
+            "x": pd.to_numeric(pd.Series(x_values), errors="coerce"),
+            "y": pd.to_numeric(pd.Series(y_values), errors="coerce"),
+        }
+    ).dropna()
+    if frame.empty:
+        return np.asarray([], dtype=float)
+    observed = frame.groupby("x", as_index=False, sort=True)["y"].mean()
+    x = observed["x"].to_numpy(dtype=float)
+    y = observed["y"].to_numpy(dtype=float)
+    eval_x = (
+        np.asarray(evaluation_x, dtype=float)
+        if evaluation_x is not None
+        else x.copy()
+    )
+    if x.size == 1:
+        return np.full(eval_x.shape, y[0], dtype=float)
+    if x.size == 2:
+        return np.interp(eval_x, x, y)
+
+    neighborhood = min(x.size, max(3, int(math.ceil(float(span) * x.size))))
+    predictions: List[float] = []
+    for x0 in eval_x:
+        distances = np.abs(x - x0)
+        bandwidth = float(np.partition(distances, neighborhood - 1)[neighborhood - 1])
+        if not np.isfinite(bandwidth) or bandwidth <= 0:
+            predictions.append(float(y[int(np.argmin(distances))]))
+            continue
+        scaled = distances / bandwidth
+        weights = np.where(scaled < 1.0, (1.0 - scaled**3) ** 3, 0.0)
+        if np.count_nonzero(weights > 0) < 2:
+            nearest = np.argsort(distances)[:2]
+            weights = np.zeros_like(distances, dtype=float)
+            weights[nearest] = 1.0
+        centered_x = x - x0
+        design = np.column_stack([np.ones_like(centered_x), centered_x])
+        sqrt_weights = np.sqrt(weights)
+        beta, *_ = np.linalg.lstsq(
+            design * sqrt_weights[:, None],
+            y * sqrt_weights,
+            rcond=None,
+        )
+        predictions.append(float(beta[0]))
+    return np.asarray(predictions, dtype=float)
+
+
 def render_sinan_criterion_distribution_chart(
     table: LoadedTable,
     exprs: Dict[str, Optional[str]],
@@ -5446,12 +5502,15 @@ def render_sinan_criterion_timeseries_chart(
     exprs: Dict[str, Optional[str]],
     where_sql: str,
     key_prefix: str,
+    fixed_stratum: Optional[str] = None,
 ) -> None:
-    """Renderiza a evolução anual da composição de CRITERIO."""
-    st.markdown("#### Comportamento dos critérios diagnósticos ao longo do tempo")
+    """Renderiza pontos anuais e tendência LOESS da composição de CRITERIO."""
+    heading_suffix = f" — {fixed_stratum.lower()}" if fixed_stratum else ""
+    st.markdown(f"#### Critérios diagnósticos ao longo do tempo{heading_suffix}")
     st.caption(
-        "Cada linha representa um código oficial do Quadro V. O percentual é recalculado dentro de cada ano, "
-        "permitindo distinguir mudança na composição dos critérios de simples mudança no volume de casos."
+        "Cada linha suavizada representa um código oficial do Quadro V; os pontos preservam os valores anuais observados. "
+        "No modo percentual, o denominador é recalculado dentro de cada ano para distinguir mudança na composição dos "
+        "critérios de simples mudança no volume de casos."
     )
     dt_sql = exprs.get("dt")
     classi_code = exprs.get("classi_code")
@@ -5471,14 +5530,18 @@ def render_sinan_criterion_timeseries_chart(
         )
         return
 
-    c_stratum, c_measure = st.columns(2)
-    with c_stratum:
-        stratum = st.radio(
-            "Estratificação temporal dos critérios diagnósticos",
-            ["Total de casos", "Casos confirmados", "Casos descartados"],
-            horizontal=True,
-            key=f"{key_prefix}_criterion_timeseries_stratum",
-        )
+    if fixed_stratum is None:
+        c_stratum, c_measure = st.columns(2)
+        with c_stratum:
+            stratum = st.radio(
+                "Estratificação temporal dos critérios diagnósticos",
+                ["Total de casos", "Casos confirmados", "Casos descartados"],
+                horizontal=True,
+                key=f"{key_prefix}_criterion_timeseries_stratum",
+            )
+    else:
+        stratum = fixed_stratum
+        c_measure = st.container()
     with c_measure:
         measure = st.radio(
             "Medida exibida",
@@ -5512,33 +5575,86 @@ def render_sinan_criterion_timeseries_chart(
     else:
         y_col = "pct_ano" if measure == "Percentual no ano" else "n"
         y_label = "% dos casos no ano" if measure == "Percentual no ano" else "Casos"
-        fig = px.line(
-            plotted,
-            x="ano",
-            y=y_col,
-            color="criterio",
-            markers=True,
+        plotted[y_col] = pd.to_numeric(plotted[y_col], errors="coerce")
+        plotted["valor_loess"] = np.nan
+        fig = go.Figure()
+        criterion_order = list(SINAN_CRITERIO.values())
+        color_map = {
+            criterion: APP_COLOR_SEQUENCE[index % len(APP_COLOR_SEQUENCE)]
+            for index, criterion in enumerate(criterion_order)
+        }
+        for criterion in criterion_order:
+            series = plotted.loc[
+                plotted["criterio"].astype(str).eq(str(criterion))
+            ].dropna(subset=["ano", y_col]).sort_values("ano")
+            if series.empty:
+                continue
+            years = series["ano"].astype(float).to_numpy()
+            values = series[y_col].astype(float).to_numpy()
+            dense_years = (
+                np.linspace(float(years.min()), float(years.max()), max(120, len(years) * 20))
+                if len(years) >= 3 and float(years.max()) > float(years.min())
+                else years.copy()
+            )
+            smooth_values = _loess_predict(years, values, dense_years)
+            observed_smooth = _loess_predict(years, values, years)
+            if measure == "Percentual no ano":
+                smooth_values = np.clip(smooth_values, 0.0, 100.0)
+                observed_smooth = np.clip(observed_smooth, 0.0, 100.0)
+            else:
+                smooth_values = np.maximum(smooth_values, 0.0)
+                observed_smooth = np.maximum(observed_smooth, 0.0)
+            plotted.loc[series.index, "valor_loess"] = observed_smooth
+            color = color_map[str(criterion)]
+            observed_text = []
+            for _, row in series.iterrows():
+                observed_value = (
+                    f"{float(row[y_col]):.2f}%".replace(".", ",")
+                    if measure == "Percentual no ano"
+                    else f"{int(round(float(row[y_col]))):,}".replace(",", ".")
+                )
+                criterion_n_text = f"{int(row['n']):,}".replace(",", ".")
+                denominator_text = f"{int(row['denominador_ano']):,}".replace(",", ".")
+                valid_text = f"{int(row['criterios_validos_ano']):,}".replace(",", ".")
+                observed_text.append(
+                    f"<b>{criterion}</b><br>Ano: {int(row['ano'])}<br>Observado: {observed_value}"
+                    f"<br>Casos do critério: {criterion_n_text}"
+                    f"<br>Total no ano: {denominator_text}"
+                    f"<br>Critérios válidos no ano: {valid_text}"
+                )
+            fig.add_trace(
+                go.Scatter(
+                    x=years,
+                    y=values,
+                    mode="markers",
+                    marker={"color": color, "size": 7, "opacity": 0.55},
+                    name=str(criterion),
+                    legendgroup=str(criterion),
+                    showlegend=False,
+                    text=observed_text,
+                    hovertemplate="%{text}<extra></extra>",
+                )
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=dense_years,
+                    y=smooth_values,
+                    mode="lines",
+                    line={"color": color, "width": 2.4},
+                    name=str(criterion),
+                    legendgroup=str(criterion),
+                    hovertemplate=(
+                        f"<b>{criterion}</b><br>Tendência LOESS: %{{y:.2f}}"
+                        + ("%" if measure == "Percentual no ano" else "")
+                        + "<extra></extra>"
+                    ),
+                )
+            )
+        fig.update_layout(
             title=f"Critérios diagnósticos ao longo do tempo — {stratum.lower()}",
-            labels={
-                "ano": "Ano",
-                y_col: y_label,
-                "criterio": "Critério diagnóstico",
-                "n": "Casos",
-                "pct_ano": "% dos casos no ano",
-                "pct_criterios_validos_ano": "% entre critérios válidos no ano",
-                "denominador_ano": "Total de casos no ano",
-                "criterios_validos_ano": "Casos com critério válido no ano",
-            },
-            category_orders={"criterio": list(SINAN_CRITERIO.values())},
-            hover_data={
-                "codigo": True,
-                "n": True,
-                "pct_ano": ":.2f",
-                "pct_criterios_validos_ano": ":.2f",
-                "denominador_ano": True,
-                "criterios_validos_ano": True,
-                "ordem": False,
-            },
+            xaxis_title="Ano",
+            yaxis_title=y_label,
+            legend_title_text="Critério diagnóstico",
         )
         fig.update_xaxes(dtick=1)
         if measure == "Percentual no ano":
@@ -5548,8 +5664,13 @@ def render_sinan_criterion_timeseries_chart(
     st.caption(
         "O denominador de cada ano inclui todos os casos do estrato com data válida e CLASSI_FIN válido (1 ou 2), "
         "mesmo quando CRITERIO está vazio ou fora de 01–10. Esses registros não são atribuídos a nenhuma linha; "
-        "portanto, no modo percentual, a soma dos critérios pode ser inferior a 100%."
+        "portanto, no modo percentual, a soma dos critérios pode ser inferior a 100%. A curva usa regressão local "
+        "linear LOESS com pesos tricúbicos e janela de 2/3 dos anos, sem reponderação robusta; os pontos brutos permanecem "
+        "visíveis. A suavização é descritiva, não extrapola além do período observado e não substitui a leitura dos "
+        "denominadores anuais, especialmente quando são pequenos."
     )
+    if "valor_loess" in plotted.columns:
+        temporal_df["valor_loess"] = pd.to_numeric(plotted["valor_loess"], errors="coerce")
     display_df = temporal_df.drop(columns=["ordem"], errors="ignore")
     copyable_dataframe(display_df, width="stretch", hide_index=True)
     download_button(
@@ -15018,8 +15139,8 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
             ]
             estrato_order = ["Total de casos", "Casos confirmados", "Casos descartados"]
             presence_order = [
-                "Com critério diagnóstico válido",
-                "Sem critério diagnóstico válido",
+                "Com código válido registrado em CRITERIO",
+                "Sem código válido registrado em CRITERIO",
             ]
             fig_criterio_presenca = px.bar(
                 criterio_presenca,
@@ -15037,8 +15158,8 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                 },
                 category_orders={"estrato": estrato_order, "presenca": presence_order},
                 color_discrete_map={
-                    "Com critério diagnóstico válido": PLOTLY_DEFAULT_BLUE,
-                    "Sem critério diagnóstico válido": "#D62728",
+                    "Com código válido registrado em CRITERIO": PLOTLY_DEFAULT_BLUE,
+                    "Sem código válido registrado em CRITERIO": "#D62728",
                 },
                 hover_data={
                     "texto": False,
@@ -15058,11 +15179,34 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
             st.caption(
                 "Primeiro, `CLASSI_FIN` é padronizado como código: somente `1` (confirmado) e `2` (descartado) entram na "
                 "análise; valores vazios ou diferentes desses códigos ficam fora. Em seguida, cada registro é classificado "
-                "como 'com critério' apenas se `CRITERIO` corresponder a um código oficial do Quadro V (`01` a `10`). "
+                "como 'com código válido registrado' apenas se `CRITERIO` corresponder a um código oficial do Quadro V (`01` a `10`). "
                 "Em colunas numéricas, valores como 1 e 7 são equivalentes a 01 e 07 porque o formato não preserva zero à "
-                "esquerda; conteúdo textual malformado e códigos não previstos contam como 'sem critério válido'. "
+                "esquerda; conteúdo textual malformado e códigos não previstos contam como ausência de código válido. "
                 "O total é exatamente a soma de confirmados e descartados, e cada barra usa seu próprio denominador."
             )
+            discarded_rows = criterio_presenca.loc[
+                criterio_presenca["estrato"].astype(str).eq("Casos descartados")
+            ]
+            discarded_total = int(
+                pd.to_numeric(discarded_rows.get("denominador"), errors="coerce").fillna(0).max()
+            )
+            discarded_with_code = int(
+                pd.to_numeric(
+                    discarded_rows.loc[
+                        discarded_rows["presenca"].astype(str).eq(
+                            "Com código válido registrado em CRITERIO"
+                        ),
+                        "n",
+                    ],
+                    errors="coerce",
+                ).fillna(0).sum()
+            )
+            if discarded_total > 0 and discarded_with_code == 0:
+                st.info(
+                    f"No recorte atual, nenhum dos {br_int(discarded_total)} casos descartados possui código válido em "
+                    "`CRITERIO`. Isso não demonstra ausência de investigação, exames ou fundamento para o descarte: "
+                    "segundo o dicionário SINAN, `CRITERIO` registra o critério usado para confirmar o caso."
+                )
             display_criterion_presence = criterio_presenca.drop(
                 columns=["ordem_estrato", "ordem_presenca", "texto"], errors="ignore"
             )
@@ -16293,11 +16437,11 @@ def _sinan_lcr_detailed_etiology_group_spec(
     if missing:
         return None, [], None, missing
 
-    accepted_criteria_sql = ", ".join(
+    accepted_etiologic_criteria_sql = ", ".join(
         qstr(code) for code in SINAN_CRITERIO if code not in {"04", "06", "07"}
     )
     common_eligibility = (
-        f"({classi_code}) = '1' AND ({criterio_code}) IN ({accepted_criteria_sql})"
+        f"({classi_code}) = '1' AND ({criterio_code}) IN ({accepted_etiologic_criteria_sql})"
     )
 
     if analysis_kind == "Bacterianas":
@@ -16349,8 +16493,11 @@ def _sinan_lcr_detailed_etiology_group_spec(
         END
     """
     eligibility = (
-        f"{common_eligibility} AND ({con_code}) = '07' "
-        f"AND ({ass_code}) IN ({valid_ass_codes_sql})"
+        f"({classi_code}) = '1' AND ({con_code}) = '07' "
+        f"AND ({ass_code}) IN ({valid_ass_codes_sql}) AND ("
+        f"(({ass_code}) = '75' AND ({criterio_code}) IN ('04', '06')) OR "
+        f"(({ass_code}) <> '75' AND ({criterio_code}) IN ({accepted_etiologic_criteria_sql}))"
+        f")"
     )
     return group_sql, group_order, eligibility, []
 
@@ -17169,10 +17316,12 @@ def render_detailed_lcr_analysis_tab(
     st.markdown("### Raincloud plots half-eye dos parâmetros liquóricos por definição etiológica")
     st.info(
         "Estes gráficos usam apenas casos com `CLASSI_FIN = 1`, punção lombar realizada e códigos válidos "
-        "nos campos necessários. Casos confirmados exclusivamente por critério clínico (`04`), quimiocitológico (`06`) "
-        "ou clínico-epidemiológico (`07`) são excluídos porque esses critérios, isoladamente, não determinam a "
-        "etiologia. Também são excluídos critérios vazios ou fora do Quadro V. Um seletor de tipo e outro de parâmetro "
-        "garantem que somente um raincloud seja calculado por vez."
+        "nos campos necessários. Nas categorias que afirmam uma etiologia, casos confirmados exclusivamente por critério "
+        "clínico (`04`), quimiocitológico (`06`) ou clínico-epidemiológico (`07`) são excluídos porque esses critérios, "
+        "isoladamente, não determinam o agente. A exceção é `CLA_ME_ASS = 75` (não identificado): o Quadro III admite "
+        "somente 04 ou 06, e o grupo informa explicitamente que a etiologia não foi definida. Critérios vazios, fora do "
+        "Quadro V ou incompatíveis com essa regra são excluídos. Um seletor de tipo e outro de parâmetro garantem que "
+        "somente um raincloud seja calculado por vez."
     )
     st.markdown(
         "**Divisão bacteriana:** definida = `CON_DIAGES` 02, 03, 09 ou 10, ou 05 com `CLA_ME_BAC` válido diferente "
@@ -17321,6 +17470,13 @@ def render_detailed_etiology_analysis_tab(
         exprs,
         base_where,
         key_prefix="sinan_detailed_etiology",
+    )
+    render_sinan_criterion_timeseries_chart(
+        table,
+        exprs,
+        base_where,
+        key_prefix="sinan_detailed_etiology_confirmed",
+        fixed_stratum="Casos confirmados",
     )
     st.divider()
 
@@ -18041,7 +18197,7 @@ def render_source(source: str) -> Optional[Dict[str, object]]:
     ]
     if source == "SINAN":
         analysis_sections.append("Análise detalhada do líquor")
-        analysis_sections.append("Análise de planilha")
+        analysis_sections.append("Verificação de completude de planilha")
         analysis_sections.append("Análise etiológica detalhada")
         analysis_sections.append("Análise de possível sobreposição de casos")
     analysis_sections.extend([
@@ -18070,7 +18226,7 @@ def render_source(source: str) -> Optional[Dict[str, object]]:
         render_demography_tab(table, source, graph_where, exprs, base_where=base_where)
     elif selected_section == "Análise detalhada do líquor" and source == "SINAN":
         render_detailed_lcr_analysis_tab(table, exprs, base_where)
-    elif selected_section == "Análise de planilha" and source == "SINAN":
+    elif selected_section == "Verificação de completude de planilha" and source == "SINAN":
         render_spreadsheet_analysis_tab(table, exprs, base_where)
     elif selected_section == "Análise etiológica detalhada" and source == "SINAN":
         render_detailed_etiology_analysis_tab(table, exprs, base_where)
@@ -18263,7 +18419,7 @@ def render_methodology():
         3. Use **Análise Temporal** para verificar queda, recuperação e sazonalidade.
         4. Use **Análise demográfica e territorial** para levantar hipóteses por idade, sexo, residência e atendimento.
         5. Use **Análise detalhada do líquor** para comparar completude, compatibilidade com faixas da literatura e distribuições de parâmetros entre confirmados e descartados puncionados.
-        6. Use **Análise de planilha** para auditar os métodos diagnósticos em todos os registros filtrados, sem exigir punção lombar, localizar problemas e verificar compatibilidade etiológica.
+        6. Use **Verificação de completude de planilha** para auditar os métodos diagnósticos em todos os registros filtrados, sem exigir punção lombar, localizar problemas e verificar compatibilidade etiológica.
         7. Use **Análise etiológica detalhada** para reproduzir a conclusão diagnóstica, detalhar outras bactérias e meningites assépticas pelos Quadros II e III e revisar, caso a caso, o critério de confirmação.
         8. Use **Prévia** para inspecionar casos filtrados e exportar a planilha completa quando necessário.
         9. Use **SQL Lab** para transformar a hipótese em uma consulta reprodutível.
@@ -18311,14 +18467,15 @@ def render_methodology():
         "Nos parâmetros liquóricos do SINAN, exige-se punção lombar e seleciona-se um único parâmetro por vez para reduzir "
         "o custo de carregamento. O raincloud **sem estratificação etiológica** compara confirmados e descartados e não "
         "oferece divisão por `CON_DIAGES`. O raincloud **por definição etiológica** separa meningites bacterianas ou "
-        "assépticas nos três graus de definição descritos na própria seção e exclui os critérios 04, 06 e 07, que "
-        "isoladamente não determinam etiologia. Em todos os rainclouds, os percentis ponderados 0,5% e 99,5% limitam "
+        "assépticas nos três graus de definição descritos na própria seção. Os critérios 04, 06 e 07 são excluídos das "
+        "categorias que afirmam etiologia; `CLA_ME_ASS = 75` é a exceção documentada, pois significa agente não identificado "
+        "e o Quadro III admite apenas 04 ou 06. Em todos os rainclouds, os percentis ponderados 0,5% e 99,5% limitam "
         "somente a janela desenhada da densidade; chuva de pontos, média, mediana, quartis e demais estatísticas continuam "
         "usando 100% dos dados elegíveis. Referência visual e conceitual: "
         "[Cédric Scherer — Visualizing Distributions with Raincloud Plots]"
         "(https://www.cedricscherer.com/2021/06/06/visualizing-distributions-with-raincloud-plots-and-how-to-create-them-with-ggplot2/)."
     )
-    st.markdown("### Auditoria dos métodos diagnósticos na Análise de planilha")
+    st.markdown("### Auditoria dos métodos diagnósticos na Verificação de completude de planilha")
     st.markdown(
         "A seção usa todos os registros definidos pelos filtros e não exige `LAB_PUNCAO = 1`. Na auditoria "
         "de completude, o código é comparado com o quadro correspondente do Dicionário de Dados SINAN NET — Meningite "
@@ -18343,8 +18500,9 @@ def render_methodology():
         "com valores distantes da literatura e preenchidos compatíveis. Confirmados com etiologia comparável usam "
         "a faixa específica; os demais usam a união das faixas da tabela-resumo. Os rainclouds calculam somente o "
         "parâmetro escolhido: o gráfico sem estratificação etiológica compara confirmados e descartados; o gráfico "
-        "etiológico compara os três graus de definição das meningites bacterianas e "
-        "assépticas, excluindo critérios clínico, quimiocitológico e clínico-epidemiológico nesta última análise."
+        "etiológico compara os três graus de definição das meningites bacterianas e assépticas. Critérios clínico, "
+        "quimiocitológico e clínico-epidemiológico são excluídos quando o grupo afirma etiologia; a categoria asséptica "
+        "sem etiologia definida (`CLA_ME_ASS = 75`) preserva 04 e 06, os únicos critérios aceitos para ela no Quadro III."
     )
     st.markdown(
         "A composição de `CRITERIO`, disponível em **Análise etiológica e CID-10** e **Análise etiológica detalhada**, "
@@ -18353,8 +18511,11 @@ def render_methodology():
     )
     st.markdown(
         "Em **Análise etiológica e CID-10**, a série anual de `CRITERIO` reutiliza esses mesmos estratos e permite "
-        "alternar entre percentual dentro de cada ano e número absoluto. Anos sem um critério específico são "
-        "mantidos com zero para não interromper artificialmente a linha temporal."
+        "alternar entre percentual dentro de cada ano e número absoluto. Os valores anuais observados permanecem como "
+        "pontos e a tendência é desenhada por LOESS local linear, com pesos tricúbicos, janela de 2/3 dos anos e sem "
+        "reponderação robusta. Anos sem um critério específico são mantidos com zero para não interromper artificialmente "
+        "a série. Em **Análise etiológica detalhada**, a mesma visualização aparece logo abaixo da composição, restrita "
+        "aos casos confirmados."
     )
     st.markdown("### Referência CID-10")
     render_cid_reference()
@@ -18425,3 +18586,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
