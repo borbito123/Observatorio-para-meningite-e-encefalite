@@ -69,7 +69,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-09-04-v91-raincloud-foco-robusto-dominios-loess"
+APP_VERSION = "2026-09-04-v92-auditoria-criterios-raincloud-jitter"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos
@@ -512,6 +512,7 @@ def style_plotly_figure(fig: go.Figure) -> go.Figure:
     enforce_death_related_red(fig)
     trace_types = {str(getattr(trace, "type", "")) for trace in (getattr(fig, "data", []) or [])}
     is_line_like = bool(trace_types) and trace_types.issubset({"scatter", "scattergl"})
+    requested_hovermode = getattr(fig.layout, "hovermode", None)
     fig.update_layout(
         template="plotly_white",
         margin={"l": 36, "r": 28, "t": 104, "b": 72},
@@ -519,7 +520,7 @@ def style_plotly_figure(fig: go.Figure) -> go.Figure:
         title={"x": 0.0, "xanchor": "left", "y": 0.98, "yanchor": "top", "pad": {"b": 18}},
         legend={"orientation": "h", "yanchor": "bottom", "y": 1.04, "xanchor": "left", "x": 0, "itemsizing": "constant"},
         hoverlabel={"align": "left"},
-        hovermode="x unified" if is_line_like else "closest",
+        hovermode=requested_hovermode or ("x unified" if is_line_like else "closest"),
     )
     fig.update_xaxes(automargin=True, showgrid=True, zeroline=False)
     fig.update_yaxes(automargin=True, zeroline=False)
@@ -1640,6 +1641,43 @@ def _sinan_quadro_mapping(numero: str) -> Dict[str, str]:
         if str(quadro.get("numero")) == str(numero):
             return {str(code).zfill(2): str(label) for code, label, *_ in quadro.get("linhas", [])}
     return {}
+
+
+def sinan_specification_criterion_compatibility(numero: str) -> pd.DataFrame:
+    """Expande os critérios permitidos nos Quadros II e III usando os rótulos do Quadro V."""
+    quadro = next(
+        (
+            item
+            for item in QUADROS_ETIOLOGICOS_SINAN
+            if str(item.get("numero")) == str(numero)
+        ),
+        None,
+    )
+    if not quadro:
+        return pd.DataFrame()
+    columns = list(quadro.get("colunas", []))
+    specification_label = str(columns[1]) if len(columns) > 1 else "Especificação"
+    rows: List[Dict[str, str]] = []
+    for source_row in quadro.get("linhas", []):
+        if len(source_row) < 3:
+            continue
+        raw_codes = str(source_row[2])
+        criterion_codes = [
+            token.strip().zfill(2)
+            for token in raw_codes.split(",")
+            if token.strip().isdigit()
+        ]
+        rows.append(
+            {
+                "Código": str(source_row[0]).zfill(2),
+                specification_label: str(source_row[1]),
+                "Códigos de CRITERIO admitidos": ", ".join(criterion_codes),
+                "Critérios de confirmação admitidos": "; ".join(
+                    SINAN_CRITERIO.get(code, code) for code in criterion_codes
+                ),
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 SINAN_DIAGNOSTIC_RESULT_MAPPINGS: Dict[str, Dict[str, str]] = {
@@ -5769,6 +5807,8 @@ def render_sinan_criterion_timeseries_chart(
             xaxis_title="Ano",
             yaxis_title=y_label,
             legend_title_text="Critério diagnóstico",
+            hovermode="closest",
+            hoverlabel={"namelength": -1},
         )
         fig.update_xaxes(dtick=1)
         if measure == "Percentual no ano":
@@ -6542,11 +6582,23 @@ def make_weighted_raincloud_halfeye(
             else np.asarray([0.5])
         )
         rain_values = values[np.searchsorted(cumulative, positions, side="left")]
-        rain_display = (
-            rain_values
-            if show_full_range
-            else np.clip(rain_values, visual_low, visual_high)
-        )
+        if show_full_range:
+            rain_display = rain_values
+        else:
+            # Espalha deterministicamente os extremos para dentro da borda e
+            # evita uma parede de triângulos sem alterar seus valores reais.
+            clip_jitter = 0.015 * (visual_high - visual_low) * np.mod(
+                np.arange(rain_count, dtype=float) * 0.61803398875, 1.0
+            )
+            rain_display = np.where(
+                rain_values > visual_high,
+                visual_high - clip_jitter,
+                np.where(
+                    rain_values < visual_low,
+                    visual_low + clip_jitter,
+                    rain_values,
+                ),
+            )
         rain_position = np.where(
             rain_values < visual_low,
             "Abaixo da janela central",
@@ -6640,6 +6692,21 @@ def make_age_raincloud_halfeye(
         max_bandwidth=8.0,
         max_rain_points_per_group=max_rain_points_per_group,
         show_full_range=show_full_range,
+    )
+
+
+def render_raincloud_construction_notice() -> None:
+    """Explica em um único lugar a construção e o foco visual de todos os rainclouds."""
+    st.info(
+        "Como o raincloud é construído: não há truncamento, winsorização nem exclusão de extremos das estatísticas. "
+        "Média, mediana, percentis, mínimo, máximo e densidade usam todos os valores elegíveis. A cerca externa de "
+        "Tukey (3×IQR), acrescida de três bandwidths, restringe somente a janela horizontal padrão usada para desenhar "
+        "o half-eye e facilitar a leitura da região central; quando o IQR é zero, a janela usa o fallback ponderado "
+        "P0,5–P99,5. Pontos além da janela permanecem na chuva como triângulos e conservam o valor original no cursor. "
+        "Para evitar que muitos extremos formem uma parede sobreposta na borda, esses triângulos recebem apenas um "
+        "pequeno deslocamento horizontal determinístico para dentro da janela, limitado a 1,5% de sua amplitude. O "
+        "controle de amplitude completa restaura a posição horizontal original de todos os pontos; os resultados "
+        "numéricos não mudam."
     )
 
 
@@ -15313,11 +15380,6 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
         return
 
     st.markdown("### Classificação específica do SINAN")
-    st.info(
-        "No SINAN, o CID bruto do agravo pode estar como G039 para muitos registros. "
-        "Por isso, esta aba prioriza CON_DIAGES e os campos complementares CLA_ME_BAC, CLA_ME_ASS e CLA_ME_ETI. "
-        "CON_DIAGES=05 deixou de ser convertido automaticamente para G04.2; ele é refinado como G00 ou G01 quando há informação suficiente."
-    )
 
     conversion_base_where = base_where if base_where is not None else graph_where
     confirmed_conversion_where = (
@@ -15349,6 +15411,17 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                 "Com código válido registrado em CRITERIO",
                 "Sem código válido registrado em CRITERIO",
             ]
+            st.info(
+                "Primeiro, `CLASSI_FIN` é padronizado como código: somente `1` (confirmado) e `2` (descartado) "
+                "entram na análise; valores vazios ou diferentes desses códigos ficam fora. Em seguida, cada registro "
+                "é classificado como 'com código válido registrado' apenas se `CRITERIO` corresponder a um código "
+                "oficial do Quadro V (`01` a `10`). Em colunas numéricas, valores como 1 e 7 são equivalentes a 01 e "
+                "07 porque o formato não preserva zero à esquerda; conteúdo textual malformado e códigos não "
+                "previstos contam como ausência de código válido. O gráfico audita exclusivamente o preenchimento do "
+                "campo `CRITERIO`; ele não procura resultados nos campos laboratoriais dos Quadros VII a XII e não os "
+                "converte em um código de `CRITERIO`. O total é exatamente a soma de confirmados e descartados, e cada "
+                "barra usa seu próprio denominador."
+            )
             fig_criterio_presenca = px.bar(
                 criterio_presenca,
                 x="estrato",
@@ -15383,52 +15456,60 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
                 fig_criterio_presenca,
                 calc_title="Preenchimento válido do campo CRITERIO por classificação final",
             )
-            st.caption(
-                "Primeiro, `CLASSI_FIN` é padronizado como código: somente `1` (confirmado) e `2` (descartado) entram na "
-                "análise; valores vazios ou diferentes desses códigos ficam fora. Em seguida, cada registro é classificado "
-                "como 'com código válido registrado' apenas se `CRITERIO` corresponder a um código oficial do Quadro V (`01` a `10`). "
-                "Em colunas numéricas, valores como 1 e 7 são equivalentes a 01 e 07 porque o formato não preserva zero à "
-                "esquerda; conteúdo textual malformado e códigos não previstos contam como ausência de código válido. "
-                "O gráfico audita exclusivamente o preenchimento do campo `CRITERIO`; ele não procura resultados nos campos "
-                "laboratoriais dos Quadros VII a XII e não os converte em um código de `CRITERIO`. O total é exatamente a "
-                "soma de confirmados e descartados, e cada barra usa seu próprio denominador."
-            )
-            discarded_rows = criterio_presenca.loc[
-                criterio_presenca["estrato"].astype(str).eq("Casos descartados")
-            ]
-            discarded_total = int(
-                pd.to_numeric(discarded_rows.get("denominador"), errors="coerce").fillna(0).max()
-            )
-            discarded_with_code = int(
-                pd.to_numeric(
-                    discarded_rows.loc[
-                        discarded_rows["presenca"].astype(str).eq(
-                            "Com código válido registrado em CRITERIO"
-                        ),
-                        "n",
-                    ],
-                    errors="coerce",
-                ).fillna(0).sum()
-            )
-            if discarded_total > 0 and discarded_with_code == 0:
-                discarded_where = append_clause(
-                    conversion_base_where, f"({classi_code}) = '2'"
+            valid_criterion_codes_sql = ", ".join(qstr(code) for code in SINAN_CRITERIO)
+            proxy_notes: List[str] = []
+            for stratum_label, class_clause in (
+                ("Total de casos", f"({classi_code}) IN ('1', '2')"),
+                ("Casos confirmados", f"({classi_code}) = '1'"),
+                ("Casos descartados", f"({classi_code}) = '2'"),
+            ):
+                stratum_rows = criterio_presenca.loc[
+                    criterio_presenca["estrato"].astype(str).eq(stratum_label)
+                ]
+                stratum_total = int(
+                    pd.to_numeric(stratum_rows.get("denominador"), errors="coerce").fillna(0).max()
                 )
-                discarded_with_performed_method = count_sinan_cases_with_any_performed_diagnostic_method(
-                    table, exprs, discarded_where
+                no_code_count = int(
+                    pd.to_numeric(
+                        stratum_rows.loc[
+                            stratum_rows["presenca"].astype(str).eq(
+                                "Sem código válido registrado em CRITERIO"
+                            ),
+                            "n",
+                        ],
+                        errors="coerce",
+                    ).fillna(0).sum()
                 )
-                st.info(
-                    f"No recorte atual, nenhum dos {br_int(discarded_total)} casos descartados possui código válido em "
-                    "`CRITERIO`. Isso é coerente com a lógica condicional da ficha: o campo registra o critério de "
-                    "**confirmação**, não um motivo codificado de descarte, e portanto não deve ser preenchido "
-                    "retroativamente a partir dos exames. O resultado não demonstra ausência de investigação, exames ou "
-                    "fundamento para o descarte. "
-                    f"Entre os descartados, {br_int(discarded_with_performed_method)} possuem ao menos um método "
-                    "laboratorial dos Quadros VII a XII marcado com resultado válido de exame realizado. Esse número "
-                    "documenta investigação laboratorial registrada — inclusive resultados como `Nenhum agente` ou `Não "
-                    "identificado` —, mas não permite afirmar, sozinho, que o exame foi o fundamento decisório do descarte. "
-                    "Por isso esses casos permanecem corretamente em 'Sem código válido registrado em CRITERIO'."
+                no_code_where = append_clause(conversion_base_where, class_clause)
+                no_code_where = append_clause(
+                    no_code_where,
+                    f"(({criterio_code}) IS NULL OR ({criterio_code}) NOT IN ({valid_criterion_codes_sql}))",
                 )
+                performed_proxy_count = count_sinan_cases_with_any_performed_diagnostic_method(
+                    table, exprs, no_code_where
+                )
+                pct_stratum = (
+                    100.0 * performed_proxy_count / stratum_total if stratum_total > 0 else np.nan
+                )
+                pct_no_code = (
+                    100.0 * performed_proxy_count / no_code_count if no_code_count > 0 else np.nan
+                )
+                proxy_notes.append(
+                    f"**{stratum_label}:** {format_int_br(performed_proxy_count)} caso(s) sem `CRITERIO` válido "
+                    f"possuem ao menos um método laboratorial válido marcado como realizado "
+                    f"({format_pct_br(pct_stratum)} do estrato; {format_pct_br(pct_no_code)} entre os "
+                    "casos sem código válido)."
+                )
+            st.warning(
+                "**Leitura alternativa ampliada — não equivale ao preenchimento de CRITERIO.** Se a auditoria também "
+                "aceitasse como proxy a presença de ao menos um resultado válido de exame realizado nos sete métodos "
+                "laboratoriais dos Quadros VII a XII — incluindo `Nenhum agente` e `Não identificado`, mas excluindo "
+                "vazios, `Não realizado`, `Ignorado` e valores fora do dicionário — o recorte atual seria:  \n\n"
+                + "  \n".join(proxy_notes)
+                + "  \n\nEsses números documentam investigação laboratorial registrada. Eles não autorizam preencher "
+                "retroativamente `CRITERIO`, não provam que o exame foi o fundamento decisório do descarte e não "
+                "transformam resultado negativo/inespecífico em identificação etiológica."
+            )
             display_criterion_presence = criterio_presenca.drop(
                 columns=["ordem_estrato", "ordem_presenca", "texto"], errors="ignore"
             )
@@ -15745,6 +15826,12 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
 
     by_year = query_sinan_diagnostics_by_year(table, exprs, conversion_base_where)
     if not by_year.empty:
+        st.info(
+            "No SINAN, o CID bruto do agravo pode estar como G039 para muitos registros. Por isso, este gráfico "
+            "prioriza CON_DIAGES e os campos complementares CLA_ME_BAC, CLA_ME_ASS e CLA_ME_ETI. CON_DIAGES=05 "
+            "deixou de ser convertido automaticamente para G04.2; ele é refinado como G00 ou G01 quando há "
+            "informação suficiente."
+        )
         st.caption(
             "Usa a classificação CID-10 derivada de CON_DIAGES, CLA_ME_BAC e campos complementares do SINAN, "
             "restrita a casos confirmados. O ID_AGRAVO/CID bruto do SINAN não é usado para estratificar este gráfico."
@@ -15883,6 +15970,18 @@ def _sinan_sheet_method_inactive_condition(
         codes_sql = ", ".join(qstr(code) for code in administrative_codes)
         inactive_parts.insert(1, f"({expr}) IN ({codes_sql})")
     return "(" + " OR ".join(inactive_parts) + ")"
+
+
+def _sinan_sheet_method_invalid_condition(
+    exprs: Dict[str, Optional[str]], method_label: str
+) -> Optional[str]:
+    """Valor presente mas fora do domínio do quadro (nem diagnóstico, nem administrativo)."""
+    diagnostic_condition = _sinan_sheet_method_presence_condition(exprs, method_label)
+    inactive_condition = _sinan_sheet_method_inactive_condition(exprs, method_label)
+    expr = _sinan_sheet_method_expr(exprs, method_label)
+    if not diagnostic_condition or not inactive_condition or not expr:
+        return None
+    return f"(NOT ({diagnostic_condition}) AND NOT ({inactive_condition}))"
 
 
 def _sinan_sheet_identifier_select(exprs: Dict[str, Optional[str]]) -> str:
@@ -16158,6 +16257,61 @@ def query_sinan_single_diagnostic_method_cases(
         FROM flags
         WHERE {exclusive_where}
         ORDER BY metodo_unico, linha_fonte
+    """
+    return run_query(table, sql)
+
+
+def query_sinan_single_diagnostic_indeterminate_cases(
+    table: LoadedTable,
+    exprs: Dict[str, Optional[str]],
+    where_sql: str,
+) -> pd.DataFrame:
+    """Lista casos com ao menos um dos sete campos fora do domínio correspondente."""
+    available: List[Tuple[str, str, str]] = []
+    for method_label in SINAN_SINGLE_METHOD_OPTIONS:
+        invalid_condition = _sinan_sheet_method_invalid_condition(exprs, method_label)
+        raw_expr = _sinan_sheet_method_expr(exprs, method_label, raw=True)
+        if invalid_condition and raw_expr:
+            available.append((method_label, invalid_condition, raw_expr))
+    if not available:
+        return pd.DataFrame()
+
+    flag_items: List[str] = []
+    for idx, (_, invalid_condition, raw_expr) in enumerate(available, start=1):
+        flag_items.append(f"CASE WHEN {invalid_condition} THEN 1 ELSE 0 END AS invalido_{idx}")
+        flag_items.append(f"{raw_expr} AS valor_metodo_{idx}")
+    flag_select = ",\n                   ".join(flag_items)
+    any_invalid_where = " OR ".join(
+        f"invalido_{idx} = 1" for idx in range(1, len(available) + 1)
+    )
+    labels_concat = " || ".join(
+        f"CASE WHEN invalido_{idx} = 1 THEN {qstr(label + '; ')} ELSE '' END"
+        for idx, (label, _, _) in enumerate(available, start=1)
+    )
+    method_value_columns = ",\n               ".join(
+        f"valor_metodo_{idx} AS {qident('valor_' + safe_filename(label).replace('-', '_'))}"
+        for idx, (label, _, _) in enumerate(available, start=1)
+    )
+    identifiers = _sinan_sheet_identifier_select(exprs)
+    sql = f"""
+        WITH fonte AS (
+            SELECT ROW_NUMBER() OVER () AS __linha_fonte, *
+            FROM {table.ref_sql}
+        ), flags AS (
+            SELECT __linha_fonte AS linha_fonte,
+                   {qstr(loaded_table_origin_format(table))} AS formato_origem,
+                   {qstr(table.label or table.source)} AS origem,
+                   {identifiers},
+                   {flag_select}
+            FROM fonte
+            {where_sql}
+        )
+        SELECT linha_fonte, formato_origem, origem, NU_NOTIFIC, NM_PACIENT, CLASSI_FIN, CON_DIAGES,
+               TRIM(TRAILING '; ' FROM ({labels_concat})) AS metodos_com_valor_fora_do_dicionario,
+               {method_value_columns}
+        FROM flags
+        WHERE {any_invalid_where}
+        ORDER BY linha_fonte
     """
     return run_query(table, sql)
 
@@ -16649,6 +16803,7 @@ def render_sinan_lcr_raincloud_chart(
         st.info("Não há valores numéricos dentro do intervalo exibido para gerar este raincloud.")
         return
     unit = meta.unidade if meta else "valor registrado"
+    render_raincloud_construction_notice()
     show_full_range = st.checkbox(
         "Mostrar a amplitude horizontal completa (inclui extremos na escala)",
         value=False,
@@ -16684,7 +16839,8 @@ def render_sinan_lcr_raincloud_chart(
         st.caption(
             "Foco visual robusto ativado: o eixo e o half-eye usam a janela central definida pela cerca de Tukey de "
             "3×IQR, acrescida de três bandwidths. Observações da chuva além da janela não são apagadas nem alteradas: aparecem "
-            "como triângulos no limite correspondente, com o valor original no cursor, e continuam nas estatísticas e "
+            "como triângulos próximos ao limite correspondente, com pequeno espalhamento horizontal determinístico para "
+            "evitar sobreposição, mantendo o valor original no cursor e nas estatísticas e "
             "nas tabelas. Ative a amplitude completa acima para inspecionar a posição horizontal original dos extremos."
         )
     if sampled:
@@ -16933,6 +17089,7 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
         if age_frequency.empty:
             st.info("Sem idades válidas entre 0 e 130 anos para gerar o raincloud plot com os filtros atuais.")
             return
+        render_raincloud_construction_notice()
         show_full_age_range = st.checkbox(
             "Mostrar a amplitude horizontal completa da idade",
             value=False,
@@ -17979,6 +18136,17 @@ def render_detailed_etiology_analysis_tab(
         "Todas as tabelas mostram código e descrição de `CRITERIO`; a tabela de CON_DIAGES=05 mostra também código e "
         "descrição de `CLA_ME_BAC`, conforme o Quadro II."
     )
+    st.info(
+        "Precisão conceitual para `CON_DIAGES=05`: o Quadro II define quais códigos de `CRITERIO` são compatíveis "
+        "com cada preenchimento de `CLA_ME_BAC`. Todas as bactérias nomeadas e `28 — outras bactérias` admitem "
+        "cultura (`01`) e PCR (`09`); `14 — Streptococcus` admite também látex (`03`). Já `81 — bactéria não "
+        "especificada` admite somente clínico (`04`), bacterioscopia (`05`) e quimiocitológico (`06`). Portanto, "
+        "a tabela audita a compatibilidade entre os campos, mas o preenchimento isolado de `CLA_ME_BAC` não prova "
+        "que um agente foi identificado em laboratório — sobretudo quando o código é 81."
+    )
+    st.markdown("##### Critérios de confirmação compatíveis com cada especificação do Quadro II")
+    bacterial_compatibility_df = sinan_specification_criterion_compatibility("II")
+    copyable_dataframe(bacterial_compatibility_df, width="stretch", hide_index=True)
     diagnosis_specs = [
         ("Meningite por outras bactérias", "05", "sinan_bacteriologia_casos_outras_bacterias.csv", True),
         ("Meningite por Haemophilus influenzae", "09", "sinan_bacteriologia_casos_haemophilus.csv", False),
@@ -18097,13 +18265,18 @@ def render_detailed_etiology_analysis_tab(
     )
     st.info(
         "Precisão conceitual: esta é uma tabela do **preenchimento de CLA_ME_ASS**, não uma prova de etiologia viral. "
-        "O Quadro III mistura agentes nomeados com categorias amplas (`59`, `73` e `74`) e com `75 — não identificado`; "
-        "para 75, o próprio dicionário admite somente os critérios clínico (`04`) e quimiocitológico (`06`). Assim, a "
-        "opção 75 deve permanecer disponível para auditoria do campo, mas não pode ser interpretada como vírus "
-        "laboratorialmente identificado. A lógica bacteriana não é equivalente: CON_DIAGES 02, 03, 09 e 10 já nomeia "
-        "uma categoria bacteriana, e CON_DIAGES 05 é refinado pelo Quadro II, que também contém as categorias 28 "
-        "(outras bactérias) e 81 (bactéria não especificada)."
+        "O Quadro III mistura agentes nomeados, categorias amplas (`59`, `73` e `74`) e `75 — não identificado`. "
+        "O código 75 admite exclusivamente clínico (`04`) e quimiocitológico (`06`). Caxumba (`37`), herpes simples "
+        "(`39`) e varicela/catapora/herpes zoster (`40`) admitem clínico (`04`), clínico-epidemiológico (`07`), "
+        "isolamento viral (`08`) ou PCR (`09`). Todos os demais agentes e categorias do Quadro III admitem "
+        "clínico-epidemiológico (`07`), isolamento viral (`08`) ou PCR (`09`). Logo, mesmo um agente nomeado em "
+        "`CLA_ME_ASS` pode ter sido classificado sem identificação laboratorial; é indispensável ler o `CRITERIO` "
+        "associado antes de interpretar a etiologia como confirmada por laboratório. A opção 75 permanece disponível "
+        "para auditoria do campo, mas nunca representa vírus identificado."
     )
+    st.markdown("##### Critérios de confirmação compatíveis com cada especificação do Quadro III")
+    aseptic_compatibility_df = sinan_specification_criterion_compatibility("III")
+    copyable_dataframe(aseptic_compatibility_df, width="stretch", hide_index=True)
     if not ass_code:
         st.warning("CLA_ME_ASS não foi detectado; não é possível criar as tabelas discriminatórias do Quadro III.")
     else:
@@ -18486,7 +18659,8 @@ def render_spreadsheet_analysis_tab(
         "`LAB_PUNCAO = 1`, e critérios clínico, quimiocitológico e aspecto do líquor não entram nesta contagem. O Quadro XI "
         "não oferece os códigos 61/62 para isolamento viral; por isso, nesse campo, somente célula vazia representa método "
         "inativo e qualquer código oficial, inclusive 75, representa exame realizado. Esta classificação mede padrão de "
-        "preenchimento dos métodos, não suficiência causal nem identificação etiológica."
+        "preenchimento dos métodos, não suficiência causal nem identificação etiológica. Os casos indeterminados agora "
+        "têm contagem, reconciliação e tabela próprias logo abaixo do gráfico."
     )
     st.markdown("### Verificação de casos com apenas um método diagnóstico")
     single_group = st.selectbox(
@@ -18508,8 +18682,25 @@ def render_spreadsheet_analysis_tab(
             + "."
         )
     single_df = query_sinan_single_diagnostic_method_cases(table, exprs, single_where)
+    indeterminate_df = query_sinan_single_diagnostic_indeterminate_cases(
+        table, exprs, single_where
+    )
     total_single_eligible = count_rows(table, single_where)
     total_single_cases = int(len(single_df))
+    total_indeterminate_cases = int(len(indeterminate_df))
+    total_other_cases = total_single_eligible - total_single_cases - total_indeterminate_cases
+    overlapping_lines = set(
+        pd.to_numeric(single_df.get("linha_fonte"), errors="coerce").dropna().astype(int)
+        if not single_df.empty else []
+    ) & set(
+        pd.to_numeric(indeterminate_df.get("linha_fonte"), errors="coerce").dropna().astype(int)
+        if not indeterminate_df.empty else []
+    )
+    if overlapping_lines or total_other_cases < 0:
+        st.error(
+            "Falha de reconciliação: as categorias de método único, indeterminado e demais casos não ficaram "
+            "mutuamente exclusivas. Revise as condições antes de interpretar o resultado."
+        )
     pct_total_elegivel = (
         round(100.0 * total_single_cases / total_single_eligible, 2)
         if total_single_eligible > 0 else np.nan
@@ -18531,10 +18722,22 @@ def render_spreadsheet_analysis_tab(
         f"{format_int_br(int(n))} ({format_pct_br(pct)})"
         for n, pct in zip(plot_single["n"], plot_single["pct_total_elegivel"])
     ]
-    st.metric(
-        "Casos com exatamente um método laboratorial marcado como realizado",
-        format_int_br(total_single_cases),
-    )
+    m1, m2, m3 = st.columns(3)
+    with m1:
+        st.metric(
+            "Casos com exatamente um método laboratorial marcado como realizado",
+            format_int_br(total_single_cases),
+        )
+    with m2:
+        st.metric(
+            "Casos indeterminados (valor fora do dicionário em algum método)",
+            format_int_br(total_indeterminate_cases),
+        )
+    with m3:
+        st.metric(
+            "Casos com 0 ou 2+ métodos válidos realizados",
+            format_int_br(total_other_cases),
+        )
     fig_single = px.bar(
         plot_single,
         x="n",
@@ -18559,8 +18762,11 @@ def render_spreadsheet_analysis_tab(
     fig_single.update_traces(textposition="outside", cliponaxis=False)
     render_plotly_chart(fig_single, calc_title="Casos com apenas um método diagnóstico")
     st.caption(
-        f"Foram avaliados {format_int_br(total_single_eligible)} caso(s) no estrato; {format_int_br(total_single_cases)} "
-        f"atenderam integralmente à regra ({format_pct_br(pct_total_elegivel)} do total elegível). "
+        f"Foram avaliados {format_int_br(total_single_eligible)} caso(s) no estrato. Desses, "
+        f"{format_int_br(total_single_cases)} atenderam à regra de método único "
+        f"({format_pct_br(pct_total_elegivel)}), {format_int_br(total_indeterminate_cases)} ficaram "
+        "indeterminados por conter valor fora do dicionário em ao menos um dos sete campos, e "
+        f"{format_int_br(total_other_cases)} tiveram 0 ou 2 ou mais métodos válidos realizados. "
         + (
             "As sete colunas laboratoriais necessárias foram detectadas; nenhum método foi omitido da contagem."
             if not missing_single_method_columns
@@ -18577,6 +18783,23 @@ def render_spreadsheet_analysis_tab(
             "sinan_planilha_casos_apenas_um_metodo.csv",
             label="Baixar casos com apenas um método (CSV)",
             max_rows=len(single_df),
+        )
+
+    st.markdown("**Casos indeterminados (valor fora do dicionário em algum dos sete campos)**")
+    if indeterminate_df.empty:
+        st.success("Nenhum caso indeterminado por valor fora do dicionário no recorte atual.")
+    else:
+        st.caption(
+            "Estes casos não puderam ser classificados como método único porque ao menos um dos sete campos "
+            "laboratoriais contém um código que não consta no quadro correspondente do dicionário. O valor não "
+            "é presumido como 'Não realizado': presumir isso fabricaria uma informação que a célula não contém."
+        )
+        copyable_dataframe(indeterminate_df, width="stretch", hide_index=True)
+        download_button(
+            indeterminate_df,
+            "sinan_planilha_casos_indeterminados_metodo_unico.csv",
+            label="Baixar casos indeterminados (CSV)",
+            max_rows=len(indeterminate_df),
         )
 
     st.divider()
@@ -19135,7 +19358,9 @@ def render_methodology():
         "não a distância entre mínimo e máximo; se o IQR é zero, a escala usa MAD e, quando também é zero, a amplitude "
         "central. Isso impede que um extremo isolado superdimensione a suavização sem introduzir KDE adaptativo. No modo "
         "padrão, o eixo recebe o mesmo foco robusto: observações além da janela são representadas por triângulos no limite, "
-        "com o valor original no cursor. A opção de amplitude completa restaura suas posições horizontais. Média, mediana, "
+        "com o valor original no cursor. Quando há muitos extremos, os triângulos recebem um jitter horizontal determinístico "
+        "de até 1,5% da amplitude, sempre para dentro da janela, evitando uma parede de pontos sobrepostos sem alterar os "
+        "valores. A opção de amplitude completa restaura suas posições horizontais. Média, mediana, "
         "quartis, extremos e tabelas continuam usando todos os dados elegíveis; não há exclusão estatística causada pelo "
         "foco visual nem alteração do arquivo-fonte. Nos parâmetros declarados como percentuais, valores acima de 100% "
         "também permanecem nos cálculos, mas são sinalizados em tabela própria e por uma linha de referência no gráfico. "
