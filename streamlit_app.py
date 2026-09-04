@@ -2012,6 +2012,22 @@ SINAN_CRITERIO = {
     "10": "10 — outro",
 }
 
+# Paleta semântica fixa e de alto contraste para todas as séries temporais de
+# CRITERIO. Cultura e PCR ocupam extremos cromáticos (azul e vermelho), e as
+# demais categorias recebem cores únicas que permanecem estáveis entre gráficos.
+SINAN_CRITERIO_TIMESERIES_COLOR_BY_CODE = {
+    "01": "#0057B8",  # cultura — azul
+    "02": "#E69F00",  # CIE — laranja
+    "03": "#009E73",  # látex — verde
+    "04": "#CC79A7",  # clínico — magenta
+    "05": "#8C564B",  # bacterioscopia — marrom
+    "06": "#E377C2",  # quimiocitológico — rosa
+    "07": "#7A8B00",  # clínico-epidemiológico — oliva
+    "08": "#00A6D6",  # isolamento viral — ciano
+    "09": "#D62728",  # PCR — vermelho
+    "10": "#333333",  # outro — grafite
+}
+
 YES_NO_IGN = {
     "1": "Sim",
     "2": "Não",
@@ -5677,8 +5693,9 @@ def render_sinan_criterion_timeseries_chart(
             label for code, label in SINAN_CRITERIO.items() if code in allowed_code_set
         ]
         color_map = {
-            criterion: APP_COLOR_SEQUENCE[index % len(APP_COLOR_SEQUENCE)]
-            for index, criterion in enumerate(criterion_order)
+            SINAN_CRITERIO[code]: SINAN_CRITERIO_TIMESERIES_COLOR_BY_CODE[code]
+            for code in SINAN_CRITERIO
+            if code in allowed_code_set
         }
         for criterion in criterion_order:
             series = plotted.loc[
@@ -5756,7 +5773,12 @@ def render_sinan_criterion_timeseries_chart(
         fig.update_xaxes(dtick=1)
         if measure == "Percentual no ano":
             fig.update_yaxes(range=[0, 100])
-        render_plotly_chart(fig, calc_title="Série temporal dos critérios diagnósticos")
+        # Impede que o estilizador global recolora separadamente o ponto e a
+        # curva LOESS, preservando uma única cor fixa para cada critério.
+        render_plotly_chart(
+            preserve_trace_colors(fig),
+            calc_title="Série temporal dos critérios diagnósticos",
+        )
 
     if population_note:
         denominator_note = (
