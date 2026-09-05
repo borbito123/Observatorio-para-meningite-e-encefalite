@@ -16783,6 +16783,117 @@ def query_sinan_lcr_raincloud_frequency(
     return run_query(table, sql)
 
 
+def query_sinan_lcr_cases_added_without_registered_puncture(
+    table: LoadedTable,
+    exprs: Dict[str, Optional[str]],
+    where_sql: str,
+    parameter_label: str,
+    group_sql: str,
+) -> pd.DataFrame:
+    """Audita a diferença acrescentada ao raincloud ao dispensar LAB_PUNCAO = 1.
+
+    A consulta reproduz a validade numérica usada pela frequência do raincloud e
+    retém somente registros cujo código de punção seja vazio ou diferente de 1.
+    Assim, a tabela representa exatamente casos que não entrariam no modo padrão.
+    """
+    param_key = SINAN_LCR_COMPLETENESS_PARAMS.get(parameter_label)
+    raw_value_expr = _sinan_lcr_completeness_param_expr(exprs, parameter_label)
+    value_expr = exprs.get(f"lab_{param_key}") if param_key else None
+    puncao_code = exprs.get("puncao_code") or exprs.get("puncao_raw")
+    if not param_key or not raw_value_expr or not value_expr or not puncao_code or not group_sql:
+        return pd.DataFrame()
+
+    analysis_value = sinan_lcr_analysis_value_expr(
+        value_expr, param_key, enforce_percent_range=True
+    )
+    identifiers = _sinan_sheet_identifier_select(exprs)
+    field_name = str(SINAN_QUIMIO_PARAMS.get(param_key, {}).get("default_col", param_key))
+    puncao_raw = exprs.get("puncao_raw") or puncao_code
+    puncao_label = exprs.get("puncao_label") or "CAST(NULL AS VARCHAR)"
+    criterio_raw = exprs.get("criterio_raw") or "CAST(NULL AS VARCHAR)"
+    criterio_code = exprs.get("criterio_code") or "CAST(NULL AS VARCHAR)"
+    criterio_label = exprs.get("criterio_label") or "CAST(NULL AS VARCHAR)"
+    bacteria_code = exprs.get("cla_me_bac_code") or "CAST(NULL AS VARCHAR)"
+    aseptic_code = exprs.get("cla_me_ass_code") or "CAST(NULL AS VARCHAR)"
+    sql = f"""
+        WITH fonte AS (
+            SELECT ROW_NUMBER() OVER () AS __linha_fonte, *
+            FROM {table.ref_sql}
+            {where_sql}
+        ), avaliados AS (
+            SELECT __linha_fonte AS linha_fonte,
+                   {qstr(loaded_table_origin_format(table))} AS formato_origem,
+                   {qstr(table.label or table.source)} AS origem,
+                   {identifiers},
+                   {group_sql} AS grupo,
+                   {puncao_raw} AS lab_puncao_informado,
+                   {puncao_code} AS lab_puncao_codigo,
+                   {puncao_label} AS lab_puncao_descricao,
+                   {criterio_raw} AS criterio_informado,
+                   {criterio_code} AS criterio_codigo,
+                   {criterio_label} AS criterio_descricao,
+                   {bacteria_code} AS cla_me_bac_codigo,
+                   {aseptic_code} AS cla_me_ass_codigo,
+                   {raw_value_expr} AS valor_informado,
+                   {analysis_value} AS valor_analitico
+            FROM fonte
+        )
+        SELECT linha_fonte, formato_origem, origem, NU_NOTIFIC, NM_PACIENT,
+               CLASSI_FIN, CON_DIAGES, grupo,
+               lab_puncao_informado, lab_puncao_codigo, lab_puncao_descricao,
+               CASE
+                   WHEN lab_puncao_codigo IS NULL THEN 'Em branco ou não reconhecido'
+                   WHEN lab_puncao_codigo = '2' THEN 'Punção registrada como não realizada'
+                   WHEN lab_puncao_codigo = '9' THEN 'Punção registrada como ignorada'
+                   ELSE 'Código diferente de 1'
+               END AS motivo_inclusao_apenas_no_modo_sensibilidade,
+               criterio_informado, criterio_codigo, criterio_descricao,
+               cla_me_bac_codigo, cla_me_ass_codigo,
+               {qstr(field_name)} AS campo_liquor, valor_informado, valor_analitico
+        FROM avaliados
+        WHERE grupo IS NOT NULL
+          AND valor_analitico IS NOT NULL
+          AND valor_analitico >= 0
+          AND (lab_puncao_codigo IS NULL OR lab_puncao_codigo <> '1')
+        ORDER BY grupo, valor_analitico DESC, linha_fonte
+    """
+    return run_query(table, sql)
+
+
+def render_sinan_lcr_added_without_puncture_audit(
+    table: LoadedTable,
+    exprs: Dict[str, Optional[str]],
+    where_sql: str,
+    parameter_label: str,
+    group_sql: str,
+    *,
+    file_prefix: str,
+) -> None:
+    """Exibe os casos que entram no raincloud somente no modo de sensibilidade."""
+    audit_df = query_sinan_lcr_cases_added_without_registered_puncture(
+        table, exprs, where_sql, parameter_label, group_sql
+    )
+    st.markdown(f"**Auditoria dos casos adicionais sem punção registrada — {parameter_label}**")
+    if audit_df.empty:
+        st.success(
+            "Nenhum caso adicional foi incluído: todos os valores numéricos elegíveis deste recorte já possuíam "
+            "`LAB_PUNCAO = 1`."
+        )
+        return
+    st.caption(
+        f"{format_int_br(len(audit_df))} caso(s) aparecem neste raincloud somente porque a exigência de "
+        "`LAB_PUNCAO = 1` foi dispensada. A tabela preserva o valor registrado, o valor analítico e a situação da "
+        "punção para revisão individual; ela não altera nem corrige o dado-fonte."
+    )
+    copyable_dataframe(audit_df, width="stretch", hide_index=True)
+    download_button(
+        audit_df,
+        f"{file_prefix}_{safe_filename(parameter_label)}_casos_adicionais_sem_puncao_registrada.csv",
+        label="Baixar auditoria dos casos adicionais (CSV)",
+        max_rows=len(audit_df),
+    )
+
+
 def query_sinan_lcr_aberrant_cases(
     table: LoadedTable,
     exprs: Dict[str, Optional[str]],
@@ -17999,6 +18110,15 @@ def render_detailed_lcr_analysis_tab(
         file_prefix=file_prefix,
         empty_message=empty_message,
     )
+    if include_lcr_without_registered_puncture:
+        render_sinan_lcr_added_without_puncture_audit(
+            table,
+            exprs,
+            rain_where,
+            rain_label,
+            group_sql,
+            file_prefix=file_prefix,
+        )
 
     st.divider()
     st.markdown("### Raincloud plots half-eye dos parâmetros liquóricos por definição etiológica")
@@ -18078,6 +18198,15 @@ def render_detailed_lcr_analysis_tab(
             "Não há casos com preenchimento válido e critério etiológico elegível no recorte atual."
         ),
     )
+    if include_lcr_without_registered_puncture:
+        render_sinan_lcr_added_without_puncture_audit(
+            table,
+            exprs,
+            detailed_where,
+            detailed_parameter,
+            detailed_group_sql,
+            file_prefix=f"sinan_raincloud_{kind_slug}_definicao_etiologica",
+        )
 
 
 def query_sinan_etiology_cases(
