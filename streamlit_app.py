@@ -69,7 +69,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-09-04-v97-tetos-plausibilidade-lcr"
+APP_VERSION = "2026-09-05-v100-plenamente-funcional"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos
@@ -1735,6 +1735,10 @@ SINAN_SINGLE_METHOD_OPTIONS = [
 # permanece identificado separadamente como indeterminado e não é reinterpretado
 # semanticamente como "não realizado".
 SINAN_DIAGNOSTIC_ADMIN_CODES = {"61", "62"}
+# Resultados válidos que documentam exame processado sem agente identificado.
+# São distintos tanto dos estados administrativos 61/62 quanto de valores fora
+# do domínio do respectivo quadro.
+SINAN_DIAGNOSTIC_INCONCLUSIVE_CODES = {"51", "75"}
 
 # Uma ausência de pelo menos 50% é apresentada como baixa completude nos
 # rainclouds do LCR. O valor é um limiar comunicacional, não clínico.
@@ -15943,9 +15947,11 @@ def _sinan_sheet_method_expr(
 
 
 def _sinan_sheet_method_presence_condition(
-    exprs: Dict[str, Optional[str]], method_label: str
+    exprs: Dict[str, Optional[str]],
+    method_label: str,
+    strict_mode: bool = False,
 ) -> Optional[str]:
-    """Código válido que documenta exame realizado, mesmo sem agente identificado."""
+    """Código válido que conta como método realizado sob a regra selecionada."""
     spec = SINAN_DIAGNOSTIC_METHOD_SPECS.get(method_label, {})
     expr = _sinan_sheet_method_expr(exprs, method_label)
     if not expr:
@@ -15954,11 +15960,14 @@ def _sinan_sheet_method_presence_condition(
     if criterion_code:
         return f"({expr}) = {qstr(str(criterion_code))}"
     mapping = _sinan_sheet_method_mapping(method_label)
-    diagnostic_codes = sorted(
+    diagnostic_codes = (
         set(mapping)
         - set(spec.get("not_informative") or set())
         - SINAN_DIAGNOSTIC_ADMIN_CODES
     )
+    if strict_mode:
+        diagnostic_codes -= SINAN_DIAGNOSTIC_INCONCLUSIVE_CODES
+    diagnostic_codes = sorted(diagnostic_codes)
     if not diagnostic_codes:
         return None
     return f"({expr}) IN ({', '.join(qstr(code) for code in diagnostic_codes)})"
@@ -16207,11 +16216,16 @@ def query_sinan_diagnostic_method_count_cases(
     table: LoadedTable,
     exprs: Dict[str, Optional[str]],
     where_sql: str,
+    strict_mode: bool = False,
 ) -> pd.DataFrame:
     """Classifica casos pelo número de métodos laboratoriais válidos realizados."""
-    available: List[Tuple[str, str, str, str, str, str]] = []
+    available: List[Tuple[str, str, str, str, str, str, str]] = []
     for method_label in SINAN_SINGLE_METHOD_OPTIONS:
-        performed_condition = _sinan_sheet_method_presence_condition(exprs, method_label)
+        performed_condition = _sinan_sheet_method_presence_condition(
+            exprs, method_label, strict_mode=strict_mode
+        )
+        # A validade de domínio independe da regra de contagem: 51/75 nunca se
+        # tornam "fora do dicionário" no modo estrito.
         invalid_condition = _sinan_sheet_method_invalid_condition(exprs, method_label)
         code_expr = _sinan_sheet_method_expr(exprs, method_label)
         raw_expr = _sinan_sheet_method_expr(exprs, method_label, raw=True)
@@ -16224,6 +16238,12 @@ def query_sinan_diagnostic_method_count_cases(
             if administrative_codes
             else "FALSE"
         )
+        inconclusive_codes = sorted(set(mapping) & SINAN_DIAGNOSTIC_INCONCLUSIVE_CODES)
+        inconclusive_condition = (
+            f"({code_expr}) IN ({', '.join(qstr(code) for code in inconclusive_codes)})"
+            if inconclusive_codes
+            else "FALSE"
+        )
         available.append(
             (
                 method_label,
@@ -16232,13 +16252,14 @@ def query_sinan_diagnostic_method_count_cases(
                 code_expr,
                 raw_expr,
                 administrative_condition,
+                inconclusive_condition,
             )
         )
     if not available:
         return pd.DataFrame()
 
     flag_items: List[str] = []
-    for idx, (_, performed, invalid, code_expr, raw_expr, administrative) in enumerate(
+    for idx, (_, performed, invalid, code_expr, raw_expr, administrative, inconclusive) in enumerate(
         available, start=1
     ):
         flag_items.extend(
@@ -16247,6 +16268,7 @@ def query_sinan_diagnostic_method_count_cases(
                 f"CASE WHEN ({code_expr}) IS NULL THEN 1 ELSE 0 END AS vazio_{idx}",
                 f"CASE WHEN {administrative} THEN 1 ELSE 0 END AS administrativo_{idx}",
                 f"CASE WHEN {invalid} THEN 1 ELSE 0 END AS invalido_{idx}",
+                f"CASE WHEN {inconclusive} THEN 1 ELSE 0 END AS inconclusivo_{idx}",
                 f"{raw_expr} AS valor_metodo_{idx}",
             ]
         )
@@ -16296,6 +16318,8 @@ def query_sinan_diagnostic_method_count_cases(
                TRIM(TRAILING '; ' FROM ({labels_concat('administrativo')})) AS campos_ignorados_ou_nao_realizados,
                CASE WHEN ({labels_concat('invalido')}) <> '' THEN 1 ELSE 0 END AS possui_valor_fora_dicionario,
                TRIM(TRAILING '; ' FROM ({labels_concat('invalido')})) AS campos_com_valor_fora_dicionario,
+               CASE WHEN ({labels_concat('inconclusivo')}) <> '' THEN 1 ELSE 0 END AS possui_resultado_sem_agente,
+               TRIM(TRAILING '; ' FROM ({labels_concat('inconclusivo')})) AS campos_com_resultado_sem_agente,
                {method_value_columns}
         FROM classificados
         ORDER BY numero_metodos_validos, linha_fonte
@@ -16309,9 +16333,13 @@ def render_sinan_diagnostic_method_count_analysis(
     where_sql: str,
     group_label: str,
     missing_columns: Sequence[str],
+    strict_mode: bool = False,
 ) -> None:
     """Renderiza a estratificação 0/1/2+ e as tabelas auditáveis por caso."""
-    cases_df = query_sinan_diagnostic_method_count_cases(table, exprs, where_sql)
+    cases_df = query_sinan_diagnostic_method_count_cases(
+        table, exprs, where_sql, strict_mode=strict_mode
+    )
+    mode_suffix = "modo_estrito" if strict_mode else "modo_padrao"
     total_eligible = count_rows(table, where_sql)
     category_order = ["0 métodos válidos", "1 método válido", "2+ métodos válidos"]
     category_counts = (
@@ -16370,11 +16398,18 @@ def render_sinan_diagnostic_method_count_analysis(
         automargin=True,
     )
     render_plotly_chart(fig, calc_title="Casos conforme o total de métodos laboratoriais registrados")
+    counting_rule_text = (
+        "No modo estrito, resultados 51/75 permanecem válidos no dicionário, mas não aumentam a contagem. "
+        if strict_mode
+        else "No modo padrão, resultados 51/75 aumentam a contagem porque documentam exame processado. "
+    )
     st.caption(
         f"Foram avaliados {format_int_br(total_eligible)} caso(s) em {group_label.lower()}; as três barras somam "
         f"{format_int_br(reconciled_total)} e são mutuamente exclusivas. A categoria depende apenas da quantidade de "
-        "campos com resultado oficial de exame realizado. Valores vazios, administrativos ou fora do dicionário não "
-        "aumentam essa quantidade; seus diferentes motivos permanecem nas colunas e tabelas de auditoria. "
+        "campos que atendem à regra de contagem selecionada. "
+        + counting_rule_text
+        + "Valores vazios, administrativos ou fora do dicionário não aumentam essa quantidade; seus diferentes motivos "
+        "permanecem nas colunas e tabelas de auditoria. "
         + (
             "As sete colunas laboratoriais foram detectadas."
             if not missing_columns
@@ -16416,16 +16451,23 @@ def render_sinan_diagnostic_method_count_analysis(
             copyable_dataframe(category_df, width="stretch", hide_index=True)
             download_button(
                 category_df,
-                filename,
+                filename.replace(".csv", f"_{mode_suffix}.csv"),
                 label="Baixar tabela de casos (CSV)",
                 max_rows=len(category_df),
             )
 
         if category not in {"0 métodos válidos", "1 método válido"}:
             continue
+        status_count_text = "quatro" if strict_mode else "três"
+        status_scope_text = (
+            "uma célula vazia, um código 61/62, um resultado 51/75 e um valor fora do dicionário"
+            if strict_mode
+            else "uma célula vazia, um código 61/62 e um valor fora do dicionário"
+        )
         st.caption(
-            "As três situações abaixo não são mutuamente exclusivas: o mesmo caso pode possuir, em campos diferentes, "
-            "uma célula vazia, um código 61/62 e um valor fora do dicionário."
+            f"As {status_count_text} situações abaixo não são mutuamente exclusivas: o mesmo caso pode possuir, em campos diferentes, "
+            f"{status_scope_text}. Por isso, os percentuais das abas podem "
+            "somar mais de 100%."
         )
         status_specs = [
             (
@@ -16436,6 +16478,14 @@ def render_sinan_diagnostic_method_count_analysis(
             ("Célula vazia", "possui_celula_vazia", "celulas_vazias"),
             ("Indeterminado", "possui_valor_fora_dicionario", "indeterminados"),
         ]
+        if strict_mode:
+            status_specs.append(
+                (
+                    "Resultado sem agente identificado",
+                    "possui_resultado_sem_agente",
+                    "resultados_sem_agente",
+                )
+            )
         status_tabs = st.tabs([label for label, _, _ in status_specs])
         for status_tab, (status_label, flag_column, file_suffix) in zip(status_tabs, status_specs):
             with status_tab:
@@ -16449,14 +16499,18 @@ def render_sinan_diagnostic_method_count_analysis(
                 if status_df.empty:
                     st.success(f"Nenhum caso classificado como {status_label.lower()} nesta categoria.")
                 else:
+                    pct_category = 100.0 * len(status_df) / len(category_df) if len(category_df) else 0.0
+                    pct_total = 100.0 * len(status_df) / total_eligible if total_eligible else 0.0
                     st.caption(
                         f"{format_int_br(len(status_df))} caso(s) possuem ao menos um campo nesta situação. "
-                        "Consulte as colunas de campos e valores para identificar a origem."
+                        f"Isso representa {format_pct_br(pct_category)} do estrato de {category.lower()} e "
+                        f"{format_pct_br(pct_total)} do total elegível. Consulte as colunas de campos e valores para "
+                        "identificar a origem."
                     )
                     copyable_dataframe(status_df, width="stretch", hide_index=True)
                     download_button(
                         status_df,
-                        f"sinan_planilha_{safe_filename(category)}_{file_suffix}.csv",
+                        f"sinan_planilha_{safe_filename(category)}_{file_suffix}_{mode_suffix}.csv",
                         label=f"Baixar casos — {status_label.lower()} (CSV)",
                         max_rows=len(status_df),
                     )
@@ -17875,11 +17929,34 @@ def render_detailed_lcr_analysis_tab(
         )
 
     st.divider()
+    include_lcr_without_registered_puncture = st.checkbox(
+        "Incluir casos sem punção lombar registrada (LAB_PUNCAO ≠ 1), desde que o parâmetro liquórico analisado tenha valor numérico válido",
+        value=False,
+        key="sinan_lcr_include_without_registered_puncture",
+    )
+    puncture_scope_text = (
+        "A punção lombar registrada não é exigida; entram apenas registros com valor numérico válido para o parâmetro "
+        "selecionado, sem retirar os demais filtros do gráfico."
+        if include_lcr_without_registered_puncture
+        else "São incluídos apenas os registros com punção lombar realizada (`LAB_PUNCAO = 1`) e valor numérico válido para o parâmetro selecionado."
+    )
+    st.caption(puncture_scope_text)
+    if include_lcr_without_registered_puncture:
+        st.caption(
+            "Atenção: este modo pode incluir registros com `LAB_PUNCAO` em branco, como não realizada ou ignorada, mas "
+            "com resultado liquórico digitado. Essa discordância é uma inconsistência de preenchimento do SINAN e deve "
+            "ser interpretada com cautela."
+        )
+
     st.markdown("### Raincloud plots half-eye dos parâmetros liquóricos sem estratificação etiológica")
     st.caption(
         "Selecione um único parâmetro por vez: somente o gráfico escolhido é consultado e calculado. A linha fina representa P2,5-P97,5; a "
         "grossa, P25–P75; losangos marcam P2,5/P97,5, quadrados marcam P25/P75 e o ponto branco marca a mediana. "
-        "A porcentagem de não preenchimento usa todos os casos com punção dentro de cada grupo."
+        + (
+            "A porcentagem de não preenchimento usa todos os casos do recorte ativo dentro de cada grupo, sem exigir `LAB_PUNCAO = 1`."
+            if include_lcr_without_registered_puncture
+            else "A porcentagem de não preenchimento usa todos os casos com punção registrada dentro de cada grupo."
+        )
     )
     if not classi_code:
         st.warning("CLASSI_FIN não foi detectado; não é possível comparar confirmados e descartados nos rainclouds do LCR.")
@@ -17890,7 +17967,11 @@ def render_detailed_lcr_analysis_tab(
         list(SINAN_LCR_COMPLETENESS_PARAMS.keys()),
         key="sinan_lcr_raincloud_parameter",
     )
-    rain_where = append_clause(base_where, f"{puncao_code} = '1'")
+    rain_where = (
+        base_where
+        if include_lcr_without_registered_puncture
+        else append_clause(base_where, f"{puncao_code} = '1'")
+    )
     group_sql = f"""
         CASE
             WHEN ({classi_code}) = '1' THEN 'Casos confirmados'
@@ -17901,7 +17982,11 @@ def render_detailed_lcr_analysis_tab(
     group_order = ["Casos confirmados", "Casos descartados"]
     title = f"Raincloud half-eye de {rain_label.lower()} - confirmados e descartados"
     file_prefix = "sinan_raincloud_classificacao_final"
-    empty_message = "Não há casos confirmados ou descartados com punção no recorte atual."
+    empty_message = (
+        "Não há casos confirmados ou descartados com valor liquórico numérico válido no recorte atual."
+        if include_lcr_without_registered_puncture
+        else "Não há casos confirmados ou descartados com punção registrada e valor liquórico numérico válido no recorte atual."
+    )
 
     render_sinan_lcr_raincloud_chart(
         table,
@@ -17917,10 +18002,16 @@ def render_detailed_lcr_analysis_tab(
 
     st.divider()
     st.markdown("### Raincloud plots half-eye dos parâmetros liquóricos por definição etiológica")
+    detailed_puncture_text = (
+        "valor numérico válido no parâmetro selecionado (sem exigir `LAB_PUNCAO = 1`) e códigos válidos "
+        if include_lcr_without_registered_puncture
+        else "punção lombar realizada, valor numérico válido no parâmetro selecionado e códigos válidos "
+    )
     st.info(
-        "Estes gráficos usam apenas casos com `CLASSI_FIN = 1`, punção lombar realizada e códigos válidos "
-        "nos campos necessários. Nas categorias que afirmam uma etiologia, casos confirmados exclusivamente por critério "
-        "clínico (`04`), quimiocitológico (`06`) ou clínico-epidemiológico (`07`) são excluídos porque esses critérios, "
+        "Estes gráficos usam apenas casos com `CLASSI_FIN = 1`, "
+        + detailed_puncture_text
+        + "nos campos necessários. Nas categorias que afirmam uma etiologia, casos confirmados exclusivamente por critério "
+        + "clínico (`04`), quimiocitológico (`06`) ou clínico-epidemiológico (`07`) são excluídos porque esses critérios, "
         "isoladamente, não determinam o agente. A exceção é `CLA_ME_ASS = 75` (não identificado): o Quadro III admite "
         "somente 04 ou 06, e o grupo informa explicitamente que a etiologia não foi definida. Critérios vazios, fora do "
         "Quadro V ou incompatíveis com essa regra são excluídos. Um seletor de tipo e outro de parâmetro garantem que "
@@ -17928,9 +18019,16 @@ def render_detailed_lcr_analysis_tab(
     )
     st.markdown(
         "**Divisão bacteriana:** definida = `CON_DIAGES` 02, 03, 09 ou 10, ou 05 com `CLA_ME_BAC` válido diferente "
-        "de 28 e 81; sem etiologia definida = 05/81; etiologia não esclarecida = 05/28. "
+        "de 28 e 81; sem etiologia definida = 05/81 (`CLA_ME_BAC` = bactéria não especificada — nenhuma informação "
+        "sobre o agente); etiologia não esclarecida = 05/28 (`CLA_ME_BAC` = outras bactérias — grupo bacteriano "
+        "confirmado, mas espécie não discriminada no Quadro II). "
         "**Divisão asséptica:** definida = `CON_DIAGES` 07 com código válido do Quadro III diferente de 59, 73, 74 "
-        "e 75; sem etiologia definida = 07/75; etiologia não esclarecida = 07 com 59, 73 ou 74."
+        "e 75; sem etiologia definida = 07/75 (`CLA_ME_ASS` = não identificado — nenhuma informação sobre o agente); "
+        "etiologia não esclarecida = 07 com 59, 73 ou 74 (`CLA_ME_ASS` = outros enterovírus/arbovírus/vírus — grupo "
+        "viral confirmado, mas agente específico não discriminado no Quadro III). "
+        "Em suma: *sem etiologia definida* equivale a uma categoria 'não especificado' (sem pista sobre o agente), "
+        "enquanto *etiologia não esclarecida* equivale a uma categoria residual 'outro(s)' dentro de um grupo já "
+        "conhecido (bacteriano ou viral), mas sem a espécie exata."
     )
     c_rain_type, c_rain_parameter = st.columns(2)
     with c_rain_type:
@@ -17957,7 +18055,11 @@ def render_detailed_lcr_analysis_tab(
     if not detailed_group_sql or not eligibility:
         st.warning("Não foi possível definir os grupos etiológicos para o raincloud.")
         return
-    detailed_where = append_clause(base_where, f"{puncao_code} = '1'")
+    detailed_where = (
+        base_where
+        if include_lcr_without_registered_puncture
+        else append_clause(base_where, f"{puncao_code} = '1'")
+    )
     detailed_where = append_clause(detailed_where, eligibility)
     kind_slug = "bacterianas" if detailed_kind == "Bacterianas" else "assepticas"
     title_detailed = (
@@ -18800,12 +18902,25 @@ def render_spreadsheet_analysis_tab(
                 )
 
     st.divider()
+    method_count_mode = st.radio(
+        "Regra para contar resultados sem agente identificado",
+        [
+            "Padrão — considerar exame realizado mesmo sem agente identificado",
+            "Modo estrito — exigir agente identificado para contar como válido",
+        ],
+        index=0,
+        key="sinan_sheet_method_count_mode",
+    )
+    method_count_strict = method_count_mode.startswith("Modo estrito")
     st.info(
         "Metodologia: a contagem usa os **sete campos laboratoriais independentes** dos Quadros VII a XII — cultura do "
         "líquor, cultura do sangue, bacterioscopia, CIE, aglutinação pelo látex, isolamento viral e PCR — e não os dez "
         "códigos possíveis do campo único `CRITERIO`. Um método soma 1 quando contém um código oficial diferente de "
-        "`Não realizado` (`61`) e `Ignorado` (`62`), quando essas opções existem no quadro. `Nenhum agente` (`51`) e "
-        "`Não identificado` (`75`) também somam 1, pois registram exame realizado sem agente definido. Célula vazia, "
+        "`Não realizado` (`61`) e `Ignorado` (`62`), quando essas opções existem no quadro. Por padrão, `Nenhum agente` "
+        "(`51`) e `Não identificado` (`75`) também somam 1, pois registram exame processado sem agente definido. No modo "
+        "estrito, 51/75 deixam de aumentar a contagem — uma análise de sensibilidade sobre a dependência de resultados "
+        "sem agente —, mas permanecem códigos válidos e são mostrados separadamente na auditoria, nunca como valores "
+        "indeterminados. Célula vazia, "
         "61/62 e valor fora do dicionário somam 0 na estratificação aritmética. Esse zero **não permite afirmar que um "
         "valor inválido representa exame não realizado**: o caso continua sinalizado como indeterminado nas tabelas de "
         "auditoria. Não se exige `LAB_PUNCAO=1`; critérios clínico, quimiocitológico, clínico-epidemiológico, `Outros` e "
@@ -18838,6 +18953,7 @@ def render_spreadsheet_analysis_tab(
         method_count_where,
         method_count_group,
         missing_method_count_columns,
+        strict_mode=method_count_strict,
     )
 
     st.divider()
