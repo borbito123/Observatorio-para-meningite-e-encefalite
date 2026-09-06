@@ -8888,7 +8888,8 @@ def query_sinan_hospitalization_internment(
 # O indicador agora exibe duas visões quando CON_DIAGES está disponível:
 # (1) todos os registros do recorte, para auditoria histórica; e
 # (2) elegíveis operacionais para quimioprofilaxia de contatos
-#     (CON_DIAGES 02/03/09: formas meningocócicas e Haemophilus influenzae).
+#     (CON_DIAGES 01/02/03/09: meningococcemia, formas meningocócicas e
+#     Haemophilus influenzae).
 # Assim, o usuário enxerga o efeito do denominador amplo sem confundir cobertura
 # de intervenção com casos em que a variável não deveria ser preenchida.
 def query_sinan_communicants_identified(
@@ -8964,7 +8965,7 @@ def query_sinan_communicants_prophylaxis(
     con_select = con_code if con_code else "CAST(NULL AS VARCHAR)"
     recorte_case = """
         CASE
-            WHEN con_code IN ('02', '03', '09') THEN 'Elegíveis operacionais conforme SINAN'
+            WHEN con_code IN ('01', '02', '03', '09') THEN 'Elegíveis operacionais conforme SINAN'
             ELSE NULL
         END
     """ if con_code else "CAST(NULL AS VARCHAR)"
@@ -8984,7 +8985,7 @@ def query_sinan_communicants_prophylaxis(
             SELECT {recorte_case} AS recorte_quimioprofilaxia,
                    ano, comunicantes, quimioprofilaxia
             FROM base
-            WHERE con_code IN ('02', '03', '09')
+            WHERE con_code IN ('01', '02', '03', '09')
         ), agg AS (
             SELECT recorte_quimioprofilaxia,
                    ano,
@@ -14501,7 +14502,7 @@ casos de indivíduos com até 2 anos (≤ 24 meses)."
                 pass
             else:
                 st.caption(
-                    "Observação: não foi possível criar a visão elegível (CON_DIAGES 02/03/09), porque CON_DIAGES não foi detectado. "
+                    "Observação: não foi possível criar a visão elegível (CON_DIAGES 01/02/03/09), porque CON_DIAGES não foi detectado. "
                     "Os valores abaixo correspondem ao contingente completo de registros ativos e podem subestimar a cobertura real."
                 )
             comunicantes = comunicantes.copy()
