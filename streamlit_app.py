@@ -2628,12 +2628,11 @@ def sinan_lcr_analysis_value_expr(
         apply_quality_criteria=apply_quality_criteria,
     )
     meta = sinan_lcr_param_metadata(param_key or "")
-    if (
-        sinan_lcr_quality_criteria_enabled(apply_quality_criteria)
-        and enforce_percent_range
-        and meta
-        and "percentual" in meta.tipo_valor
-    ):
+    # Percentuais diferenciais fora de 0-100 permanecem no dado bruto e nas
+    # tabelas de auditoria, mas nunca são usados em gráficos ou inferências que
+    # exigem uma proporção válida. Os demais tetos/sentinelas continuam sendo
+    # uma opção analítica, pois sua interpretação depende da origem do banco.
+    if enforce_percent_range and meta and "percentual" in meta.tipo_valor:
         return f"CASE WHEN ({clean}) IS NULL OR ({clean}) < 0 OR ({clean}) > 100 THEN NULL ELSE ({clean}) END"
     return clean
 
@@ -2646,7 +2645,11 @@ def sinan_lcr_numeric_audit_exprs(value_expr: str, param_key: str) -> Dict[str, 
     sent_sql = _sql_numeric_tuple(codes)
     flag_sentinela = f"CASE WHEN {bruto} IN ({sent_sql}) THEN TRUE ELSE FALSE END"
     sem_sentinela = f"CASE WHEN {bruto} IN ({sent_sql}) THEN NULL ELSE {bruto} END"
-    valor_analise = sinan_lcr_clean_value_expr(value_expr, param_key)
+    valor_analise = sinan_lcr_analysis_value_expr(
+        value_expr,
+        param_key,
+        enforce_percent_range=True,
+    )
     if meta and meta.teto_plausivel is not None:
         flag_acima = f"CASE WHEN ({sem_sentinela}) IS NOT NULL AND ({sem_sentinela}) > {repr(float(meta.teto_plausivel))} THEN TRUE ELSE FALSE END"
     else:
@@ -4870,8 +4873,10 @@ def sinan_quimio_code_expr(sel: ColumnSelection) -> Optional[str]:
 def build_expressions(source: str, sel: ColumnSelection) -> Dict[str, Optional[str]]:
     exprs: Dict[str, Optional[str]] = {
         "dt": date_expr(sel.date_col) if sel.date_col else None,
+        "sex_raw": literal_str_expr(sel.sex_col) if sel.sex_col else None,
         "sex": sex_expr(sel.sex_col) if sel.sex_col else None,
         "age": build_age_sql(sel),
+        "race_raw": literal_str_expr(sel.race_col) if sel.race_col else None,
         "race": case_from_mapping(clean_code_expr(sel.race_col), RACA_COR, "Sem informação/ignorado") if sel.race_col else None,
         "education": education_label_expr(source, sel.education_col) if sel.education_col else None,
         "mun_res": clean_str_expr(sel.municipality_res_col) if sel.municipality_res_col else None,
@@ -5044,13 +5049,14 @@ def query_timeseries(table: LoadedTable, dt_sql: str, where_sql: str, freq: str,
 def query_heatmap(table: LoadedTable, dt_sql: str, where_sql: str, freq: str = "month") -> pd.DataFrame:
     period_expr = "EXTRACT(WEEK FROM dt)" if freq == "week" else "EXTRACT(MONTH FROM dt)"
     period_alias = "semana" if freq == "week" else "mes"
+    year_expr = "EXTRACT(ISOYEAR FROM dt)" if freq == "week" else "EXTRACT(YEAR FROM dt)"
     sql = f"""
         WITH base AS (
             SELECT {dt_sql} AS dt
             FROM {table.ref_sql}
             {where_sql}
         )
-        SELECT EXTRACT(YEAR FROM dt) AS ano, {period_expr} AS {period_alias}, COUNT(*) AS n
+        SELECT {year_expr} AS ano, {period_expr} AS {period_alias}, COUNT(*) AS n
         FROM base
         WHERE dt IS NOT NULL
         GROUP BY 1, 2
@@ -7361,8 +7367,9 @@ def query_sinan_quimio_summary(table: LoadedTable, exprs: Dict[str, Optional[str
     de puncionar.
 
     IMPORTANTE: sentinelas e valores acima do teto são sempre contados nas
-    colunas de auditoria. Eles só deixam as estatísticas quando o usuário ativa
-    explicitamente o modo com critérios; no padrão, participam como registrados.
+    colunas de auditoria. Percentuais diferenciais fora de 0-100 nunca entram
+    nas estatísticas; os demais tetos só deixam as estatísticas quando o usuário
+    ativa explicitamente o modo com critérios.
     """
     params = sinan_quimio_param_exprs(exprs)
     if not params:
@@ -7479,7 +7486,7 @@ def query_sinan_lcr_numeric_audit_long(
                    {qstr(label)} AS parametro,
                    {qstr(meta.unidade if meta else '')} AS unidade,
                    {audit['valor_bruto']} AS valor_bruto,
-                   {audit['valor_limpo']} AS valor_usado_no_modo_criterios,
+                   {audit['valor_limpo']} AS valor_usado_na_analise,
                    {teto_sql} AS teto_plausibilidade,
                    {audit['flag_sentinela']} AS flag_sentinela,
                    {audit['flag_teto_sistema']} AS flag_teto_sistema,
@@ -7506,6 +7513,7 @@ def query_sinan_lcr_numeric_audit_long(
                        ELSE NULL
                    END AS criterio_aplicado,
                    CASE
+                       WHEN flag_percentual_invalido THEN 'Percentual preservado no bruto e excluído dos cálculos analíticos'
                        WHEN flag_sentinela THEN 'Valor tratado como ausente somente no modo com critérios'
                        WHEN flag_acima_teto_plausivel THEN 'Valor excluído somente da visão analítica com critérios'
                        ELSE NULL
@@ -9697,14 +9705,16 @@ def render_lcr_quality_mode_note() -> None:
     """Observação obrigatória ao final de gráficos afetados pelos critérios."""
     if sinan_lcr_quality_criteria_enabled():
         st.caption(
-            "Observação sobre fidelidade: este gráfico foi recalculado com o modo opcional ativado; códigos "
-            "sentinela e valores acima do teto de plausibilidade foram excluídos somente desta visão analítica. "
+            "Observação sobre fidelidade: percentuais diferenciais fora de 0-100 são sempre excluídos dos cálculos "
+            "que exigem proporções válidas. Além disso, este gráfico foi recalculado com o modo opcional ativado; códigos "
+            "sentinela e outros valores acima do teto de plausibilidade foram excluídos somente desta visão analítica. "
             "O valor original permanece inalterado e pode ser auditado na tabela de registros afetados."
         )
     else:
         st.caption(
-            "Observação sobre fidelidade: este gráfico usa os valores numéricos registrados sem aplicar códigos "
-            "sentinela nem tetos de plausibilidade. Nenhuma correção, truncamento, imputação ou winsorização foi aplicada."
+            "Observação sobre fidelidade: percentuais diferenciais fora de 0-100 são preservados no dado bruto e "
+            "excluídos somente dos cálculos que exigem proporções válidas. Para os demais parâmetros, este gráfico usa "
+            "os valores registrados sem aplicar códigos sentinela nem tetos opcionais de plausibilidade."
         )
 
 
@@ -10952,9 +10962,10 @@ def render_sinan_lcr_indicators(table: LoadedTable, exprs: Dict[str, Optional[st
         "O denominador destes gráficos agora é o mesmo da tabela-resumo: registros com punção lombar e exame quimiocitológico realizados."
     )
     st.caption(
-        "Os códigos sentinela e tetos não são aplicados automaticamente. No modo padrão, todos os valores numéricos "
-        "registrados participam das estatísticas e faixas. Quando o controle acima é ativado, 999/9999/99999 e valores "
-        "acima do teto do parâmetro são tratados como ausentes somente na consulta analítica. Esses critérios são "
+        "Percentuais diferenciais fora de 0-100 permanecem auditáveis, mas não participam das estatísticas, faixas, "
+        "rainclouds ou inferências. Para os demais parâmetros, códigos sentinela e tetos não são aplicados automaticamente. "
+        "Quando o controle acima é ativado, 999/9999/99999 e outros valores acima do teto do parâmetro são tratados como "
+        "ausentes somente na consulta analítica. Esses critérios são "
         "provisórios e devem ser conferidos contra o dicionário da versão do SINAN usada no banco."
     )
     age_strat = sinan_lcr_age_stratum_expr(exprs)
@@ -17098,13 +17109,21 @@ def render_sinan_lcr_raincloud_chart(
                 if meta and "percentual" in meta.tipo_valor
                 else "Esses valores ultrapassam o teto operacional de plausibilidade definido para o parâmetro"
             )
-            warning_text = (
-                f"⚠️ ATENÇÃO: foram encontrados {format_int_br(len(aberrant_df))} caso(s) com "
-                f"{parameter_label.lower()} acima de {limit_text}. {plausibility_text}, mas permanecem no "
-                "raincloud, nos resumos e no banco para não transformar "
-                "uma suspeita de erro em exclusão automática. Eles estão listados integralmente abaixo e, no foco "
-                "visual robusto, são representados no limite com o valor original disponível no cursor."
-            )
+            if meta and "percentual" in meta.tipo_valor:
+                warning_text = (
+                    f"⚠️ ATENÇÃO: foram encontrados {format_int_br(len(aberrant_df))} caso(s) com "
+                    f"{parameter_label.lower()} acima de {limit_text}. {plausibility_text}. Os valores permanecem "
+                    "inalterados no banco e são listados abaixo para auditoria, mas foram excluídos do raincloud, "
+                    "dos resumos estatísticos e das inferências que exigem percentuais válidos."
+                )
+            else:
+                warning_text = (
+                    f"⚠️ ATENÇÃO: foram encontrados {format_int_br(len(aberrant_df))} caso(s) com "
+                    f"{parameter_label.lower()} acima de {limit_text}. {plausibility_text}, mas permanecem no "
+                    "raincloud, nos resumos e no banco para não transformar uma suspeita de erro em exclusão automática. "
+                    "Eles estão listados integralmente abaixo e, no foco visual robusto, são representados no limite "
+                    "com o valor original disponível no cursor."
+                )
             st.error(warning_text)
             copyable_dataframe(aberrant_df, width="stretch", hide_index=True)
             download_button(
@@ -19161,15 +19180,15 @@ def render_spreadsheet_analysis_tab(
 def render_quality_tab(table: LoadedTable, source: str, base_where: str, exprs: Dict[str, Optional[str]]) -> None:
     st.markdown("### Campos importantes não preenchidos")
     st.caption(
-        "Esta aba usa os filtros-base e mede, para cada campo-chave detectado, quantos registros estão sem preenchimento válido. "
+        "Esta aba usa os filtros-base e mede, para cada campo-chave detectado, quantos registros estão literalmente sem preenchimento. "
         "Os gráficos mostram a porcentagem e também o número absoluto de registros não preenchidos sobre o total analisado."
     )
 
     fields = {
         "data": exprs.get("dt"),
-        "sexo": exprs.get("sex"),
+        "sexo": exprs.get("sex_raw"),
         "idade": exprs.get("age"),
-        "raça/cor": exprs.get("race"),
+        "raça/cor": exprs.get("race_raw"),
         "município residência": exprs.get("mun_res"),
         "município ocorrência/atendimento": exprs.get("mun_event"),
         "CID meningite detectado": exprs.get("cid"),
