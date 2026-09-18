@@ -18535,7 +18535,11 @@ def render_detailed_etiology_analysis_tab(
 
     st.markdown("#### Tabelas discriminatórias por diagnóstico bacteriano")
     st.caption(
-        "Os cinco grupos abaixo são definidos diretamente por CON_DIAGES entre casos confirmados. `Meningite por "
+        "Os seis grupos abaixo são definidos diretamente por CON_DIAGES entre casos confirmados. `Meningite "
+        "tuberculosa` corresponde a CON_DIAGES=04 e não depende de `CLA_ME_BAC`; segundo o Quadro I, seus critérios "
+        "de confirmação compatíveis são cultura (`01`), clínico (`04`), bacterioscopia (`05`), quimiocitológico "
+        "(`06`), clínico-epidemiológico (`07`), PCR (`09`) e outros (`10`). A tabela preserva `CRITERIO` para "
+        "auditoria, mas não o utiliza como filtro adicional. `Meningite por "
         "Streptococcus pneumoniae` corresponde à categoria oficial `Meningite por Pneumococo` (CON_DIAGES=10). "
         "Todas as tabelas mostram código e descrição de `CRITERIO`; a tabela de CON_DIAGES=05 mostra também código e "
         "descrição de `CLA_ME_BAC`, conforme o Quadro II."
@@ -18553,6 +18557,7 @@ def render_detailed_etiology_analysis_tab(
     copyable_dataframe(bacterial_compatibility_df, width="stretch", hide_index=True)
     diagnosis_specs = [
         ("Meningite por outras bactérias", "05", "sinan_bacteriologia_casos_outras_bacterias.csv", True),
+        ("Meningite tuberculosa", "04", "sinan_bacteriologia_casos_meningite_tuberculosa.csv", False),
         ("Meningite por Haemophilus influenzae", "09", "sinan_bacteriologia_casos_haemophilus.csv", False),
         ("Meningite por Streptococcus pneumoniae (pneumococo)", "10", "sinan_bacteriologia_casos_streptococcus_pneumoniae.csv", False),
         ("Meningite meningocócica", "02", "sinan_bacteriologia_casos_meningite_meningococica.csv", False),
