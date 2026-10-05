@@ -28,7 +28,13 @@ A unidade contada é a **linha de AIH/RD**, não pessoa nem internação única.
 
 **Competência de processamento** é a referência temporal padrão quando ano e mês estão disponíveis. Pode-se optar por data de internação ou saída; estas podem pertencer a outro período. Os totais mantêm registros sem data quando nenhum filtro de ano é aplicado. A série temporal usa somente datas reconhecidas e não transforma lacunas em zero.
 
-Os dados do SIH não são publicados automaticamente na release nem somados à comparação SINAN/SIM/CIHA. Caso Parquets SIH venham a ser publicados na release configurada, nomes iniciados por `SIH_` são identificados como essa fonte.
+Os dados do SIH não são publicados automaticamente na release. A área de comparação agora aceita carregar SINAN, SIM, CIHA e SIH diretamente, ou reaproveitar bases abertas em suas abas. Para tendências e gaps, as contagens permanecem separadas por sistema.
+
+## Comparação de óbitos e gap entre bases
+
+Na seção **Comparação entre bancos de dados**, carregue ou selecione SINAN, SIM, CIHA e SIH. O bloco de comparação de gap oferece a série de óbitos por meningite do SINAN para todos os casos (`EVOLUCAO=2`), confirmados (`CLASSI_FIN=1` e `EVOLUCAO=2`) ou ambas. No SIM, escolha causa básica com CID do recorte ou menção em qualquer campo de causa. Na CIHA, entram atendimentos com `MORTE=1` e CID de meningite; no SIH, óbitos com `MORTE=1` e a estratificação por diagnóstico principal, união principal/secundário, CID associado ou CID notificação.
+
+Os gráficos apresentam as contagens e a diferença assinada (comparador menos SINAN) por ano ou mês completo no intervalo temporal comum. Datas e unidades diferem entre sistemas, não há pareamento individual e CIHA/SIH não são somados; portanto, o gap é uma comparação agregada e não estima subnotificação nem letalidade. Linhas com data ausente/inválida são informadas e excluídas do eixo temporal. A inclusão SIH depende dos campos CID e `MORTE` disponíveis e do recorte que já foi aplicado na extração original.
 
 ### Outros campos propostos (sem implementação de gráficos)
 

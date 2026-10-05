@@ -69,7 +69,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-10-05-v100-SIH-demografia"
+APP_VERSION = "2026-10-05-v100-SIH-gap-comparativo"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos
@@ -19892,8 +19892,9 @@ def render_sih_provenance(table: LoadedTable, columns: Sequence[str]) -> None:
 
 def render_sih_filters(
     table: LoadedTable, roles: Dict[str, List[str]], hospital_col: Optional[str], dates: Dict[str, str],
-) -> Tuple[str, Optional[str]]:
+) -> Tuple[str, Optional[str], str]:
     clauses: List[str] = []
+    comparison_clauses: List[str] = []
     all_cids = [col for fields in roles.values() for col in fields]
     with st.expander("2) Filtros do SIH", expanded=True):
         definitions = {"Todas as linhas carregadas": []}
@@ -19912,7 +19913,9 @@ def render_sih_filters(
             hospitals = top_values(table, clean_str_expr(hospital_col), limit=1000)
             selected = st.multiselect(f"{hospital_col} - filtrar CGC do hospital", hospitals, key="sih_hospital_filter")
             if selected:
-                clauses.append(f"{clean_str_expr(hospital_col)} IN ({', '.join(qstr(value) for value in selected)})")
+                hospital_clause = f"{clean_str_expr(hospital_col)} IN ({', '.join(qstr(value) for value in selected)})"
+                clauses.append(hospital_clause)
+                comparison_clauses.append(hospital_clause)
         date_sql = None
         if dates:
             reference = st.selectbox("Referência temporal para os campos CID", list(dates), key="sih_reference_date")
@@ -19923,9 +19926,11 @@ def render_sih_filters(
             """)["ano"].tolist()
             selected_years = st.multiselect("Anos (vazio mantém todo o arquivo)", years, key="sih_years")
             if selected_years:
-                clauses.append(f"EXTRACT(YEAR FROM {date_sql}) IN ({', '.join(str(int(year)) for year in selected_years)})")
+                year_clause = f"EXTRACT(YEAR FROM {date_sql}) IN ({', '.join(str(int(year)) for year in selected_years)})"
+                clauses.append(year_clause)
+                comparison_clauses.append(year_clause)
             st.caption("Competência é o processamento; internação e saída podem pertencer a outros períodos. Linhas sem data ficam no total quando não há filtro de ano.")
-    return sql_where(clauses), date_sql
+    return sql_where(clauses), date_sql, sql_where(comparison_clauses)
 
 
 def render_sih_cids(table: LoadedTable, roles: Dict[str, List[str]], where_sql: str, date_sql: Optional[str]) -> None:
@@ -20016,7 +20021,15 @@ def render_sih_source(table: LoadedTable) -> None:
     st.success(f"Dados SIH carregados: {table.label}")
     st.caption("Unidade: linha de AIH/RD, não pessoa nem internação única. Não há conversão etiológica, imputação ou soma com SINAN/SIM/CIHA. CID_MORTE descreve o código do SIH e não substitui a causa básica do SIM.")
     render_sih_provenance(table, columns)
-    where_sql, date_sql = render_sih_filters(table, roles, hospital, sih_reference_dates(columns))
+    where_sql, date_sql, comparison_where = render_sih_filters(table, roles, hospital, sih_reference_dates(columns))
+    morte_col = choose_candidate(columns, ["MORTE"])
+    st.session_state["loaded_context_SIH"] = {
+        "source": "SIH", "table": table, "sel": None,
+        "exprs": {"dt": date_sql, "morte_code": clean_code_expr(morte_col) if morte_col else None},
+        "base_where": comparison_where, "graph_where": where_sql,
+        "definition": st.session_state.get("sih_definition", "Recorte de diagnósticos SIH"),
+        "sih_roles": roles, "columns": columns, "sih_morte_col": morte_col,
+    }
     total = count_rows(table, where_sql)
     st.metric("Registros de AIH/RD no recorte", format_int_br(total))
     sections = ["Diagnósticos e CID", "Estabelecimentos e mantenedoras", "Análise demográfica", "Outros campos propostos"]
@@ -20168,120 +20181,368 @@ def render_source(source: str) -> Optional[Dict[str, object]]:
     return context
 
 
+def build_comparison_context(source: str, table: LoadedTable) -> Optional[Dict[str, object]]:
+    """Prepara uma base carregada na tela de comparação, reaproveitando definições por sistema."""
+    try:
+        columns = schema_df(table)["coluna"].astype(str).tolist()
+    except Exception as exc:
+        st.error(f"Não foi possível ler o layout de {source}: {exc}")
+        return None
+
+    if source != "SIH":
+        sel = render_column_config(source, columns)
+        exprs = build_expressions(source, sel)
+        base_where, graph_where, definition = render_filters(source, table, exprs)
+        return {"source": source, "table": table, "sel": sel, "exprs": exprs,
+                "base_where": base_where, "graph_where": graph_where, "definition": definition}
+
+    roles = detect_sih_cid_fields(columns)
+    dates = sih_reference_dates(columns)
+    if not dates:
+        st.warning("O SIH precisa ter data de competência, internação ou saída para entrar nas séries temporais.")
+        return None
+    date_label = st.selectbox("Referência temporal do SIH", list(dates), key="comp_sih_reference_date")
+    date_sql = dates[date_label]
+    clauses: List[str] = []
+    bounds = minmax_date(table, date_sql)
+    if bounds:
+        min_year, max_year = int(bounds[0].year), int(bounds[1].year)
+        if min_year < max_year:
+            selected_years = st.slider("Intervalo de anos do SIH", min_year, max_year,
+                                       (min_year, max_year), key="comp_sih_year_range")
+            clauses.append(f"EXTRACT(YEAR FROM {date_sql}) BETWEEN {int(selected_years[0])} AND {int(selected_years[1])}")
+        else:
+            st.caption(f"Ano disponível no SIH: {min_year}.")
+    role_options = {
+        "Diagnóstico principal": roles.get("principal", []),
+        "Diagnóstico principal + secundário (união)": roles.get("principal", []) + roles.get("secundario", []),
+        "CID associado": roles.get("associado", []),
+        "CID de notificação": roles.get("notificacao", []),
+    }
+    role_options = {label: fields for label, fields in role_options.items() if fields}
+    if not role_options:
+        st.warning("Não foram encontrados campos SIH para filtrar a presença de meningite/encefalite.")
+        return None
+    selected_role = st.selectbox("Recorte CID usado na série geral do SIH", list(role_options), key="comp_sih_trend_role")
+    graph_where = append_clause(sql_where(clauses), sih_meningitis_condition(role_options[selected_role]))
+    return {"source": source, "table": table, "sel": None,
+            "exprs": {"dt": date_sql, "morte_code": clean_code_expr(choose_candidate(columns, ["MORTE"]))
+                      if choose_candidate(columns, ["MORTE"]) else None},
+            "base_where": sql_where(clauses), "graph_where": graph_where,
+            "definition": selected_role, "sih_roles": roles, "columns": columns,
+            "sih_morte_col": choose_candidate(columns, ["MORTE"])}
+
+
+def render_comparison_base_inputs(loaded: Sequence[Dict[str, object]]) -> Dict[str, Dict[str, object]]:
+    contexts = {str(item["source"]): item for item in loaded if item and item.get("source")}
+    st.markdown("#### Bases para comparação")
+    st.caption("Use uma base já carregada em sua aba ou carregue/substitua o arquivo diretamente aqui. As bases são analisadas separadamente.")
+    for source in ["SINAN", "SIM", "CIHA", "SIH"]:
+        with st.expander(f"Base {source}", expanded=False):
+            existing = contexts.get(source)
+            if existing:
+                st.caption(f"Disponível: {existing['table'].label}")
+            else:
+                st.caption("Ainda não há uma base carregada nesta sessão.")
+            add_here = st.checkbox(f"Carregar ou substituir {source} nesta seção", key=f"comp_add_{source}")
+            if not add_here:
+                continue
+            table = render_loader(source)
+            if table is None:
+                continue
+            context = build_comparison_context(source, table)
+            if context:
+                st.session_state[f"loaded_context_{source}"] = context
+                contexts[source] = context
+    return contexts
+
+
+def comparison_common_periods(contexts: Sequence[Dict[str, object]], frequency: str) -> Optional[pd.DatetimeIndex]:
+    spans = []
+    for item in contexts:
+        exprs = item.get("exprs", {})
+        if not exprs.get("dt"):
+            return None
+        bounds = minmax_date(item["table"], exprs["dt"], item.get("base_where", ""))
+        if not bounds:
+            return None
+        spans.append(bounds)
+    if not spans:
+        return None
+    start = max(span[0] for span in spans)
+    end = min(span[1] for span in spans)
+    if start > end:
+        return None
+    if frequency == "year":
+        first_year = start.year if (start.month, start.day) == (1, 1) else start.year + 1
+        last_year = end.year if (end.month, end.day) == (12, 31) else end.year - 1
+        if first_year > last_year:
+            return None
+        return pd.date_range(pd.Timestamp(first_year, 1, 1), pd.Timestamp(last_year, 1, 1), freq="YS")
+    first_month = start.to_period("M") + (0 if start.day == 1 else 1)
+    last_month = end.to_period("M") - (0 if end.day == end.days_in_month else 1)
+    if first_month > last_month:
+        return None
+    return pd.date_range(first_month.start_time, last_month.start_time, freq="MS")
+
+
+def comparison_gap_frames(
+    specs: Sequence[Tuple[Dict[str, object], str, str]], frequency: str,
+    common_contexts: Sequence[Dict[str, object]],
+) -> Tuple[pd.DataFrame, pd.DataFrame, List[str]]:
+    """Conta óbitos por linha de origem e alinha somente períodos cobertos por todas as bases."""
+    periods = comparison_common_periods(common_contexts, frequency)
+    if periods is None or periods.empty:
+        return pd.DataFrame(), pd.DataFrame(), []
+    counts = pd.DataFrame({"periodo": periods})
+    omitted_notes: List[str] = []
+    for item, label, where_sql in specs:
+        exprs = item["exprs"]
+        dt = exprs["dt"]
+        try:
+            ts = query_timeseries(item["table"], dt, where_sql, frequency)
+            missing_date = count_rows(item["table"], append_clause(where_sql, f"({dt}) IS NULL"))
+        except Exception as exc:
+            st.warning(f"Falha ao calcular a série {label}: {exc}")
+            return pd.DataFrame(), pd.DataFrame(), omitted_notes
+        if missing_date:
+            omitted_notes.append(f"{label}: {format_int_br(missing_date)} registro(s) elegível(is) sem data reconhecida, fora da série temporal")
+        values = pd.DataFrame({"periodo": pd.to_datetime(ts["periodo"]), "valor": ts["n"]}) if not ts.empty else pd.DataFrame(columns=["periodo", "valor"])
+        if not values.empty:
+            if frequency == "year":
+                values["periodo"] = values["periodo"].dt.to_period("Y").dt.to_timestamp()
+            else:
+                values["periodo"] = values["periodo"].dt.to_period("M").dt.to_timestamp()
+        values = values.groupby("periodo", as_index=False)["valor"].sum() if not values.empty else values
+        values = pd.DataFrame({"periodo": periods}).merge(values, on="periodo", how="left").fillna({"valor": 0})
+        counts[label] = values["valor"].astype("int64")
+
+    gap_rows = []
+    if not counts.empty:
+        references = [label for _, label, _ in specs if label.startswith("SINAN")]
+        comparators = [label for _, label, _ in specs if not label.startswith("SINAN")]
+        for reference in references:
+            for label in comparators:
+                for _, row in counts.iterrows():
+                    ref_value = int(row[reference])
+                    comp_value = int(row[label])
+                    gap_rows.append({"periodo": row["periodo"], "referencia": reference,
+                                     "comparador": f"{label} − {reference}", "n_referencia": ref_value,
+                                     "n_comparador": comp_value, "gap_comparador_menos_referencia": comp_value - ref_value,
+                                     "gap_pct_sobre_referencia": (100 * (comp_value - ref_value) / ref_value) if ref_value else np.nan})
+    return counts, pd.DataFrame(gap_rows), omitted_notes
+
+
+def render_gap_pair(
+    title: str, specs: Sequence[Tuple[Dict[str, object], str, str]],
+    frequency: str, common_contexts: Sequence[Dict[str, object]], file_stub: str,
+) -> None:
+    if len(specs) < 2:
+        st.info("Carregue as bases necessárias para esta comparação.")
+        return
+    counts, gaps, omitted = comparison_gap_frames(specs, frequency, common_contexts)
+    if counts.empty:
+        st.info("As bases não têm um intervalo temporal comum com datas reconhecidas.")
+        return
+    st.markdown(f"##### {title}")
+    long_counts = counts.melt("periodo", var_name="serie", value_name="obitos")
+    fig = px.line(long_counts, x="periodo", y="obitos", color="serie", markers=True,
+                  title=f"Óbitos por período — {title}",
+                  labels={"periodo": "Período comum", "obitos": "Registros de óbito", "serie": "Base e definição"})
+    fig.update_yaxes(rangemode="tozero")
+    render_plotly_chart(fig, calc_title=f"Comparação de óbitos — {title}")
+    if not gaps.empty:
+        fig_gap = px.bar(gaps, x="periodo", y="gap_comparador_menos_referencia", color="comparador",
+                         barmode="group", title=f"Gap de contagens — {title}",
+                         labels={"periodo": "Período comum", "gap_comparador_menos_referencia": "Comparador − SINAN", "comparador": "Base comparadora"},
+                         hover_data=["n_referencia", "n_comparador", "gap_pct_sobre_referencia"])
+        fig_gap.add_hline(y=0, line_color="#555", line_width=1)
+        render_plotly_chart(fig_gap, calc_title=f"Gap de contagens — {title}")
+        copyable_dataframe(gaps, width="stretch", hide_index=True)
+        download_button(gaps, f"{file_stub}_gap.csv")
+    copyable_dataframe(counts, width="stretch", hide_index=True)
+    download_button(counts, f"{file_stub}_contagens.csv")
+    if omitted:
+        st.caption("Datas ausentes ou inválidas, omitidas do eixo temporal: " + "; ".join(omitted) + ".")
+
+
+def render_gap_comparison(available: Sequence[Dict[str, object]], chosen: Sequence[str]) -> None:
+    st.markdown("#### Comparação de gap")
+    st.caption("O gap é a diferença de contagens por período (comparador menos SINAN). É uma divergência agregada entre bases, sem pareamento de pessoas; unidades, critérios e datas de referência diferem. As linhas usam somente anos ou meses completos dentro do intervalo temporal comum; bases assistenciais não são somadas entre si.")
+    frequency_label = st.selectbox("Período das comparações de gap", ["Ano", "Mês"], key="comp_gap_freq")
+    frequency = {"Ano": "year", "Mês": "month"}[frequency_label]
+    by_source = {item["source"]: item for item in available if item["source"] in chosen}
+
+    st.markdown("**Óbitos do SINAN × SIM**")
+    sinan_mode = st.selectbox("Série SINAN", ["Todos os casos", "Apenas confirmados", "Comparar ambos"], key="comp_gap_sinan_mode")
+    sim_mode = st.selectbox("Critério de meningite no SIM", ["Causa básica", "Menção em qualquer campo CID"], key="comp_gap_sim_mode")
+    sinan = by_source.get("SINAN")
+    sim = by_source.get("SIM")
+    specs: List[Tuple[Dict[str, object], str, str]] = []
+    if sinan:
+        evol = sinan["exprs"].get("evol_code")
+        classi = sinan["exprs"].get("classi_code")
+        if not evol:
+            st.warning("O SINAN precisa ter EVOLUCAO para contar óbitos por meningite.")
+        else:
+            if sinan_mode in {"Todos os casos", "Comparar ambos"}:
+                specs.append((sinan, "SINAN — todos os casos com EVOLUCAO=óbito por meningite", append_clause(sinan["base_where"], f"{evol} = '2'")))
+            if sinan_mode in {"Apenas confirmados", "Comparar ambos"}:
+                if classi:
+                    specs.append((sinan, "SINAN — confirmados com EVOLUCAO=óbito por meningite", append_clause(sinan["base_where"], f"{classi} = '1' AND {evol} = '2'")))
+                else:
+                    st.warning("CLASSI_FIN não foi detectado; não é possível separar óbitos entre confirmados.")
+    if sim:
+        exprs = sim["exprs"]
+        fields = ([sim["sel"].causabas_col] if sim_mode == "Causa básica" and sim.get("sel") and sim["sel"].causabas_col
+                  else (sim["sel"].cid_cols or []) if sim.get("sel") else [])
+        cid_condition = cid_presence_expr(fields, CID_MENINGITE_REGEX)
+        if cid_condition:
+            label = "SIM — causa básica com CID do recorte" if sim_mode == "Causa básica" else "SIM — menção de CID do recorte"
+            specs.append((sim, label, append_clause(sim["base_where"], cid_condition)))
+        else:
+            st.warning("O SIM não tem os campos CID necessários para o critério escolhido.")
+    if sinan and sim and any(label.startswith("SINAN") for _, label, _ in specs) and any(label.startswith("SIM") for _, label, _ in specs):
+        render_gap_pair("SINAN × SIM", specs, frequency, [sinan, sim], "gap_sinan_sim")
+    else:
+        st.info("Selecione/carregue SINAN e SIM para comparar seus óbitos.")
+
+    st.markdown("**Óbitos do SINAN × CIHA e SIH**")
+    ciha = by_source.get("CIHA")
+    sih = by_source.get("SIH")
+    sih_options = {
+        "Apenas diagnóstico principal": (sih.get("sih_roles", {}).get("principal", []) if sih else []),
+        "Diagnóstico principal + secundário": ((sih.get("sih_roles", {}).get("principal", []) + sih.get("sih_roles", {}).get("secundario", [])) if sih else []),
+        "CID associado": (sih.get("sih_roles", {}).get("associado", []) if sih else []),
+        "CID notificação": (sih.get("sih_roles", {}).get("notificacao", []) if sih else []),
+    }
+    available_sih_options = [label for label, fields in sih_options.items() if fields]
+    sih_mode = st.selectbox("Estrato SIH", available_sih_options or ["Sem campos CID compatíveis"], key="comp_gap_sih_mode", disabled=not available_sih_options)
+    shared_sinan_mode = st.selectbox("Série SINAN para comparar com CIHA/SIH", ["Todos os casos", "Apenas confirmados"], key="comp_gap_sinan_assist_mode")
+    assist_specs: List[Tuple[Dict[str, object], str, str]] = []
+    if sinan:
+        evol = sinan["exprs"].get("evol_code")
+        classi = sinan["exprs"].get("classi_code")
+        if evol and (shared_sinan_mode == "Todos os casos" or classi):
+            clause = f"{evol} = '2'"
+            if shared_sinan_mode == "Apenas confirmados":
+                clause = f"{classi} = '1' AND {clause}"
+            assist_specs.append((sinan, f"SINAN — {shared_sinan_mode.lower()} com óbito por meningite", append_clause(sinan["base_where"], clause)))
+    if ciha:
+        exprs = ciha["exprs"]
+        cid_condition = cid_presence_expr(ciha["sel"].cid_cols or [], CID_MENINGITE_REGEX) if ciha.get("sel") else None
+        if exprs.get("morte_code") and cid_condition:
+            ciha_where = append_clause(ciha["base_where"], f"{exprs['morte_code']} = '1' AND ({cid_condition})")
+            assist_specs.append((ciha, "CIHA — atendimento com CID do recorte e MORTE=1", ciha_where))
+        else:
+            st.warning("A CIHA precisa ter MORTE e ao menos um campo de diagnóstico CID reconhecido.")
+    if sih and sih_mode in sih_options and sih_options[sih_mode]:
+        morte = sih.get("exprs", {}).get("morte_code")
+        if morte:
+            condition = sih_meningitis_condition(sih_options[sih_mode])
+            sih_where = append_clause(sih["base_where"], f"{morte} = '1' AND ({condition})")
+            assist_specs.append((sih, f"SIH — {sih_mode}, MORTE=1", sih_where))
+        else:
+            st.warning("O SIH precisa ter a coluna MORTE para contar óbitos hospitalares.")
+    if sinan and ciha and sih and len(assist_specs) == 3:
+        render_gap_pair("SINAN × CIHA e SIH", assist_specs, frequency, [sinan, ciha, sih], "gap_sinan_ciha_sih")
+    else:
+        st.info("Para este gráfico, carregue SINAN, CIHA e SIH e selecione pelo menos um campo CID válido em cada base.")
+
+
 def render_comparison(loaded: Sequence[Dict[str, object]]) -> None:
     st.markdown("### Comparação entre bancos de dados (sob revisão no momento)")
-    available = [x for x in loaded if x and x.get("exprs", {}).get("dt")]
-    if len(available) < 2:
-        st.info("Carregue ao menos duas bases com data detectada para comparar séries.")
+    contexts = render_comparison_base_inputs(loaded)
+    available = [contexts[source] for source in ["SINAN", "SIM", "CIHA", "SIH"] if source in contexts and contexts[source].get("exprs", {}).get("dt")]
+    if not available:
+        st.info("Carregue bases diretamente acima ou nas seções SINAN, SIM, CIHA e SIH para iniciar as comparações.")
         return
     source_names = [x["source"] for x in available]
-    chosen = st.multiselect("Bases", source_names, default=source_names, key="comp_sources")
-    freq_label = st.selectbox("Agregação", ["Ano", "Mês", "Semana"], index=1, key="comp_freq")
-    freq = {"Ano": "year", "Mês": "month", "Semana": "week"}[freq_label]
-    normalize = st.checkbox("Normalizar em índice 100 no primeiro período não-zero", value=False, key="comp_norm")
-    stratify_cid = st.checkbox("Estratificar por tipo CID-10 quando disponível", value=False, key="comp_cid")
-    st.caption("Na comparação, o SINAN entra sempre como casos confirmados (CLASSI_FIN = 1), independentemente da definição exploratória escolhida na aba SINAN. Quando há estratificação por CID-10, o SINAN usa a conversão de CON_DIAGES; SIM/CIHA usam os mesmos CID-10 adequados prefixados do gráfico de conversão: os códigos convertidos somam no destino e os CID-10 prefixados já presentes permanecem em seu próprio grupo. Na agregação mensal, meses sem registros são mantidos com valor zero.")
-
-    frames = []
-    comparison_conversion_notes: List[str] = []
-    for item in available:
-        source_name = item["source"]
-        if source_name not in chosen:
-            continue
-        table: LoadedTable = item["table"]
-        exprs = item["exprs"]
-        if stratify_cid:
-            if source_name == "SINAN" and exprs.get("sinan_cid10_conversion_type"):
-                cat = exprs.get("sinan_cid10_conversion_type")
-            elif source_name in {"SIM", "CIHA"} and exprs.get("cid10_adequacy_plot_label"):
-                cat = exprs.get("cid10_adequacy_plot_label")
-            else:
-                cat = exprs.get("cid_type")
-        else:
-            cat = None
-        series_where = item["graph_where"]
-        series_label = item.get("definition", "")
-        if source_name == "SINAN":
-            classi = exprs.get("classi_code")
-            if not classi:
-                st.warning("SINAN foi ignorado na comparação porque CLASSI_FIN não foi detectado automaticamente; não é possível isolar confirmados.")
+    chosen = st.multiselect("Bases incluídas nas comparações", source_names, default=source_names, key="comp_sources")
+    if len(chosen) >= 2:
+        freq_label = st.selectbox("Agregação da comparação geral", ["Ano", "Mês", "Semana"], index=1, key="comp_freq")
+        freq = {"Ano": "year", "Mês": "month", "Semana": "week"}[freq_label]
+        normalize = st.checkbox("Normalizar em índice 100 no primeiro período não-zero", value=False, key="comp_norm")
+        stratify_cid = st.checkbox("Estratificar por tipo CID-10 quando disponível", value=False, key="comp_cid")
+        st.caption("Na comparação geral, o SINAN representa casos confirmados (CLASSI_FIN=1). O SIH usa o recorte de diagnóstico escolhido no bloco de carregamento. A comparação de gap abaixo usa definições próprias de óbito por base.")
+        frames = []
+        comparison_conversion_notes: List[str] = []
+        for item in available:
+            source_name = item["source"]
+            if source_name not in chosen:
                 continue
-            series_where = append_clause(item["base_where"], f"{classi} = '1'")
-            series_label = "Confirmados (CLASSI_FIN = 1)"
-        try:
-            ts = query_timeseries(table, exprs["dt"], series_where, freq, cat)
-        except Exception as exc:
-            st.warning(f"Falha na série de {source_name}: {exc}")
-            continue
-        if stratify_cid and source_name in {"SIM", "CIHA"} and exprs.get("cid10_adequacy_plot_label"):
+            table: LoadedTable = item["table"]
+            exprs = item["exprs"]
+            if stratify_cid:
+                if source_name == "SINAN" and exprs.get("sinan_cid10_conversion_type"):
+                    cat = exprs.get("sinan_cid10_conversion_type")
+                elif source_name in {"SIM", "CIHA"} and exprs.get("cid10_adequacy_plot_label"):
+                    cat = exprs.get("cid10_adequacy_plot_label")
+                else:
+                    cat = exprs.get("cid_type")
+            else:
+                cat = None
+            series_where = item["graph_where"]
+            series_label = item.get("definition", "")
+            if source_name == "SINAN":
+                classi = exprs.get("classi_code")
+                if not classi:
+                    st.warning("SINAN foi ignorado na comparação geral porque CLASSI_FIN não foi detectado.")
+                    continue
+                series_where = append_clause(item["base_where"], f"{classi} = '1'")
+                series_label = "Confirmados (CLASSI_FIN = 1)"
             try:
-                conv_note_df = query_cid10_adequacy_conversion(table, exprs, series_where)
-                if not conv_note_df.empty:
-                    comparison_conversion_notes.append(f"{source_name}: {build_cid10_adequacy_conversion_note(conv_note_df)}")
+                ts = query_timeseries(table, exprs["dt"], series_where, freq, cat)
             except Exception as exc:
-                comparison_conversion_notes.append(f"{source_name}: não foi possível calcular a observação de conversão ({exc}).")
-        if ts.empty:
-            continue
-        if cat:
-            ts["serie"] = source_name + " — " + series_label + " — " + ts["categoria"].astype(str)
+                st.warning(f"Falha na série de {source_name}: {exc}")
+                continue
+            if stratify_cid and source_name in {"SIM", "CIHA"} and exprs.get("cid10_adequacy_plot_label"):
+                try:
+                    conv_note_df = query_cid10_adequacy_conversion(table, exprs, series_where)
+                    if not conv_note_df.empty:
+                        comparison_conversion_notes.append(f"{source_name}: {build_cid10_adequacy_conversion_note(conv_note_df)}")
+                except Exception as exc:
+                    comparison_conversion_notes.append(f"{source_name}: não foi possível calcular a observação de conversão ({exc}).")
+            if ts.empty:
+                continue
+            ts["serie"] = source_name + " — " + (series_label + " — " if cat else "") + (ts["categoria"].astype(str) if cat else "")
+            ts = ts.rename(columns={"n": "valor"})
+            frames.append(ts[["periodo", "serie", "valor"]])
+        if frames:
+            comp = pd.concat(frames, ignore_index=True)
+            comp["periodo"] = pd.to_datetime(comp["periodo"])
+            if freq == "month":
+                comp["periodo"] = comp["periodo"].dt.to_period("M").dt.to_timestamp()
+                full_months = pd.date_range(comp["periodo"].min(), comp["periodo"].max(), freq="MS")
+                series_values = comp["serie"].dropna().unique().tolist()
+                full_index = pd.MultiIndex.from_product([full_months, series_values], names=["periodo", "serie"])
+                comp = (comp.groupby(["periodo", "serie"], as_index=False)["valor"].sum()
+                        .set_index(["periodo", "serie"]).reindex(full_index, fill_value=0).reset_index())
+            if normalize:
+                comp = comp.sort_values("periodo")
+                for series in comp["serie"].unique():
+                    idx = comp["serie"].eq(series)
+                    nonzero = comp.loc[idx & comp["valor"].gt(0), "valor"]
+                    if not nonzero.empty:
+                        comp.loc[idx, "valor"] = comp.loc[idx, "valor"] / nonzero.iloc[0] * 100
+            fig = px.line(comp, x="periodo", y="valor", color="serie", markers=True,
+                          title="Comparação entre bancos de dados — tendências",
+                          labels={"valor": "Índice" if normalize else "Registros", "periodo": "Período", "serie": "Série"})
+            render_plotly_chart(fig, calc_title="Comparação entre bancos de dados — tendências")
+            if not normalize:
+                render_interval_total(comp, value_col="valor", by_col="serie")
+            if comparison_conversion_notes:
+                st.caption("Observação da conversão CID usada: " + " ".join(comparison_conversion_notes))
+            copyable_dataframe(comp, width="stretch", hide_index=True)
+            download_button(comp, "comparacao_series_bases.csv")
         else:
-            ts["serie"] = source_name + " — " + series_label
-        ts = ts.rename(columns={"n": "valor"})
-        frames.append(ts[["periodo", "serie", "valor"]])
-    if not frames:
-        st.warning("Nenhuma série gerada.")
-        return
-    comp = pd.concat(frames, ignore_index=True)
-    comp["periodo"] = pd.to_datetime(comp["periodo"])
+            st.warning("Nenhuma série geral pôde ser gerada com os filtros atuais.")
+    else:
+        st.info("Selecione ao menos duas bases para a comparação geral.")
 
-    if freq == "month" and not comp.empty:
-        comp["periodo"] = comp["periodo"].dt.to_period("M").dt.to_timestamp()
-        full_months = pd.date_range(comp["periodo"].min(), comp["periodo"].max(), freq="MS")
-        series_values = comp["serie"].dropna().unique().tolist()
-        full_index = pd.MultiIndex.from_product([full_months, series_values], names=["periodo", "serie"])
-        comp = (
-            comp.groupby(["periodo", "serie"], as_index=False)["valor"].sum()
-            .set_index(["periodo", "serie"])
-            .reindex(full_index, fill_value=0)
-            .reset_index()
-        )
-
-    if normalize:
-        comp = comp.sort_values("periodo")
-        add_calc_note(
-            "Normalização em índice 100 (feita inteiramente em pandas, fora do SQL): para cada série, o app "
-            "encontra o primeiro período com valor > 0 e divide todos os valores da série por esse valor de "
-            "referência, multiplicando por 100 — ou seja, cada série é reescalada de forma independente, com seu "
-            "próprio ano-base. Séries com bases diferentes não podem ser comparadas em valor absoluto, só em "
-            "variação relativa ao próprio ponto de partida."
-        )
-        for s in comp["serie"].unique():
-            idx = comp["serie"].eq(s)
-            nonzero = comp.loc[idx & comp["valor"].gt(0), "valor"]
-            if not nonzero.empty:
-                comp.loc[idx, "valor"] = comp.loc[idx, "valor"] / nonzero.iloc[0] * 100
-
-    fig = px.line(comp, x="periodo", y="valor", color="serie", markers=True, title="Comparação entre bancos de dados — tendências", labels={"valor": "Índice" if normalize else "Registros", "periodo": "Período", "serie": "Série"})
-    if not normalize:
-        add_calc_note(
-            "Cada série soma a contagem SQL por base (SINAN entra sempre como confirmados via CLASSI_FIN = 1). "
-            "Na agregação mensal, o app preenche em pandas os meses sem nenhum registro com valor zero "
-            "(pd.MultiIndex.from_product + reindex(fill_value=0)) para que a linha do gráfico não pule meses "
-            "vazios — isso não altera nenhuma contagem, só garante que 'zero' apareça explicitamente."
-        )
-    render_plotly_chart(fig, calc_title="Comparação entre bancos de dados — tendências")
-    if not normalize:
-        render_interval_total(comp, value_col="valor", by_col="serie")
-    if comparison_conversion_notes:
-        st.caption("Observação da conversão usada na comparação estratificada: " + " ".join(comparison_conversion_notes))
-    copyable_dataframe(comp, width="stretch", hide_index=True)
-    download_button(comp, "comparacao_series_bases.csv")
-
+    render_gap_comparison(available, chosen)
     st.markdown("**Cuidados de leitura**")
-    st.write(
-        "SINAN mede notificações/investigações; SIM mede óbitos; CIHA mede utilização de serviços. "
-        "Compare tendências, composição e concordância agregada, mas evite interpretar contagens brutas entre bases como o mesmo fenômeno sem linkage e denominadores populacionais."
-    )
+    st.write("SINAN mede notificações/investigações; SIM mede declarações de óbito; CIHA e SIH medem atendimentos e AIHs. A comparação de gap mostra diferença agregada por período, sem linkage individual, e não deve ser interpretada isoladamente como subnotificação ou letalidade.")
 
 
 def render_methodology():
@@ -20296,7 +20557,7 @@ def render_methodology():
         "exigem uma definição adicional antes de estimar internações ou pessoas únicas. "
         "Os recortes produzidos pelos scripts R se sobrepõem e não devem ser somados. "
         "A série temporal dos CIDs usa a referência escolhida (competência, internação ou saída). "
-        "A comparação entre bancos mantém seu escopo atual SINAN/SIM/CIHA. "
+        "A comparação agrega SINAN, SIM, CIHA e SIH em tendências e diferenças por período; consulte os critérios e as ressalvas próprios de cada gráfico. "
         "As propostas de outros campos estão numeradas na área do SIH para avaliação."
     )
     st.divider()
@@ -20494,12 +20755,11 @@ def main() -> None:
     elif section == "Comparação entre bancos de dados (sob revisão no momento)":
         loaded = [
             st.session_state.get(f"loaded_context_{src}")
-            for src in ["SINAN", "SIM", "CIHA"]
+            for src in ["SINAN", "SIM", "CIHA", "SIH"]
             if st.session_state.get(f"loaded_context_{src}")
         ]
         st.caption(
-            "A Comparação entre bancos de dados usa as bases já carregadas nas seções SINAN/SIM/CIHA. "
-            "Carregue cada base separadamente antes de comparar para evitar sobrecarga."
+            "Use bases carregadas em suas abas ou envie arquivos diretamente nesta seção. O bloco de gap compara óbitos por período no intervalo comum, com regras específicas para SINAN, SIM, CIHA e SIH."
         )
         render_comparison([x for x in loaded if x])
     st.divider()
