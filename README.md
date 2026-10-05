@@ -2,6 +2,38 @@ Os bancos de dados do DATASUS que são trabalhados neste programa:
 - **SINAN**: notificações/casos sobre determinados agravos (no caso, meningite)
 - **SIM**: óbitos registrados
 - **CIHA**: internações/atendimentos hospitalares e/ou ambulatorais.
+- **SIH/RD**: registros de AIH aprovada, com análise dos campos CID e do CGC do hospital.
+
+## Integração SIH/RD (05/10/2026)
+
+Acesse **SIH** no menu lateral, escolha **Upload DuckDB** e envie um banco produzido pelos scripts R de meningite. A tabela de dados é priorizada e `metadados_execucao` não é oferecida como tabela clínica. Também são aceitos Parquet, CSV e DBF. DBC deve ser previamente convertido pelo pipeline R.
+
+São analisados `DIAG_PRINC`, `DIAG_SECUN`, `DIAGSEC1` a `DIAGSEC9`, `CID_MORTE`, `CID_ASSO`, `CID_NOTIF` e outros campos de códigos CID detectados. Há distribuição por campo, presença dos CIDs de meningite/encefalite, seleção conjunta dos secundários e dos campos CID, série temporal opcional por ano/mês e distribuição por `CGC_HOSP`/`CGC_HOSPITAL`. Os códigos originais são preservados; CIDs fora do recorte também aparecem quando a opção de restringir a meningite/encefalite está desligada.
+
+Os percentuais por CID usam todas as linhas filtradas. Cada CID distinto conta uma vez por linha dentro da seleção, mesmo que apareça repetido em vários campos. Uma linha com vários CIDs pode participar de várias categorias. O gráfico de CGC agrupa os códigos restantes em "Outros CGCs" e mantém o denominador integral e os zeros à esquerda.
+
+A unidade contada é a **linha de AIH/RD**, não pessoa nem internação única. Os filtros R se sobrepõem: não mescle recortes de diagnóstico principal, causa da morte, associado e qualquer CID como conjuntos independentes. `CRITERIO_CID` mostra a seleção aplicada antes do upload. Um filtro na interface restringe esse conjunto, mas não recupera linhas excluídas na origem. `CID_MORTE` não substitui a causa básica qualificada pelo SIM. Zeros, campos vazios e conteúdos sem formato CID-10 são discriminados; formato reconhecido não equivale a validação no dicionário.
+
+**Competência de processamento** é a referência temporal padrão quando ano e mês estão disponíveis. Pode-se optar por data de internação ou saída; estas podem pertencer a outro período. Os totais mantêm registros sem data quando nenhum filtro de ano é aplicado. A série temporal usa somente datas reconhecidas e não transforma lacunas em zero.
+
+Os dados do SIH não são publicados automaticamente na release nem somados à comparação SINAN/SIM/CIHA. Caso Parquets SIH venham a ser publicados na release configurada, nomes iniciados por `SIH_` são identificados como essa fonte.
+
+### Outros campos propostos (sem implementação de gráficos)
+
+1. `N_AIH, IDENT, SEQ_AIH5, SEQUENCIA, REMESSA`: AIH inicial, continuidade e reapresentação; definição de internações únicas.
+2. `CNES, CGC_MANT, CNPJ_MANT`: identificação de estabelecimentos e mantenedoras.
+3. `MORTE, COBRANCA`: desfecho e mortalidade hospitalar.
+4. `DIAS_PERM, QT_DIARIAS`: permanência e utilização de leitos.
+5. `UTI_TOTAL, UTI_MES_TO, UTI_INT_TO, MARCA_UTI, MARCA_UCI`: terapia intensiva/intermediária.
+6. `PROC_REA, PROC_SOLIC, ESPEC, COMPLEX`: procedimentos, especialidade e complexidade.
+7. `VAL_TOT, VAL_SH, VAL_SP, VAL_UTI, VAL_UCI, FINANC, FAEC_TP`: valores aprovados e financiamento.
+8. `IDADE, COD_IDADE, NASC, SEXO, RACA_COR, ETNIA, INSTRU`: perfil demográfico.
+9. `MUNIC_RES, MUNIC_MOV, UF_ZI, UF_ARQUIVO`: residência, atendimento e fluxos territoriais.
+10. `CAR_INT, NATUREZA, NAT_JUR, GESTAO, INFEHOSP, TPDISEC1-TPDISEC9`: contexto assistencial e administrativo.
+
+Essas propostas também aparecem na seção **Outros campos propostos** do app. Datas/competências já servem somente como referência e filtros para as análises CID autorizadas.
+
+Validação: `python -m unittest discover -s tests -v`. Os testes incluem seleção da tabela clínica no upload, layouts antigos/recentes, banco vazio, denominadores, múltiplas menções CID, AIHs repetidas e CGC com zeros à esquerda. Foram também examinados seis bancos locais dos critérios R e amostras dos DBCs RJ de janeiro de 1998, 2008, 2016 e julho de 2026. As amostras confirmam mudanças no preenchimento de DIAG_SECUN/CID_ASSO/CID_MORTE e DIAGSEC1-DIAGSEC9; um campo zerado em períodos recentes não comprova ausência de doença.
 
 Este aplicativo cumpre duas funções:
 

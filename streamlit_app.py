@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Painel epidemiológico para meningite — SINAN, SIM e CIHA
+Painel epidemiológico para meningite — SINAN, SIM, CIHA e SIH
 
 O app aceita upload de DuckDB, Parquet, CSV ou DBF, além de bancos hospedados no github em
 Parquet, calcula indicadores descritivos e separa:
@@ -64,12 +64,12 @@ except Exception:  # fallback defensivo: upload de DBF fica indisponível, mas o
 # =============================================================================
 
 st.set_page_config(
-    page_title="Meningite — SINAN, SIM e CIHA",
+    page_title="Meningite — SINAN, SIM, CIHA e SIH",
     page_icon="🧫",
     layout="wide",
 )
 
-APP_VERSION = "2026-09-05-v100-plenamente-funcional"
+APP_VERSION = "2026-10-05-v100-SIH"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos
@@ -803,6 +803,7 @@ GITHUB_RELEASE_API_URL = (
     f"{GITHUB_RELEASE_OWNER}/{urllib.parse.quote(GITHUB_RELEASE_REPO, safe='')}/releases/tags/{GITHUB_RELEASE_TAG}"
 )
 GITHUB_RELEASE_SOURCE_PREFIX = {
+    "SIH": "SIH_",
     "SINAN": "SINAN_MENINGITE_RIO_ESTADO_",
     "SIM": "SIM_DO_RIO_ESTADO_",
     "CIHA": "CIHA_RIO_ESTADO_",
@@ -2912,6 +2913,22 @@ class SourceConfig:
 
 
 SOURCE_CONFIG: Dict[str, SourceConfig] = {
+    "SIH": SourceConfig(
+        name="SIH",
+        title="Registros de AIH aprovada (RD) - diagnósticos/CID e CGC do hospital",
+        default_db="sih_rd_meningite.duckdb",
+        default_table="sih_rd_meningite",
+        expected_period="conforme o arquivo; CID-10 a partir da competência 1998",
+        date_candidates=["DT_INTER", "DT_SAIDA"],
+        sex_candidates=[], age_candidates=[], age_unit_candidates=[], race_candidates=[],
+        municipality_res_candidates=[], municipality_event_candidates=[],
+        cid_candidates=["DIAG_PRINC", "DIAG_SECUN", "CID_MORTE", "CID_ASSO", "CID_NOTIF"],
+        field_notes=[
+            "A unidade contada é a linha de AIH/RD, sem deduplicação de internações ou pessoas.",
+            "Os recortes dos scripts R se sobrepõem e não devem ser somados.",
+            "CID_MORTE é o código registrado no SIH; não equivale à causa básica qualificada pelo SIM.",
+        ],
+    ),
     "SINAN": SourceConfig(
         name="SINAN",
         title="Notificações e investigação de casos",
@@ -10230,6 +10247,9 @@ def render_loader(source: str) -> Optional[LoadedTable]:
     st.caption(f"Período esperado no arquivo enviado: {cfg.expected_period}")
 
     load_modes = [GITHUB_HOSTED_PARQUETS_LABEL, "Upload DuckDB", "Upload Parquet", "Upload CSV", "Upload DBF"]
+    if source == "SIH":
+        load_modes = ["Upload DuckDB", "Upload Parquet", "Upload CSV", "Upload DBF", GITHUB_HOSTED_PARQUETS_LABEL]
+        st.caption("Selecione um único recorte RD por carregamento. Os scripts de principal, morte, associado e qualquer CID podem conter as mesmas AIHs.")
     load_mode_key = f"load_mode_{source}"
     if st.session_state.get(load_mode_key) not in (None, *load_modes):
         st.session_state.pop(load_mode_key, None)
@@ -10254,6 +10274,9 @@ def render_loader(source: str) -> Optional[LoadedTable]:
 
         source_assets = [asset for asset in release_assets if asset.get("source") == source]
         if not source_assets:
+            if source == "SIH":
+                st.info("Não há Parquets SIH nesta release. Use Upload DuckDB/Parquet/CSV/DBF; a inclusão da fonte não publica automaticamente os bancos.")
+                return None
             st.error(f"Não encontrei Parquets da base {source} nos bancos hospedados no github.")
             return None
 
@@ -10359,6 +10382,12 @@ def render_loader(source: str) -> Optional[LoadedTable]:
             tables = list_duckdb_tables(path)
         except Exception as exc:
             st.error(f"Não consegui abrir o DuckDB enviado: {exc}")
+            return None
+        if source == "SIH":
+            tables = [name for name in tables if name.lower() != "metadados_execucao"]
+            tables.sort(key=lambda name: (not name.lower().startswith("sih_rd_"), name))
+        if not tables:
+            st.warning("O DuckDB não contém tabela de dados disponível para análise.")
             return None
         default_idx = tables.index(cfg.default_table) if cfg.default_table in tables else 0
         table_name = st.selectbox("Tabela", options=tables, index=default_idx, key=f"upload_duckdb_table_{source}")
@@ -19363,9 +19392,387 @@ def render_sql_lab(table: LoadedTable, source: str) -> None:
             st.error(f"Erro ao executar SQL: {exc}")
 
 
+
+# =============================================================================
+# SIH/RD: diagnósticos, campos CID e CGC do hospital
+# =============================================================================
+
+SIH_CID_ROLE_LABELS = {
+    "principal": "Diagnóstico principal",
+    "secundario": "Diagnósticos secundários",
+    "morte": "CID da morte",
+    "associado": "CID associado",
+    "notificacao": "CID de notificação",
+    "outro": "Outros campos CID",
+}
+SIH_CID_ALIASES = {
+    "principal": {"DIAGPRINC", "DIAGPRI", "CIDPRINC", "CIDPRINCIPAL", "SPCIDPRI"},
+    "secundario": {"DIAGSECUN", "DIAGSEC", "CIDSEC", "SPCIDSEC"},
+    "morte": {"CIDMORTE", "CAUSAMORTE", "CAUSAMORT"},
+    "associado": {"CIDASSO", "CIDASSOCIADO", "CIDASSOC", "SPCIDASSO"},
+    "notificacao": {"CIDNOTIF", "CIDNOTIFICACAO"},
+}
+SIH_CID_TOKEN_REGEX = r"\b[A-Z][0-9]{2}(?:\.?[0-9A-Z])?\b"
+SIH_PROPOSED_FIELDS = [
+    ("N_AIH, IDENT, SEQ_AIH5, SEQUENCIA, REMESSA",
+     "Estudar AIH inicial/continuidade e reapresentações antes de estimar internações únicas."),
+    ("CNES, CGC_MANT, CNPJ_MANT",
+     "Identificar estabelecimento e mantenedora; CGC_HOSP sozinho não fornece nome nem identifica cada unidade física."),
+    ("MORTE, COBRANCA",
+     "Analisar desfecho administrativo e mortalidade hospitalar; CID_MORTE isolado não fornece esse denominador."),
+    ("DIAS_PERM, QT_DIARIAS",
+     "Estudar duração da permanência e utilização de leitos."),
+    ("UTI_TOTAL, UTI_MES_TO, UTI_INT_TO, MARCA_UTI, MARCA_UCI",
+     "Estudar utilização de terapia intensiva/intermediária, observando mudanças de layout."),
+    ("PROC_REA, PROC_SOLIC, ESPEC, COMPLEX",
+     "Estudar procedimentos, especialidade e complexidade; são códigos assistenciais, não CID."),
+    ("VAL_TOT, VAL_SH, VAL_SP, VAL_UTI, VAL_UCI, FINANC, FAEC_TP",
+     "Estudar valores aprovados e financiamento; valores não equivalem ao custo integral do cuidado."),
+    ("IDADE, COD_IDADE, NASC, SEXO, RACA_COR, ETNIA, INSTRU",
+     "Estudar perfil demográfico, com leitura da unidade da idade e completude por período."),
+    ("MUNIC_RES, MUNIC_MOV, UF_ZI, UF_ARQUIVO",
+     "Estudar residência, atendimento e fluxos assistenciais entre territórios."),
+    ("CAR_INT, NATUREZA, NAT_JUR, GESTAO, INFEHOSP, TPDISEC1-TPDISEC9",
+     "Estudar caráter da internação, perfil da gestão e contexto dos diagnósticos secundários."),
+]
+
+
+def sih_field_name(name: str) -> str:
+    return re.sub(r"[^A-Z0-9]", "", str(name).upper())
+
+
+def detect_sih_cid_fields(columns: Sequence[str]) -> Dict[str, List[str]]:
+    """Detecta campos de códigos, excluindo os textos de proveniência do filtro R."""
+    roles: Dict[str, List[str]] = {key: [] for key in SIH_CID_ROLE_LABELS}
+    for col in columns:
+        normalized = sih_field_name(col)
+        role = next((key for key, names in SIH_CID_ALIASES.items() if normalized in names), None)
+        if re.fullmatch(r"DIAGSEC[1-9]", normalized):
+            role = "secundario"
+        if role is None and normalized.startswith("CID"):
+            if normalized in {"CIDALVO", "CIDFILTRO"} or any(
+                token in normalized for token in ("DESCR", "ROTULO", "LABEL", "NOME", "FILTRO")
+            ):
+                continue
+            role = "outro"
+        if role:
+            roles[role].append(col)
+    return {key: value for key, value in roles.items() if value}
+
+
+def sih_cid_values_expr(columns: Sequence[str]) -> str:
+    """Uma lista de códigos distintos por linha, sem reduzir a primeira menção."""
+    arrays = [
+        f"list_transform(regexp_extract_all(UPPER(COALESCE(CAST({qident(col)} AS VARCHAR), '')), "
+        f"{qstr(SIH_CID_TOKEN_REGEX)}), cid -> replace(cid, '.', ''))"
+        for col in columns
+    ]
+    if not arrays:
+        return "[]::VARCHAR[]"
+    combined = arrays[0] if len(arrays) == 1 else "list_concat(" + ", ".join(arrays) + ")"
+    return f"list_distinct({combined})"
+
+
+def sih_meningitis_condition(columns: Sequence[str]) -> str:
+    values = sih_cid_values_expr(columns)
+    return f"len(list_filter({values}, cid -> regexp_matches(cid, {qstr(CID_MENINGITE_REGEX)}))) > 0"
+
+
+def sih_reference_dates(columns: Sequence[str]) -> Dict[str, str]:
+    """Datas somente como eixo/filtro das análises CID/hospital, sem módulo demográfico."""
+    choices: Dict[str, str] = {}
+    year = choose_candidate(columns, ["ANO_COMPETENCIA", "ANO_CMPT"])
+    month = choose_candidate(columns, ["MES_COMPETENCIA", "MES_CMPT"])
+    if year and month:
+        choices["Competência de processamento"] = (
+            f"CAST(try_strptime(CAST(TRY_CAST({qident(year)} AS INTEGER) AS VARCHAR) || "
+            f"lpad(CAST(TRY_CAST({qident(month)} AS INTEGER) AS VARCHAR), 2, '0') || '01', '%Y%m%d') AS DATE)"
+        )
+    for label, names in [
+        ("Data da internação", ["DT_INTER", "DT_INTERNA", "DT_INTERNAÇÃO"]),
+        ("Data da saída", ["DT_SAIDA"]),
+    ]:
+        col = choose_candidate(columns, names)
+        if col:
+            choices[f"{label} ({col})"] = date_expr(col)
+    return choices
+
+
+def query_sih_cid_coverage(table: LoadedTable, columns: Sequence[str], where_sql: str = "") -> pd.DataFrame:
+    parts = []
+    for col in columns:
+        raw = clean_str_expr(col)
+        values = sih_cid_values_expr([col])
+        zero = f"regexp_matches(COALESCE({raw}, ''), '^0+$')"
+        parts.append(f"""
+            SELECT {qstr(col)} AS campo, COUNT(*) AS n_registros,
+                   COUNT(*) FILTER (WHERE {raw} IS NULL) AS n_vazio,
+                   COUNT(*) FILTER (WHERE {raw} IS NOT NULL AND {zero}) AS n_zero,
+                   COUNT(*) FILTER (WHERE {raw} IS NOT NULL AND NOT ({zero}) AND len({values}) = 0) AS n_sem_formato_cid10,
+                   COUNT(*) FILTER (WHERE len({values}) > 0) AS n_com_formato_cid10,
+                   COUNT(*) FILTER (WHERE {sih_meningitis_condition([col])}) AS n_recorte_meningite
+            FROM {table.ref_sql} {where_sql}
+        """)
+    if not parts:
+        return pd.DataFrame()
+    result = run_query(table, " UNION ALL ".join(parts))
+    result["pct_recorte_meningite"] = (
+        100 * result["n_recorte_meningite"] / result["n_registros"].replace(0, np.nan)
+    ).round(2)
+    return result
+
+
+def query_sih_cid_distribution(
+    table: LoadedTable, columns: Sequence[str], where_sql: str = "",
+    meningitis_only: bool = False, dt_sql: Optional[str] = None,
+    frequency: str = "year",
+) -> pd.DataFrame:
+    values = sih_cid_values_expr(columns)
+    date_select = f", {dt_sql} AS dt" if dt_sql else ""
+    cid_where = f"WHERE regexp_matches(cid, {qstr(CID_MENINGITE_REGEX)})" if meningitis_only else ""
+    if dt_sql:
+        if frequency not in {"year", "month"}:
+            raise ValueError("Agregação SIH deve ser anual ou mensal.")
+        period = f"CAST(date_trunc({qstr(frequency)}, dt) AS DATE)"
+        select = f"{period} AS periodo, cid"
+        group = "1, 2"
+        order = "1, n DESC, cid"
+        cid_where += (" AND " if cid_where else " WHERE ") + "dt IS NOT NULL"
+    else:
+        select, group, order = "cid", "1", "n DESC, cid"
+    result = run_query(table, f"""
+        WITH base AS (
+            SELECT {values} AS cids {date_select} FROM {table.ref_sql} {where_sql}
+        ), mentions AS (
+            SELECT unnest(cids) AS cid {", dt" if dt_sql else ""} FROM base
+        )
+        SELECT {select}, COUNT(*) AS n FROM mentions {cid_where}
+        GROUP BY {group} ORDER BY {order}
+    """)
+    if not dt_sql:
+        denominator = count_rows(table, where_sql)
+        result["n_registros_denominador"] = denominator
+        result["pct_registros"] = (100 * result["n"] / denominator).round(2) if denominator else np.nan
+        labels = {rule["prefixo"]: rule["rotulo"] for rule in CID_RULES}
+        result["grupo_recorte"] = [
+            next((label for prefix, label in labels.items() if str(cid).startswith(prefix)),
+                 "CID fora do recorte meningite/encefalite")
+            for cid in result["cid"]
+        ]
+    return result
+
+
+def query_sih_hospitals(table: LoadedTable, hospital_col: str, where_sql: str = "", top_n: int = 20) -> pd.DataFrame:
+    raw = clean_str_expr(hospital_col)
+    hospital = f"CASE WHEN {raw} IS NULL OR regexp_matches({raw}, '^0+$') THEN 'Sem CGC informado' ELSE {raw} END"
+    return run_query(table, f"""
+        WITH counts AS (
+            SELECT {hospital} AS cgc_hospital, COUNT(*) AS n FROM {table.ref_sql} {where_sql}
+            GROUP BY 1
+        ), ranked AS (
+            SELECT *, row_number() OVER (ORDER BY n DESC, cgc_hospital) AS rank FROM counts
+        )
+        SELECT CASE WHEN rank <= {int(top_n)} THEN cgc_hospital ELSE 'Outros CGCs' END AS cgc_hospital,
+               SUM(n)::BIGINT AS n,
+               SUM(SUM(n)) OVER ()::BIGINT AS n_registros_denominador,
+               ROUND(100.0 * SUM(n) / NULLIF(SUM(SUM(n)) OVER (), 0), 2) AS pct_registros
+        FROM ranked GROUP BY 1 ORDER BY n DESC, cgc_hospital
+    """)
+
+
+def render_sih_proposed_fields() -> None:
+    st.markdown("### Outros campos propostos")
+    st.caption("Propostas numeradas para avaliação; não há gráficos nem indicadores implementados para estes campos.")
+    for number, (fields, purpose) in enumerate(SIH_PROPOSED_FIELDS, 1):
+        st.markdown(f"{number}. **{fields}**: {purpose}")
+
+
+def render_sih_provenance(table: LoadedTable, columns: Sequence[str]) -> None:
+    criterion = choose_candidate(columns, ["CRITERIO_CID"])
+    if criterion:
+        counts = run_query(table, f"""
+            SELECT COALESCE({clean_str_expr(criterion)}, 'Não informado') AS criterio_original,
+                   COUNT(*) AS n_registros FROM {table.ref_sql} GROUP BY 1 ORDER BY 2 DESC
+        """)
+        st.caption("Recorte aplicado na origem pelos scripts R (antes dos filtros desta tela):")
+        copyable_dataframe(counts, width="stretch", hide_index=True)
+        if len(counts) > 1:
+            st.warning("O carregamento contém múltiplos critérios R. Eles podem se sobrepor; não há deduplicação automática das AIHs.")
+        if "qualquer_campo_ficha" in counts.get("criterio_original", pd.Series(dtype=str)).tolist():
+            st.warning("O filtro R 'qualquer campo da ficha' pode alcançar textos de campos não diagnósticos. Use o filtro 'Qualquer campo CID' abaixo para verificar o recorte clínico.")
+    else:
+        st.info("CRITERIO_CID ausente: o recorte aplicado na extração não pode ser identificado automaticamente.")
+    with st.expander("Proveniência e campos disponíveis", expanded=False):
+        provenance = [choose_candidate(columns, [name]) for name in
+                      ["TIPO_SIH", "UF_ARQUIVO", "ANO_COMPETENCIA", "MES_COMPETENCIA", "ID_EXECUCAO"]]
+        for col in [value for value in provenance if value]:
+            values = top_values(table, clean_str_expr(col), limit=40)
+            st.caption(f"{col}: {', '.join(values)}")
+        copyable_dataframe(schema_df(table), width="stretch", hide_index=True)
+
+
+def render_sih_filters(
+    table: LoadedTable, roles: Dict[str, List[str]], hospital_col: Optional[str], dates: Dict[str, str],
+) -> Tuple[str, Optional[str]]:
+    clauses: List[str] = []
+    all_cids = [col for fields in roles.values() for col in fields]
+    with st.expander("2) Filtros do SIH", expanded=True):
+        definitions = {"Todas as linhas carregadas": []}
+        if all_cids:
+            definitions["Meningite/encefalite em qualquer campo CID"] = all_cids
+            for role, fields in roles.items():
+                definitions[f"Meningite/encefalite - {SIH_CID_ROLE_LABELS[role]}"] = fields
+        choice = st.selectbox("Recorte de diagnósticos", list(definitions), key="sih_definition")
+        if definitions[choice]:
+            clauses.append(sih_meningitis_condition(definitions[choice]))
+        st.caption("Um filtro da tela pode restringir o banco enviado, mas não recupera linhas excluídas na extração R.")
+        if hospital_col:
+            hospitals = top_values(table, clean_str_expr(hospital_col), limit=1000)
+            selected = st.multiselect(f"{hospital_col} - filtrar CGC do hospital", hospitals, key="sih_hospital_filter")
+            if selected:
+                clauses.append(f"{clean_str_expr(hospital_col)} IN ({', '.join(qstr(value) for value in selected)})")
+        date_sql = None
+        if dates:
+            reference = st.selectbox("Referência temporal para os campos CID", list(dates), key="sih_reference_date")
+            date_sql = dates[reference]
+            years = run_query(table, f"""
+                SELECT DISTINCT CAST(EXTRACT(YEAR FROM {date_sql}) AS INTEGER) AS ano
+                FROM {table.ref_sql} WHERE {date_sql} IS NOT NULL ORDER BY 1
+            """)["ano"].tolist()
+            selected_years = st.multiselect("Anos (vazio mantém todo o arquivo)", years, key="sih_years")
+            if selected_years:
+                clauses.append(f"EXTRACT(YEAR FROM {date_sql}) IN ({', '.join(str(int(year)) for year in selected_years)})")
+            st.caption("Competência é o processamento; internação e saída podem pertencer a outros períodos. Linhas sem data ficam no total quando não há filtro de ano.")
+    return sql_where(clauses), date_sql
+
+
+def render_sih_cids(table: LoadedTable, roles: Dict[str, List[str]], where_sql: str, date_sql: Optional[str]) -> None:
+    st.markdown("### Diagnósticos e CID por campo")
+    all_fields = [col for fields in roles.values() for col in fields]
+    if not all_fields:
+        st.info("Não foram encontrados campos CID no layout enviado.")
+        return
+    coverage = query_sih_cid_coverage(table, all_fields, where_sql)
+    st.caption("Ausência, zeros e conteúdo sem formato CID-10 são discriminados. O formato reconhecido não garante validade no dicionário nem confirmação clínica.")
+    st.caption("O layout e o uso dos campos mudam ao longo dos anos. CID_ASSO, CID_MORTE e DIAG_SECUN podem estar zerados em arquivos recentes enquanto DIAGSEC1-DIAGSEC9 recebem diagnósticos. Campo vazio não demonstra ausência de doença ou de óbito.")
+    copyable_dataframe(coverage, width="stretch", hide_index=True)
+    download_button(coverage, "sih_cid_cobertura_por_campo.csv")
+    if int(coverage["n_registros"].max()) > 0:
+        fig = px.bar(coverage, x="campo", y="n_recorte_meningite",
+                     hover_data=["n_registros", "n_vazio", "n_zero", "n_sem_formato_cid10", "pct_recorte_meningite"],
+                     labels={"campo": "Campo CID", "n_recorte_meningite": "Registros com CID do recorte"},
+                     title="Presença de meningite/encefalite em cada campo CID")
+        render_plotly_chart(fig, "SIH: presença do recorte por campo CID")
+    selections = {f"{SIH_CID_ROLE_LABELS[role]} - {col}": [col]
+                  for role, fields in roles.items() for col in fields}
+    secondary = roles.get("secundario", [])
+    if len(secondary) > 1:
+        selections["Todos os diagnósticos secundários (CID distinto por registro)"] = secondary
+    selections["Todos os campos CID (CID distinto por registro)"] = all_fields
+    selected_label = st.selectbox("Campo CID analisado", list(selections), key="sih_cid_field")
+    selected_fields = selections[selected_label]
+    only = st.checkbox("Exibir apenas os CIDs do recorte meningite/encefalite", value=False, key="sih_only_meningitis")
+    distribution = query_sih_cid_distribution(table, selected_fields, where_sql, only)
+    st.caption("Cada CID distinto conta uma vez por linha de AIH dentro da seleção. Uma linha com vários CIDs pode participar de várias categorias; as porcentagens usam todas as linhas filtradas e podem somar mais de 100%.")
+    if distribution.empty:
+        st.info("Nenhum código com formato CID-10 foi encontrado para esta seleção.")
+        return
+    top_n = st.slider("Máximo de CIDs exibidos no gráfico (tabela mantém todos)", 5, 60, 20, key="sih_cid_top")
+    visible = distribution.head(int(top_n)).copy()
+    visible["rotulo"] = visible["cid"] + " - " + visible["grupo_recorte"]
+    fig = px.bar(visible.iloc[::-1], x="n", y="rotulo", orientation="h",
+                 hover_data=["pct_registros", "n_registros_denominador"],
+                 labels={"n": "Registros de AIH/RD com o CID", "rotulo": "CID"},
+                 title=f"Distribuição dos CIDs - {selected_label}")
+    fig.update_layout(height=cid10_bar_chart_height(len(visible)))
+    render_plotly_chart(fig, f"SIH: distribuição de CID - {selected_label}")
+    copyable_dataframe(distribution, width="stretch", hide_index=True)
+    download_button(distribution, "sih_cid_distribuicao.csv")
+    if date_sql and st.checkbox("Mostrar série temporal destes CIDs", value=False, key="sih_cid_show_temporal"):
+        selected_codes = st.multiselect("CIDs na série temporal", distribution["cid"].tolist(),
+                                       default=distribution["cid"].head(5).tolist(), max_selections=20, key="sih_temporal_cids")
+        freq_label = st.selectbox("Agregação dos CIDs", ["Ano", "Mês"], key="sih_cid_frequency")
+        if not selected_codes:
+            st.info("Selecione pelo menos um CID para a série temporal.")
+            return
+        series = query_sih_cid_distribution(table, selected_fields, where_sql, only, date_sql,
+                                            {"Ano": "year", "Mês": "month"}[freq_label])
+        series = series[series["cid"].isin(selected_codes)]
+        date_coverage = query_field_coverage(table, date_sql, where_sql)
+        st.caption(coverage_subtitle_from_df(date_coverage))
+        st.caption("A série considera somente registros com data reconhecida. Períodos sem linhas são lacunas de observação; não são preenchidos como ausência de doença.")
+        if series.empty:
+            st.info("Não há dados datados para os CIDs selecionados.")
+        else:
+            fig = px.scatter(series, x="periodo", y="n", color="cid",
+                             labels={"periodo": "Referência temporal selecionada", "n": "Registros com CID", "cid": "CID"},
+                             title=f"CIDs ao longo do tempo - {selected_label}")
+            render_plotly_chart(fig, "SIH: série temporal dos campos CID")
+            download_button(series, "sih_cid_serie_temporal.csv")
+
+
+def render_sih_source(table: LoadedTable) -> None:
+    """Rota própria: evita reutilizar indicadores demográficos/SINAN/CIHA fora do escopo."""
+    try:
+        columns = schema_df(table)["coluna"].astype(str).tolist()
+    except Exception as exc:
+        st.error(f"Não foi possível ler o layout SIH: {exc}")
+        return
+    type_col = choose_candidate(columns, ["TIPO_SIH"])
+    if type_col:
+        types = top_values(table, f"UPPER({clean_str_expr(type_col)})", limit=10)
+        if any(value != "RD" for value in types):
+            st.error("Esta área utiliza AIH aprovada/RD. O arquivo identifica outro tipo SIH (RJ/SP/ER); selecione um recorte RD.")
+            return
+    roles = detect_sih_cid_fields(columns)
+    hospital = choose_candidate(columns, ["CGC_HOSP", "CGC_HOSPITAL"])
+    if not roles and not hospital:
+        st.error("A tabela não contém campos CID nem CGC_HOSP reconhecidos para SIH/RD. Selecione a tabela de dados.")
+        return
+    st.success(f"Dados SIH carregados: {table.label}")
+    st.caption("Unidade: linha de AIH/RD, não pessoa nem internação única. Não há conversão etiológica, imputação ou soma com SINAN/SIM/CIHA. CID_MORTE descreve o código do SIH e não substitui a causa básica do SIM.")
+    render_sih_provenance(table, columns)
+    where_sql, date_sql = render_sih_filters(table, roles, hospital, sih_reference_dates(columns))
+    total = count_rows(table, where_sql)
+    st.metric("Registros de AIH/RD no recorte", format_int_br(total))
+    sections = ["Diagnósticos e CID", "CGC do hospital", "Outros campos propostos"]
+    section = st.radio("Área de análise do SIH", sections, horizontal=True, key="sih_analysis_section")
+    if section == "Outros campos propostos":
+        render_sih_proposed_fields()
+        return
+    if total == 0:
+        st.info("O banco ou o recorte selecionado está vazio. Campos do layout podem existir sem registros para este critério.")
+        return
+    if section == "Diagnósticos e CID":
+        render_sih_cids(table, roles, where_sql, date_sql)
+    elif section == "CGC do hospital":
+        if not hospital:
+            st.info("CGC_HOSP/CGC_HOSPITAL não está presente neste layout.")
+            return
+        st.caption("CGC/CNPJ é exibido como texto, com zeros à esquerda. Um CGC não equivale necessariamente a uma unidade CNES; não há atribuição automática de nomes.")
+        top_n = st.slider("CGCs exibidos individualmente (demais em Outros CGCs)", 5, 50, 20, key="sih_hospital_top")
+        frame = query_sih_hospitals(table, hospital, where_sql, int(top_n))
+        fig = px.bar(frame.iloc[::-1], x="n", y="cgc_hospital", orientation="h",
+                     hover_data=["pct_registros", "n_registros_denominador"],
+                     labels={"n": "Registros de AIH/RD", "cgc_hospital": hospital},
+                     title="Registros por CGC do hospital")
+        fig.update_layout(height=cid10_bar_chart_height(len(frame)))
+        render_plotly_chart(fig, "SIH: registros por CGC_HOSP")
+        copyable_dataframe(frame, width="stretch", hide_index=True)
+        download_button(frame, "sih_cgc_hospital.csv")
+    with st.expander("Prévia dos campos analisados (valores originais)", expanded=False):
+        requested = [col for fields in roles.values() for col in fields] + ([hospital] if hospital else [])
+        preview = run_query(table, f"SELECT {', '.join(qident(col) for col in requested)} FROM {table.ref_sql} {where_sql} LIMIT 200")
+        copyable_dataframe(preview, width="stretch", hide_index=True)
+        download_button(preview, "sih_campos_analisados_previa.csv")
+
+
 def render_source(source: str) -> Optional[Dict[str, object]]:
     table = render_loader(source)
     if table is None:
+        return None
+    if source == "SIH":
+        render_sih_source(table)
         return None
     try:
         schema = schema_df(table)
@@ -19602,6 +20009,17 @@ def render_comparison(loaded: Sequence[Dict[str, object]]) -> None:
 
 
 def render_methodology():
+    st.markdown("### SIH/RD no observatório")
+    st.markdown(
+        "A fonte **SIH** analisa os códigos originais dos diagnósticos principal e secundários, "
+        "CID_MORTE, CID_ASSO, CID_NOTIF e outros campos CID detectados, além de CGC_HOSP. "
+        "A unidade é a linha de AIH aprovada; continuidade, reapresentação e várias AIHs por pessoa "
+        "exigem uma definição adicional antes de estimar internações ou pessoas únicas. "
+        "Os recortes produzidos pelos scripts R se sobrepõem e não devem ser somados. "
+        "A série temporal dos CIDs usa a referência escolhida (competência, internação ou saída). "
+        "A comparação entre bancos mantém seu escopo atual SINAN/SIM/CIHA. "
+        "As propostas de outros campos estão numeradas na área do SIH para avaliação."
+    )
     st.divider()
     st.markdown("### Como usar este app para investigação epidemiológica")
     st.markdown(
@@ -19748,7 +20166,7 @@ def render_methodology():
 
 def render_main_navigation() -> str:
     """Navegação principal com separadores visuais entre metodologia, bases e comparação."""
-    main_sections = ["Metodologia", "SINAN", "SIM", "CIHA", "Comparação entre bancos de dados (sob revisão no momento)"]
+    main_sections = ["Metodologia", "SINAN", "SIM", "CIHA", "SIH", "Comparação entre bancos de dados (sob revisão no momento)"]
     main_section_key = "main_section"
     current = st.session_state.get(main_section_key, "Metodologia")
     if current not in main_sections:
@@ -19768,7 +20186,7 @@ def render_main_navigation() -> str:
     nav_button("Metodologia", "nav_metodologia")
     st.divider()
     st.markdown("#### Bases")
-    for source_name in ["SINAN", "SIM", "CIHA"]:
+    for source_name in ["SINAN", "SIM", "CIHA", "SIH"]:
         nav_button(source_name, f"nav_{source_name.lower()}")
     st.divider()
     st.markdown("#### Comparação entre bancos de dados (sob revisão no momento)")
@@ -19779,7 +20197,7 @@ def render_main_navigation() -> str:
 def main() -> None:
     _reset_calc_log()
     render_app_css()
-    st.title("Painel epidemiológico de meningite — SINAN, SIM e CIHA")
+    st.title("Painel epidemiológico de meningite — SINAN, SIM, CIHA e SIH")
     st.caption(
         f"Versão {APP_VERSION}. Lê uploads de DuckDB, Parquet, CSV e DBF, além de bancos hospedados no GitHub "
         "em Parquet, e mantém regras analíticas explícitas."
@@ -19789,7 +20207,7 @@ def main() -> None:
         render_performance_controls()
         section = render_main_navigation()
 
-    if section in {"SINAN", "SIM", "CIHA"}:
+    if section in {"SINAN", "SIM", "CIHA", "SIH"}:
         st.divider()
         render_source(section)
     elif section == "Metodologia":
