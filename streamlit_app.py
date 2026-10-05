@@ -69,7 +69,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-10-05-v100-SIH"
+APP_VERSION = "2026-10-05-v100-SIH-demografia"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos
@@ -2915,13 +2915,14 @@ class SourceConfig:
 SOURCE_CONFIG: Dict[str, SourceConfig] = {
     "SIH": SourceConfig(
         name="SIH",
-        title="Registros de AIH aprovada (RD) - diagnósticos/CID e CGC do hospital",
+        title="Registros de AIH aprovada (RD) - diagnósticos, estabelecimentos e demografia",
         default_db="sih_rd_meningite.duckdb",
         default_table="sih_rd_meningite",
         expected_period="conforme o arquivo; CID-10 a partir da competência 1998",
         date_candidates=["DT_INTER", "DT_SAIDA"],
-        sex_candidates=[], age_candidates=[], age_unit_candidates=[], race_candidates=[],
-        municipality_res_candidates=[], municipality_event_candidates=[],
+        sex_candidates=["SEXO"], age_candidates=["IDADE"], age_unit_candidates=["COD_IDADE"],
+        race_candidates=["RACA_COR"],
+        municipality_res_candidates=["MUNIC_RES"], municipality_event_candidates=["MUNIC_MOV"],
         cid_candidates=["DIAG_PRINC", "DIAG_SECUN", "CID_MORTE", "CID_ASSO", "CID_NOTIF"],
         field_notes=[
             "A unidade contada é a linha de AIH/RD, sem deduplicação de internações ou pessoas.",
@@ -19394,7 +19395,7 @@ def render_sql_lab(table: LoadedTable, source: str) -> None:
 
 
 # =============================================================================
-# SIH/RD: diagnósticos, campos CID e CGC do hospital
+# SIH/RD: diagnósticos, estabelecimentos e demografia
 # =============================================================================
 
 SIH_CID_ROLE_LABELS = {
@@ -19416,8 +19417,6 @@ SIH_CID_TOKEN_REGEX = r"\b[A-Z][0-9]{2}(?:\.?[0-9A-Z])?\b"
 SIH_PROPOSED_FIELDS = [
     ("N_AIH, IDENT, SEQ_AIH5, SEQUENCIA, REMESSA",
      "Estudar AIH inicial/continuidade e reapresentações antes de estimar internações únicas."),
-    ("CNES, CGC_MANT, CNPJ_MANT",
-     "Identificar estabelecimento e mantenedora; CGC_HOSP sozinho não fornece nome nem identifica cada unidade física."),
     ("MORTE, COBRANCA",
      "Analisar desfecho administrativo e mortalidade hospitalar; CID_MORTE isolado não fornece esse denominador."),
     ("DIAS_PERM, QT_DIARIAS",
@@ -19428,10 +19427,8 @@ SIH_PROPOSED_FIELDS = [
      "Estudar procedimentos, especialidade e complexidade; são códigos assistenciais, não CID."),
     ("VAL_TOT, VAL_SH, VAL_SP, VAL_UTI, VAL_UCI, FINANC, FAEC_TP",
      "Estudar valores aprovados e financiamento; valores não equivalem ao custo integral do cuidado."),
-    ("IDADE, COD_IDADE, NASC, SEXO, RACA_COR, ETNIA, INSTRU",
-     "Estudar perfil demográfico, com leitura da unidade da idade e completude por período."),
-    ("MUNIC_RES, MUNIC_MOV, UF_ZI, UF_ARQUIVO",
-     "Estudar residência, atendimento e fluxos assistenciais entre territórios."),
+    ("UF_ZI, UF_ARQUIVO e fluxos entre MUNIC_RES/MUNIC_MOV",
+     "Estudar território de processamento e cruzamentos de fluxos assistenciais; distribuições municipais simples já estão na análise demográfica."),
     ("CAR_INT, NATUREZA, NAT_JUR, GESTAO, INFEHOSP, TPDISEC1-TPDISEC9",
      "Estudar caráter da internação, perfil da gestão e contexto dos diagnósticos secundários."),
 ]
@@ -19562,6 +19559,80 @@ def query_sih_cid_distribution(
     return result
 
 
+def query_sih_diagnosis_union(
+    table: LoadedTable, roles: Dict[str, List[str]], where_sql: str = "",
+    dt_sql: Optional[str] = None, frequency: str = "year",
+) -> pd.DataFrame:
+    """União principal OU secundário: uma linha conta uma vez, não uma vez por CID."""
+    if frequency not in {"year", "month"}:
+        raise ValueError("Agregação SIH deve ser anual ou mensal.")
+    primary = sih_meningitis_condition(roles.get("principal", []))
+    secondary = sih_meningitis_condition(roles.get("secundario", []))
+    date_select = f", {dt_sql} AS dt" if dt_sql else ""
+    period_select = f"CAST(date_trunc({qstr(frequency)}, dt) AS DATE) AS periodo," if dt_sql else ""
+    group_order = "GROUP BY 1 ORDER BY 1 NULLS LAST" if dt_sql else ""
+    return run_query(table, f"""
+        WITH base AS (
+            SELECT ({primary}) AS principal, ({secondary}) AS secundario {date_select}
+            FROM {table.ref_sql} {where_sql}
+        )
+        SELECT {period_select} COUNT(*) AS n,
+               COUNT(*) FILTER (WHERE principal AND NOT secundario) AS n_principal_apenas,
+               COUNT(*) FILTER (WHERE secundario AND NOT principal) AS n_secundario_apenas,
+               COUNT(*) FILTER (WHERE principal AND secundario) AS n_ambos
+        FROM base WHERE principal OR secundario
+        {group_order}
+    """)
+
+
+def render_sih_diagnosis_union(
+    table: LoadedTable, roles: Dict[str, List[str]], where_sql: str, date_sql: Optional[str],
+) -> None:
+    st.markdown("### Meningite/encefalite no diagnóstico principal ou secundário")
+    fields = roles.get("principal", []) + roles.get("secundario", [])
+    if not fields:
+        st.info("Não há campos de diagnóstico principal ou secundário reconhecidos neste layout.")
+        return
+    st.caption("União sem dupla contagem entre campos: cada linha de AIH/RD entra uma única vez quando qualquer CID do recorte aparece no principal ou em algum secundário, mesmo com vários CIDs diferentes. Não inclui CID_MORTE, CID_ASSO nem CID_NOTIF; mantém o conjunto de CIDs de meningite/encefalite usado pelo observatório.")
+    st.caption("Campos considerados: " + ", ".join(fields) + ". Unidade: registro de AIH/RD, não pessoa ou internação única; não há deduplicação entre arquivos nem por N_AIH.")
+    st.caption("O gráfico respeita todos os filtros do SIH. Um banco extraído apenas por diagnóstico principal não contém os casos exclusivamente secundários excluídos na origem; para abrangê-los, carregue um recorte principal/secundário ou qualquer CID, sem somar bancos sobrepostos.")
+    frequency = "year"
+    if date_sql:
+        label = st.selectbox("Agregação do total unificado", ["Ano", "Mês"], key="sih_union_frequency")
+        frequency = {"Ano": "year", "Mês": "month"}[label]
+    frame = query_sih_diagnosis_union(table, roles, where_sql, date_sql, frequency)
+    total = int(frame["n"].sum())
+    st.metric("AIHs com CID do recorte no principal ou secundário (uma vez por registro)", format_int_br(total))
+    if date_sql:
+        missing = int(frame.loc[frame["periodo"].isna(), "n"].sum())
+        visible = frame.loc[frame["periodo"].notna()].copy()
+        st.caption(f"Total com data reconhecida: {format_int_br(total - missing)}; sem data reconhecida: {format_int_br(missing)}. Sem filtro de ano, os registros sem data entram no total e no CSV, mas não no eixo temporal. Lacunas não são preenchidas com zero. Períodos finais ou filtrados podem ter cobertura parcial; não há extrapolação.")
+        if not visible.empty:
+            fig = px.bar(visible, x="periodo", y="n",
+                         hover_data=["n_principal_apenas", "n_secundario_apenas", "n_ambos"],
+                         labels={"periodo": "Referência temporal selecionada", "n": "Registros de AIH/RD (uma vez)"},
+                         title="Total unificado de AIHs: meningite/encefalite no principal ou secundário")
+            fig.update_yaxes(rangemode="tozero")
+            if frequency == "year":
+                fig.update_xaxes(dtick="M12", tickformat="%Y")
+            render_plotly_chart(fig, "SIH: total unificado principal ou secundário")
+        else:
+            st.info("Nenhum registro elegível com data reconhecida para o gráfico temporal.")
+    elif total:
+        visible = pd.DataFrame({"recorte": ["Principal ou secundário"], "n": [total]})
+        fig = px.bar(visible, x="recorte", y="n", text="n",
+                     labels={"recorte": "Diagnósticos", "n": "Registros de AIH/RD (uma vez)"},
+                     title="Total unificado de AIHs: meningite/encefalite no principal ou secundário")
+        fig.update_yaxes(rangemode="tozero")
+        render_plotly_chart(fig, "SIH: total unificado principal ou secundário")
+    else:
+        st.info("Nenhum registro com CID do recorte no diagnóstico principal ou secundário.")
+    with st.expander("Conferir a contagem unificada e exportar CSV", expanded=False):
+        st.caption("Categorias mutuamente exclusivas: apenas principal + apenas secundário + ambos = total. Mesmo quando vários CIDs aparecem nos dois tipos de campo, a linha contribui uma vez para 'ambos' e uma vez para o total. Período vazio identifica data ausente ou inválida.")
+        copyable_dataframe(frame, width="stretch", hide_index=True)
+        download_button(frame, "sih_principal_secundario_total_unificado.csv")
+
+
 def query_sih_hospitals(table: LoadedTable, hospital_col: str, where_sql: str = "", top_n: int = 20) -> pd.DataFrame:
     raw = clean_str_expr(hospital_col)
     hospital = f"CASE WHEN {raw} IS NULL OR regexp_matches({raw}, '^0+$') THEN 'Sem CGC informado' ELSE {raw} END"
@@ -19580,9 +19651,217 @@ def query_sih_hospitals(table: LoadedTable, hospital_col: str, where_sql: str = 
     """)
 
 
+def sih_choose_column(columns: Sequence[str], candidates: Sequence[str]) -> Optional[str]:
+    """Correspondência exata normalizada: IDADE não pode virar COD_IDADE, CNES não vira SP_CNES."""
+    lookup = {sih_field_name(col): col for col in columns}
+    return next((lookup[sih_field_name(name)] for name in candidates if sih_field_name(name) in lookup), None)
+
+
+def sih_code_label_expr(col: str, labels: Dict[str, str], missing_codes: Sequence[str] = ()) -> str:
+    """Rótulos próprios do SIH; mantém códigos fora do domínio e ausência visíveis."""
+    raw = clean_str_expr(col)
+    code = f"CASE WHEN regexp_matches({raw}, '^[0-9]+$') THEN CAST(TRY_CAST({raw} AS BIGINT) AS VARCHAR) ELSE {raw} END"
+    cases = " ".join(f"WHEN {code} = {qstr(key)} THEN {qstr(value)}" for key, value in labels.items())
+    missing = " ".join(
+        f"WHEN {code} = {qstr(key)} THEN {qstr('Sem informação (código ' + key + ')')}"
+        for key in missing_codes
+    )
+    return f"CASE WHEN {raw} IS NULL THEN 'Sem informação (vazio)' {cases} {missing} ELSE 'Código não interpretado: ' || {raw} END"
+
+
+def sih_age_expr(age_col: str, unit_col: str) -> str:
+    """SIH: 2=dias, 3=meses, 4=anos, 5=100+idade; ignorado não vira anos."""
+    raw = clean_str_expr(age_col)
+    age = f"CASE WHEN regexp_matches({raw}, '^[0-9]+$') THEN TRY_CAST({raw} AS DOUBLE) END"
+    unit_raw = clean_str_expr(unit_col)
+    unit = f"CASE WHEN regexp_matches({unit_raw}, '^[0-9]+$') THEN TRY_CAST({unit_raw} AS INTEGER) END"
+    converted = f"""CASE
+        WHEN {unit} = 2 THEN {age} / 365.25
+        WHEN {unit} = 3 THEN {age} / 12.0
+        WHEN {unit} = 4 THEN {age}
+        WHEN {unit} = 5 THEN 100 + {age}
+        ELSE NULL END"""
+    return f"CASE WHEN ({converted}) BETWEEN 0 AND 130 THEN ({converted}) ELSE NULL END"
+
+
+def sih_demography_expressions(columns: Sequence[str]) -> Dict[str, str]:
+    """Campos demográficos agregados; datas pessoais não são expostas como registros."""
+    expressions: Dict[str, str] = {}
+    age = sih_choose_column(columns, ["IDADE"])
+    unit = sih_choose_column(columns, ["COD_IDADE"])
+    if age and unit:
+        expressions["Idade registrada (IDADE/COD_IDADE)"] = sih_age_expr(age, unit)
+    sex = sih_choose_column(columns, ["SEXO"])
+    if sex:
+        expressions["Sexo"] = sih_code_label_expr(sex, {"1": "Masculino", "3": "Feminino"}, ["0", "9"])
+    race = sih_choose_column(columns, ["RACA_COR", "RACACOR"])
+    if race:
+        expressions["Raça/cor"] = sih_code_label_expr(race, {
+            "1": "Branca", "2": "Preta", "3": "Parda", "4": "Amarela", "5": "Indígena"
+        }, ["0", "99"])
+    education = sih_choose_column(columns, ["INSTRU"])
+    if education:
+        expressions["Escolaridade (INSTRU)"] = sih_code_label_expr(education, {
+            "1": "Analfabeto", "2": "1º grau", "3": "2º grau", "4": "3º grau"
+        }, ["0", "9"])
+    ethnicity = sih_choose_column(columns, ["ETNIA"])
+    if ethnicity:
+        raw = clean_str_expr(ethnicity)
+        ethnicity_sql = f"CASE WHEN {raw} IS NULL OR regexp_matches({raw}, '^0+$') THEN 'Sem etnia informada' ELSE 'Código de etnia: ' || {raw} END"
+        if race:
+            ethnicity_sql = f"CASE WHEN TRY_CAST({qident(race)} AS INTEGER) BETWEEN 1 AND 4 AND ({raw} IS NULL OR regexp_matches({raw}, '^0+$')) THEN 'Não aplicável (raça/cor não indígena)' ELSE {ethnicity_sql} END"
+        expressions["Etnia (códigos originais)"] = ethnicity_sql
+    birth = sih_choose_column(columns, ["NASC", "DT_NASC", "DTNASC"])
+    admission = sih_choose_column(columns, ["DT_INTER", "DT_INTERNA"])
+    if birth:
+        birth_date = date_expr(birth)
+        expressions["Ano de nascimento"] = f"CASE WHEN EXTRACT(YEAR FROM {birth_date}) BETWEEN 1900 AND 2099 THEN CAST(CAST(EXTRACT(YEAR FROM {birth_date}) AS INTEGER) AS VARCHAR) ELSE 'Nascimento ausente/inválido' END"
+        if admission:
+            difference = f"date_diff('day', {birth_date}, {date_expr(admission)}) / 365.25"
+            expressions["Idade calculada (NASC/DT_INTER, aproximada)"] = f"CASE WHEN ({difference}) BETWEEN 0 AND 130 THEN ({difference}) ELSE NULL END"
+    for title, candidates in [
+        ("Município de residência", ["MUNIC_RES"]),
+        ("Município do estabelecimento", ["MUNIC_MOV"]),
+        ("Nacionalidade (códigos originais)", ["NACIONAL"]),
+    ]:
+        col = sih_choose_column(columns, candidates)
+        if col:
+            raw = clean_str_expr(col)
+            expressions[title] = f"CASE WHEN {raw} IS NULL OR regexp_matches({raw}, '^0+$') THEN 'Sem informação' ELSE {raw} END"
+    return expressions
+
+
+def query_sih_categories(
+    table: LoadedTable, category_sql: str, where_sql: str = "", top_n: Optional[int] = None,
+) -> pd.DataFrame:
+    """Distribuição completa ou top + Outros: percentuais sempre sobre todo o recorte."""
+    if top_n is not None and top_n < 1:
+        raise ValueError("top_n deve ser positivo.")
+    category = "categoria" if top_n is None else f"CASE WHEN posicao <= {int(top_n)} THEN categoria ELSE 'Outras categorias' END"
+    return run_query(table, f"""
+        WITH counts AS (
+            SELECT COALESCE(CAST(({category_sql}) AS VARCHAR), 'Sem informação') AS categoria,
+                   COUNT(*) AS n FROM {table.ref_sql} {where_sql} GROUP BY 1
+        ), ranked AS (
+            SELECT *, row_number() OVER (ORDER BY n DESC, categoria) AS posicao FROM counts
+        )
+        SELECT {category} AS categoria, SUM(n)::BIGINT AS n,
+               SUM(SUM(n)) OVER ()::BIGINT AS denominador,
+               ROUND(100.0 * SUM(n) / NULLIF(SUM(SUM(n)) OVER (), 0), 2) AS pct
+        FROM ranked GROUP BY 1 ORDER BY n DESC, categoria
+    """)
+
+
+def query_sih_age_profile(
+    table: LoadedTable, age_sql: str, where_sql: str = "", sex_sql: Optional[str] = None,
+) -> pd.DataFrame:
+    """Faixas exclusivas, incluindo ausência; pirâmide usa apenas idade/sexo válidos."""
+    band = """CASE WHEN idade IS NULL OR idade < 0 OR idade > 130 THEN 'Idade ausente/inválida'
+        WHEN idade < 1 THEN '< 1 ano' WHEN idade < 5 THEN '1–4 anos'
+        ELSE CAST(CAST(FLOOR(idade / 5) * 5 AS INTEGER) AS VARCHAR) || '–' ||
+             CAST(CAST(FLOOR(idade / 5) * 5 + 4 AS INTEGER) AS VARCHAR) || ' anos' END"""
+    order = "CASE WHEN idade IS NULL OR idade < 0 OR idade > 130 THEN 999 WHEN idade < 1 THEN 0 WHEN idade < 5 THEN 1 ELSE FLOOR(idade / 5) * 5 END"
+    sex_select = f", {sex_sql} AS sexo" if sex_sql else ""
+    return run_query(table, f"""
+        WITH base AS (
+            SELECT {age_sql} AS idade {sex_select} FROM {table.ref_sql} {where_sql}
+        )
+        SELECT {band} AS faixa, {order} AS ordem {", sexo" if sex_sql else ""}, COUNT(*) AS n
+        FROM base {"WHERE idade BETWEEN 0 AND 130 AND sexo IN ('Masculino', 'Feminino')" if sex_sql else ""}
+        GROUP BY 1, 2 {", 3" if sex_sql else ""} ORDER BY 2 {", 3" if sex_sql else ""}
+    """)
+
+
+def render_sih_demography(table: LoadedTable, columns: Sequence[str], where_sql: str) -> None:
+    st.markdown("### Análise demográfica do SIH")
+    st.caption("Perfil dos registros de AIH/RD carregados, respeitando os filtros gerais. Não são pessoas únicas, nem automaticamente casos confirmados. Ausência e códigos não interpretados permanecem visíveis; percentuais de distribuições simples usam todo o recorte.")
+    expressions = sih_demography_expressions(columns)
+    ages = {key: value for key, value in expressions.items() if key.startswith("Idade ")}
+    choices = (["Faixa etária"] if ages else []) + (["Pirâmide etária por sexo"] if ages and "Sexo" in expressions else [])
+    choices += [key for key in expressions if key not in ages]
+    if not choices:
+        st.info("Não foram encontrados campos de perfil demográfico neste arquivo.")
+        return
+    selected = st.selectbox("Gráfico demográfico", choices, key="sih_demography_chart")
+    total = count_rows(table, where_sql)
+    if selected in {"Faixa etária", "Pirâmide etária por sexo"}:
+        reference = st.selectbox("Referência da idade", list(ages), key="sih_demography_age_reference")
+        age_sql = ages[reference]
+        st.caption("Idade registrada: COD_IDADE 2=dias, 3=meses, 4=anos, 5=100+IDADE; 0/unidade desconhecida e valores inválidos não viram anos. Conversão de dias usa 365,25 dias/ano. Faixas: <1, 1–4 e quinquenais; idades apenas em anos não têm resolução de meses.")
+        if "calculada" in reference:
+            st.caption("Opção calculada explicitamente a partir de nascimento e internação: diferença em dias/365,25 (aproximação). Não usa competência de processamento nem preenche a idade registrada.")
+        pyramid = selected == "Pirâmide etária por sexo"
+        frame = query_sih_age_profile(table, age_sql, where_sql, expressions["Sexo"] if pyramid else None)
+        if frame.empty:
+            st.info("Sem idade e sexo reconhecidos para a pirâmide no recorte atual.")
+            return
+        frame["denominador"] = int(frame.n.sum()) if pyramid else total
+        frame["pct"] = (100 * frame.n / frame.denominador.replace(0, np.nan)).round(2)
+        if pyramid:
+            st.caption(f"Pirâmide: {format_int_br(int(frame.n.sum()))} registros com idade válida e sexo masculino/feminino; {format_int_br(total - int(frame.n.sum()))} excluídos por idade/sexo ausente, inválido ou não interpretado. Percentuais usam os registros incluídos na pirâmide; sinal negativo é apenas visual.")
+            visible = frame.assign(valor=np.where(frame.sexo.eq("Masculino"), -frame.n, frame.n))
+            fig = px.bar(visible, x="valor", y="faixa", color="sexo", orientation="h",
+                         hover_data=["n", "pct", "denominador"], barmode="relative",
+                         category_orders={"faixa": frame.sort_values("ordem").faixa.drop_duplicates().tolist()},
+                         labels={"valor": "Registros de AIH/RD (sinal apenas visual)", "faixa": "Faixa etária", "sexo": "Sexo"},
+                         title="Pirâmide etária por sexo — SIH")
+        else:
+            fig = px.bar(frame, x="faixa", y="n", hover_data=["pct", "denominador"],
+                         labels={"faixa": "Faixa etária", "n": "Registros de AIH/RD"},
+                         title="Distribuição por faixa etária — SIH")
+    else:
+        if selected == "Raça/cor":
+            st.caption("Códigos SIH: 01=branca, 02=preta, 03=parda, 04=amarela, 05=indígena, 99=sem informação. Não utiliza a tabela de raça/cor do SIM/SINAN.")
+        if selected == "Escolaridade (INSTRU)":
+            st.caption("Domínio histórico SIH: 1=analfabeto, 2=1º grau, 3=2º grau, 4=3º grau; 0/9 não são escolaridade conhecida. Não equivale aos domínios do SINAN/SIM e não presume preenchimento fora do contexto de coleta original.")
+        if selected.startswith("Etnia"):
+            st.caption("Etnia é campo condicionado ao contexto indígena. Códigos originais são preservados, sem inferir nomes de povos. Zeros de raça/cor conhecida não indígena são classificados como não aplicáveis.")
+        frame = query_sih_categories(table, expressions[selected], where_sql)
+        top_n = st.slider("Categorias demográficas exibidas (restantes em Outras categorias)", 5, 60, 20, key="sih_demography_top")
+        visible = query_sih_categories(table, expressions[selected], where_sql, int(top_n)) if len(frame) > top_n else frame
+        fig = px.bar(visible.iloc[::-1], x="n", y="categoria", orientation="h",
+                     hover_data=["pct", "denominador"],
+                     labels={"categoria": selected, "n": "Registros de AIH/RD"},
+                     title=f"{selected} — SIH")
+        fig.update_layout(height=cid10_bar_chart_height(len(visible)))
+    render_plotly_chart(fig, f"SIH: demografia — {selected}")
+    copyable_dataframe(frame, width="stretch", hide_index=True)
+    download_button(frame, f"sih_demografia_{safe_filename(selected)}.csv")
+    with st.expander("Campos demográficos e regras de interpretação", expanded=False):
+        st.caption("Campos reconhecidos: " + ", ".join(expressions))
+        st.markdown("[Raça/cor — Portaria SAS 719/2007](https://bvsms.saude.gov.br/bvs/saudelegis/sas/2007/prt0719_28_12_2007.html); [convenções de idade/instrução SIH — implementação microdatasus](https://github.com/rfsaldanha/microdatasus/blob/master/R/process_sih.R).")
+
+
+def render_sih_facilities(table: LoadedTable, columns: Sequence[str], where_sql: str) -> None:
+    st.markdown("### Estabelecimentos e mantenedoras")
+    candidates = [("CGC do hospital", ["CGC_HOSP", "CGC_HOSPITAL"]),
+                  ("CNES do estabelecimento", ["CNES"]),
+                  ("CGC da mantenedora (CGC_MANT)", ["CGC_MANT"]),
+                  ("CNPJ da mantenedora (CNPJ_MANT)", ["CNPJ_MANT"])]
+    fields = {title: col for title, names in candidates if (col := sih_choose_column(columns, names))}
+    if not fields:
+        st.info("Não há campos de CGC, CNES ou mantenedora reconhecidos no arquivo.")
+        return
+    selected = st.selectbox("Identificação analisada", list(fields), key="sih_facility_field")
+    col = fields[selected]
+    st.caption("Identificadores são texto, preservando zeros à esquerda. CNES, CGC_HOSP, CGC_MANT e CNPJ_MANT são analisados separadamente, sem unir registros nem atribuir nomes automaticamente; mantenedora e estabelecimento não são a mesma unidade. Zeros e ausência são exibidos como sem informação.")
+    raw = clean_str_expr(col)
+    expression = f"CASE WHEN {raw} IS NULL OR regexp_matches({raw}, '^0+$') THEN 'Sem {col} informado' ELSE {raw} END"
+    complete = query_sih_categories(table, expression, where_sql)
+    top_n = st.slider("Identificadores exibidos (restantes em Outras categorias)", 5, 50, 20, key="sih_facility_top")
+    visible = query_sih_categories(table, expression, where_sql, int(top_n)) if len(complete) > top_n else complete
+    fig = px.bar(visible.iloc[::-1], x="n", y="categoria", orientation="h",
+                 hover_data=["pct", "denominador"], labels={"categoria": col, "n": "Registros de AIH/RD"},
+                 title=f"Registros por {selected}")
+    fig.update_layout(height=cid10_bar_chart_height(len(visible)))
+    render_plotly_chart(fig, f"SIH: registros por {col}")
+    copyable_dataframe(complete, width="stretch", hide_index=True)
+    download_button(complete, f"sih_{safe_filename(col)}.csv")
+
+
 def render_sih_proposed_fields() -> None:
     st.markdown("### Outros campos propostos")
-    st.caption("Propostas numeradas para avaliação; não há gráficos nem indicadores implementados para estes campos.")
+    st.caption("Sugestões numeradas ainda não implementadas. Diagnósticos, estabelecimentos/mantenedoras e perfil demográfico já possuem análises próprias.")
     for number, (fields, purpose) in enumerate(SIH_PROPOSED_FIELDS, 1):
         st.markdown(f"{number}. **{fields}**: {purpose}")
 
@@ -19620,6 +19899,9 @@ def render_sih_filters(
         definitions = {"Todas as linhas carregadas": []}
         if all_cids:
             definitions["Meningite/encefalite em qualquer campo CID"] = all_cids
+            diagnostic_fields = roles.get("principal", []) + roles.get("secundario", [])
+            if diagnostic_fields:
+                definitions["Meningite/encefalite no principal ou secundário (união)"] = diagnostic_fields
             for role, fields in roles.items():
                 definitions[f"Meningite/encefalite - {SIH_CID_ROLE_LABELS[role]}"] = fields
         choice = st.selectbox("Recorte de diagnósticos", list(definitions), key="sih_definition")
@@ -19647,6 +19929,7 @@ def render_sih_filters(
 
 
 def render_sih_cids(table: LoadedTable, roles: Dict[str, List[str]], where_sql: str, date_sql: Optional[str]) -> None:
+    render_sih_diagnosis_union(table, roles, where_sql, date_sql)
     st.markdown("### Diagnósticos e CID por campo")
     all_fields = [col for fields in roles.values() for col in fields]
     if not all_fields:
@@ -19712,7 +19995,7 @@ def render_sih_cids(table: LoadedTable, roles: Dict[str, List[str]], where_sql: 
 
 
 def render_sih_source(table: LoadedTable) -> None:
-    """Rota própria: evita reutilizar indicadores demográficos/SINAN/CIHA fora do escopo."""
+    """Rota própria SIH, sem reutilizar dicionários SINAN/SIM/CIHA."""
     try:
         columns = schema_df(table)["coluna"].astype(str).tolist()
     except Exception as exc:
@@ -19726,8 +20009,9 @@ def render_sih_source(table: LoadedTable) -> None:
             return
     roles = detect_sih_cid_fields(columns)
     hospital = choose_candidate(columns, ["CGC_HOSP", "CGC_HOSPITAL"])
-    if not roles and not hospital:
-        st.error("A tabela não contém campos CID nem CGC_HOSP reconhecidos para SIH/RD. Selecione a tabela de dados.")
+    identifiers = [choose_candidate(columns, [name]) for name in ["CGC_HOSP", "CGC_HOSPITAL", "CNES", "CGC_MANT", "CNPJ_MANT"]]
+    if not roles and not any(identifiers) and not sih_demography_expressions(columns):
+        st.error("A tabela não contém campos CID, estabelecimentos ou demográficos reconhecidos para SIH/RD. Selecione a tabela de dados.")
         return
     st.success(f"Dados SIH carregados: {table.label}")
     st.caption("Unidade: linha de AIH/RD, não pessoa nem internação única. Não há conversão etiológica, imputação ou soma com SINAN/SIM/CIHA. CID_MORTE descreve o código do SIH e não substitui a causa básica do SIM.")
@@ -19735,7 +20019,7 @@ def render_sih_source(table: LoadedTable) -> None:
     where_sql, date_sql = render_sih_filters(table, roles, hospital, sih_reference_dates(columns))
     total = count_rows(table, where_sql)
     st.metric("Registros de AIH/RD no recorte", format_int_br(total))
-    sections = ["Diagnósticos e CID", "CGC do hospital", "Outros campos propostos"]
+    sections = ["Diagnósticos e CID", "Estabelecimentos e mantenedoras", "Análise demográfica", "Outros campos propostos"]
     section = st.radio("Área de análise do SIH", sections, horizontal=True, key="sih_analysis_section")
     if section == "Outros campos propostos":
         render_sih_proposed_fields()
@@ -19745,23 +20029,15 @@ def render_sih_source(table: LoadedTable) -> None:
         return
     if section == "Diagnósticos e CID":
         render_sih_cids(table, roles, where_sql, date_sql)
-    elif section == "CGC do hospital":
-        if not hospital:
-            st.info("CGC_HOSP/CGC_HOSPITAL não está presente neste layout.")
-            return
-        st.caption("CGC/CNPJ é exibido como texto, com zeros à esquerda. Um CGC não equivale necessariamente a uma unidade CNES; não há atribuição automática de nomes.")
-        top_n = st.slider("CGCs exibidos individualmente (demais em Outros CGCs)", 5, 50, 20, key="sih_hospital_top")
-        frame = query_sih_hospitals(table, hospital, where_sql, int(top_n))
-        fig = px.bar(frame.iloc[::-1], x="n", y="cgc_hospital", orientation="h",
-                     hover_data=["pct_registros", "n_registros_denominador"],
-                     labels={"n": "Registros de AIH/RD", "cgc_hospital": hospital},
-                     title="Registros por CGC do hospital")
-        fig.update_layout(height=cid10_bar_chart_height(len(frame)))
-        render_plotly_chart(fig, "SIH: registros por CGC_HOSP")
-        copyable_dataframe(frame, width="stretch", hide_index=True)
-        download_button(frame, "sih_cgc_hospital.csv")
+    elif section == "Estabelecimentos e mantenedoras":
+        render_sih_facilities(table, columns, where_sql)
+    elif section == "Análise demográfica":
+        render_sih_demography(table, columns, where_sql)
+        return
     with st.expander("Prévia dos campos analisados (valores originais)", expanded=False):
-        requested = [col for fields in roles.values() for col in fields] + ([hospital] if hospital else [])
+        requested = list(dict.fromkeys([col for fields in roles.values() for col in fields] + [col for col in identifiers if col]))
+        if not requested:
+            return
         preview = run_query(table, f"SELECT {', '.join(qident(col) for col in requested)} FROM {table.ref_sql} {where_sql} LIMIT 200")
         copyable_dataframe(preview, width="stretch", hide_index=True)
         download_button(preview, "sih_campos_analisados_previa.csv")
@@ -20012,7 +20288,10 @@ def render_methodology():
     st.markdown("### SIH/RD no observatório")
     st.markdown(
         "A fonte **SIH** analisa os códigos originais dos diagnósticos principal e secundários, "
-        "CID_MORTE, CID_ASSO, CID_NOTIF e outros campos CID detectados, além de CGC_HOSP. "
+        "CID_MORTE, CID_ASSO, CID_NOTIF e outros campos CID detectados. O total unificado principal/ secundário "
+        "conta cada linha uma única vez, independentemente do número de CIDs nesses campos. "
+        "Há análises de CGC_HOSP, CNES, CGC_MANT/CNPJ_MANT e uma seção própria de demografia "
+        "(idade com unidade SIH, sexo, raça/cor, instrução, etnia, nascimento e municípios). "
         "A unidade é a linha de AIH aprovada; continuidade, reapresentação e várias AIHs por pessoa "
         "exigem uma definição adicional antes de estimar internações ou pessoas únicas. "
         "Os recortes produzidos pelos scripts R se sobrepõem e não devem ser somados. "

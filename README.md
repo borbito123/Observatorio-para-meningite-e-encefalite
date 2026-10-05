@@ -2,15 +2,27 @@ Os bancos de dados do DATASUS que são trabalhados neste programa:
 - **SINAN**: notificações/casos sobre determinados agravos (no caso, meningite)
 - **SIM**: óbitos registrados
 - **CIHA**: internações/atendimentos hospitalares e/ou ambulatorais.
-- **SIH/RD**: registros de AIH aprovada, com análise dos campos CID e do CGC do hospital.
+- **SIH/RD**: registros de AIH aprovada, com análise dos campos CID, estabelecimentos/mantenedoras e perfil demográfico.
 
 ## Integração SIH/RD (05/10/2026)
+
+**Novo gráfico — total unificado principal ou secundário:** em **SIH → Diagnósticos e CID**, a série anual/mensal reúne as linhas com qualquer CID do recorte meningite/encefalite em `DIAG_PRINC`, `DIAG_SECUN` ou `DIAGSEC1`–`DIAGSEC9` (incluindo aliases reconhecidos). Cada linha entra **uma única vez**, mesmo com vários CIDs distintos ou repetidos nesses campos. Não há soma das frequências por CID nem inclusão de `CID_MORTE`, `CID_ASSO` ou `CID_NOTIF`. Os filtros gerais e a referência temporal escolhida se aplicam ao novo gráfico.
+
+O CSV permite conferir: **apenas principal + apenas secundário + ambos = total**. Registros elegíveis sem data reconhecida permanecem no total/CSV quando não há filtro de ano, mas não no eixo temporal; lacunas não são preenchidas. Sem campos de data, mostra-se uma barra com o total. A unidade continua sendo a linha de AIH/RD, não pessoa ou internação única; a união não deduplica arquivos sobrepostos nem AIHs por `N_AIH`. Para incluir diagnósticos exclusivamente secundários, carregue um banco com esse recorte ou qualquer CID: o banco extraído somente por principal não recupera esses registros.
 
 Acesse **SIH** no menu lateral, escolha **Upload DuckDB** e envie um banco produzido pelos scripts R de meningite. A tabela de dados é priorizada e `metadados_execucao` não é oferecida como tabela clínica. Também são aceitos Parquet, CSV e DBF. DBC deve ser previamente convertido pelo pipeline R.
 
 São analisados `DIAG_PRINC`, `DIAG_SECUN`, `DIAGSEC1` a `DIAGSEC9`, `CID_MORTE`, `CID_ASSO`, `CID_NOTIF` e outros campos de códigos CID detectados. Há distribuição por campo, presença dos CIDs de meningite/encefalite, seleção conjunta dos secundários e dos campos CID, série temporal opcional por ano/mês e distribuição por `CGC_HOSP`/`CGC_HOSPITAL`. Os códigos originais são preservados; CIDs fora do recorte também aparecem quando a opção de restringir a meningite/encefalite está desligada.
 
-Os percentuais por CID usam todas as linhas filtradas. Cada CID distinto conta uma vez por linha dentro da seleção, mesmo que apareça repetido em vários campos. Uma linha com vários CIDs pode participar de várias categorias. O gráfico de CGC agrupa os códigos restantes em "Outros CGCs" e mantém o denominador integral e os zeros à esquerda.
+Os percentuais por CID usam todas as linhas filtradas. Cada CID distinto conta uma vez por linha dentro da seleção, mesmo que apareça repetido em vários campos. Uma linha com vários CIDs pode participar de várias categorias. Isso não se aplica ao novo total unificado, em que cada linha conta apenas uma vez.
+
+**Estabelecimentos e mantenedoras:** seleção independente de `CGC_HOSP`/`CGC_HOSPITAL`, `CNES`, `CGC_MANT` e `CNPJ_MANT`, com gráficos, tabela completa e CSV. Identificadores mantêm zeros à esquerda, sem junções nem nomes inferidos. Top + "Outras categorias" preserva o denominador integral. Os dois campos de mantenedora não são coalescidos nem somados.
+
+**Análise demográfica:** faixa etária, pirâmide por sexo, sexo, raça/cor, escolaridade (`INSTRU`), etnia, ano de nascimento, município de residência/estabelecimento e nacionalidade, conforme os campos presentes. Todos ficam na seção demográfica, não na análise de CID. O filtro geral inclui agora a união principal/secundário, permitindo estudar o perfil dessa mesma população.
+
+Idade registrada usa `IDADE`/`COD_IDADE`: 2=dias, 3=meses, 4=anos, 5=100+idade; código 0, unidade desconhecida e idade inválida não são convertidos em anos. Conversão de dias usa 365,25 dias/ano. A distribuição inclui idade ausente/inválida, enquanto a pirâmide usa apenas idade válida e sexo reconhecido (1=masculino, 3=feminino), explicitando os excluídos. Quando `NASC` e `DT_INTER` existem, uma opção separada permite calcular idade aproximada por diferença de datas/365,25, sem substituir a idade registrada. Não há exportação de datas de nascimento individuais nessa análise.
+
+Raça/cor usa o domínio específico do SIH: 01=branca, 02=preta, 03=parda, 04=amarela, 05=indígena, 99=sem informação, conforme a [Portaria SAS 719/2007](https://bvsms.saude.gov.br/bvs/saudelegis/sas/2007/prt0719_28_12_2007.html). Idade e instrução seguem as convenções históricas verificadas na [implementação do microdatasus](https://github.com/rfsaldanha/microdatasus/blob/master/R/process_sih.R), sem reutilizar os dicionários de SIM/SINAN. Escolaridade 0/9 é sem informação, não ausência de escolarização. Etnia/nacionalidade/municípios preservam códigos sem inferir descrições; etnia ausente de raça conhecida não indígena é não aplicável. Distribuições simples mantêm ausência/códigos não interpretados e percentuais sobre todas as linhas filtradas.
 
 A unidade contada é a **linha de AIH/RD**, não pessoa nem internação única. Os filtros R se sobrepõem: não mescle recortes de diagnóstico principal, causa da morte, associado e qualquer CID como conjuntos independentes. `CRITERIO_CID` mostra a seleção aplicada antes do upload. Um filtro na interface restringe esse conjunto, mas não recupera linhas excluídas na origem. `CID_MORTE` não substitui a causa básica qualificada pelo SIM. Zeros, campos vazios e conteúdos sem formato CID-10 são discriminados; formato reconhecido não equivale a validação no dicionário.
 
@@ -21,19 +33,19 @@ Os dados do SIH não são publicados automaticamente na release nem somados à c
 ### Outros campos propostos (sem implementação de gráficos)
 
 1. `N_AIH, IDENT, SEQ_AIH5, SEQUENCIA, REMESSA`: AIH inicial, continuidade e reapresentação; definição de internações únicas.
-2. `CNES, CGC_MANT, CNPJ_MANT`: identificação de estabelecimentos e mantenedoras.
-3. `MORTE, COBRANCA`: desfecho e mortalidade hospitalar.
-4. `DIAS_PERM, QT_DIARIAS`: permanência e utilização de leitos.
-5. `UTI_TOTAL, UTI_MES_TO, UTI_INT_TO, MARCA_UTI, MARCA_UCI`: terapia intensiva/intermediária.
-6. `PROC_REA, PROC_SOLIC, ESPEC, COMPLEX`: procedimentos, especialidade e complexidade.
-7. `VAL_TOT, VAL_SH, VAL_SP, VAL_UTI, VAL_UCI, FINANC, FAEC_TP`: valores aprovados e financiamento.
-8. `IDADE, COD_IDADE, NASC, SEXO, RACA_COR, ETNIA, INSTRU`: perfil demográfico.
-9. `MUNIC_RES, MUNIC_MOV, UF_ZI, UF_ARQUIVO`: residência, atendimento e fluxos territoriais.
-10. `CAR_INT, NATUREZA, NAT_JUR, GESTAO, INFEHOSP, TPDISEC1-TPDISEC9`: contexto assistencial e administrativo.
+2. `MORTE, COBRANCA`: desfecho e mortalidade hospitalar.
+3. `DIAS_PERM, QT_DIARIAS`: permanência e utilização de leitos.
+4. `UTI_TOTAL, UTI_MES_TO, UTI_INT_TO, MARCA_UTI, MARCA_UCI`: terapia intensiva/intermediária.
+5. `PROC_REA, PROC_SOLIC, ESPEC, COMPLEX`: procedimentos, especialidade e complexidade.
+6. `VAL_TOT, VAL_SH, VAL_SP, VAL_UTI, VAL_UCI, FINANC, FAEC_TP`: valores aprovados e financiamento.
+7. `UF_ZI, UF_ARQUIVO` e cruzamentos entre `MUNIC_RES/MUNIC_MOV`: processamento e fluxos territoriais.
+8. `CAR_INT, NATUREZA, NAT_JUR, GESTAO, INFEHOSP, TPDISEC1-TPDISEC9`: contexto assistencial e administrativo.
 
-Essas propostas também aparecem na seção **Outros campos propostos** do app. Datas/competências já servem somente como referência e filtros para as análises CID autorizadas.
+Essas propostas também aparecem na seção **Outros campos propostos** do app. CNES/mantenedoras e campos demográficos deixaram de ser apenas propostas após autorização para implementá-los. Datas/competências são referências/filtros gerais; nascimento é usado somente em agregações demográficas.
 
-Validação: `python -m unittest discover -s tests -v`. Os testes incluem seleção da tabela clínica no upload, layouts antigos/recentes, banco vazio, denominadores, múltiplas menções CID, AIHs repetidas e CGC com zeros à esquerda. Foram também examinados seis bancos locais dos critérios R e amostras dos DBCs RJ de janeiro de 1998, 2008, 2016 e julho de 2026. As amostras confirmam mudanças no preenchimento de DIAG_SECUN/CID_ASSO/CID_MORTE e DIAGSEC1-DIAGSEC9; um campo zerado em períodos recentes não comprova ausência de doença.
+Validação: `python -m unittest discover -s tests -v` — 21 testes, incluindo união sem inflação por vários CIDs, exclusão de menções somente em CID_MORTE/ASSO/NOTIF, datas ausentes, filtros, domínios demográficos SIH, centena de anos, idade ignorada, identificação exata dos campos, zeros à esquerda, ausência de datas e navegação das novas áreas. Os testes passaram nas versões local e GitHub. A contagem e as distribuições foram reconciliadas em sete bancos locais, sem modificar seus arquivos. No banco principal/secundário, 21.164 apenas no principal + 3.069 apenas nos secundários + 351 em ambos = 24.584 registros; os 351 em ambos são contados uma vez. A interface foi testada com esse banco real em todas as opções demográficas e de identificação.
+
+Na integração inicial também foram examinadas amostras dos DBCs RJ de janeiro de 1998, 2008, 2016 e julho de 2026. Elas confirmam mudanças no preenchimento de DIAG_SECUN/CID_ASSO/CID_MORTE e DIAGSEC1-DIAGSEC9; um campo zerado em períodos recentes não comprova ausência de doença.
 
 Este aplicativo cumpre duas funções:
 
