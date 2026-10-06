@@ -69,13 +69,13 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-10-05-v100-SIH-gap-comparativo"
+APP_VERSION = "2026-10-05-v100-SIH-any-field-gap-totals-colors"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos
 # =============================================================================
 
-DEFAULT_MAX_PARQUET_FILES_PER_LOAD = 20
+DEFAULT_MAX_PARQUET_FILES_PER_LOAD = 40
 DEFAULT_DISPLAY_ROW_LIMIT = 1000
 DEFAULT_COPY_ROW_LIMIT = 300
 DEFAULT_DOWNLOAD_ROW_LIMIT = 50000
@@ -111,6 +111,23 @@ APP_COLOR_SEQUENCE = (
     "#BCBD22",  # oliva
     "#E377C2",  # rosa
     "#000000",  # preto
+    "#AEC7E8",  # azul-claro
+    "#FFBB78",  # laranja-claro
+    "#98DF8A",  # verde-claro
+    "#C5B0D5",  # roxo-claro
+    "#9EDAE5",  # ciano-claro
+    "#C49C94",  # marrom-claro
+    "#DBDB8D",  # oliva-claro
+    "#F7B6D2",  # rosa-claro
+    "#393B79",  # índigo
+    "#637939",  # oliva-escuro
+    "#8C6D31",  # dourado-escuro
+    "#843C39",  # castanho-avermelhado
+    "#7B4173",  # ameixa
+    "#3182BD",  # azul médio
+    "#31A354",  # verde médio
+    "#756BB1",  # violeta médio
+    "#636363",  # grafite
 )
 DEATH_COLOR_TERMS = (
     "obit",
@@ -642,10 +659,13 @@ def _plot_explanation(fig: go.Figure, calc_title: Optional[str]) -> str:
     return "O gráfico resume os registros que atendem aos filtros atuais; use os rótulos, o cursor e o quadro de cálculo para conferir valores e denominadores."
 
 
-def render_plotly_chart(fig: go.Figure, calc_title: Optional[str] = None) -> None:
+def render_plotly_chart(
+    fig: go.Figure, calc_title: Optional[str] = None, como_ler: Optional[str] = None,
+) -> None:
     """Renderiza Plotly, uma explicação breve e o expander auditável de cálculo."""
     st.plotly_chart(style_plotly_figure(fig), width="stretch", config=PLOTLY_CONFIG)
-    st.caption(f"**Como ler:** {_plot_explanation(fig, calc_title)}")
+    explanation = como_ler or _plot_explanation(fig, calc_title)
+    st.caption(f"**Como ler:** {explanation}")
     _render_calc_expander(calc_title)
 
 
@@ -789,7 +809,7 @@ def render_performance_controls() -> None:
 # =============================================================================
 
 GITHUB_RELEASE_OWNER = "borbito123"
-GITHUB_RELEASE_REPO = "Teste---Dados-Epidemiol-gicos-para-meningite-SINAN-CIHA-SIM---Rio-de-Janeiro"
+GITHUB_RELEASE_REPO = "Observatorio-para-meningite-e-encefalite"
 GITHUB_RELEASE_TAG = "Release1"
 GITHUB_HOSTED_PARQUETS_LABEL = "Bancos hospedados no github (Parquets)"
 GITHUB_RELEASE_PAGE_URL = (
@@ -809,7 +829,8 @@ GITHUB_RELEASE_SOURCE_PREFIX = {
     "CIHA": "CIHA_RIO_ESTADO_",
 }
 GITHUB_RELEASE_FALLBACK_PARQUETS = (
-    [f"CIHA_RIO_ESTADO_{year}.parquet" for year in range(2011, 2026)]
+    [f"SIH_RD_MENINGITE_qualquer_campo_{year}.parquet" for year in range(1998, 2027)]
+    + [f"CIHA_RIO_ESTADO_{year}.parquet" for year in range(2011, 2026)]
     + [f"SIM_DO_RIO_ESTADO_{year}.parquet" for year in range(2007, 2025)]
     + [f"SINAN_MENINGITE_RIO_ESTADO_{year}.parquet" for year in range(2007, 2026)]
 )
@@ -3847,7 +3868,7 @@ def list_github_release_parquets() -> List[Dict[str, object]]:
     if not assets:
         assets = [_normalise_github_asset({"name": name}) for name in GITHUB_RELEASE_FALLBACK_PARQUETS]
 
-    source_order = {"SINAN": 0, "SIM": 1, "CIHA": 2, "OUTROS": 9}
+    source_order = {"SINAN": 0, "SIM": 1, "CIHA": 2, "SIH": 3, "OUTROS": 9}
     return sorted(
         assets,
         key=lambda asset: (
@@ -20333,9 +20354,35 @@ def comparison_gap_frames(
     return counts, pd.DataFrame(gap_rows), omitted_notes
 
 
+def comparison_series_color_map(labels: Sequence[object]) -> Dict[str, str]:
+    """Atribui cores estáveis e distintas às séries, inclusive nos gráficos de óbitos."""
+    used: set = set()
+    result: Dict[str, str] = {}
+    preferred = (
+        ("ciha + sih", "#E69F00"),
+        ("sinan", "#0072B2"),
+        ("sim", "#D55E00"),
+        ("ciha", "#009E73"),
+        ("sih", "#CC79A7"),
+    )
+    for raw_label in labels:
+        label = str(raw_label)
+        normalized = _norm_ui_text(label)
+        if normalized.startswith("sinan") and "confirmados" in normalized:
+            color = "#56B4E9"
+        else:
+            color = next((value for prefix, value in preferred if normalized.startswith(prefix)), "")
+        if not color or color in used:
+            color = next((candidate for candidate in APP_COLOR_SEQUENCE if candidate not in used), "#4D4D4D")
+        result[label] = color
+        used.add(color)
+    return result
+
+
 def render_gap_pair(
     title: str, specs: Sequence[Tuple[Dict[str, object], str, str]],
     frequency: str, common_contexts: Sequence[Dict[str, object]], file_stub: str,
+    combined_totals: Optional[Sequence[Tuple[str, Sequence[str]]]] = None,
 ) -> None:
     if len(specs) < 2:
         st.info("Carregue as bases necessárias para esta comparação.")
@@ -20345,19 +20392,71 @@ def render_gap_pair(
         st.info("As bases não têm um intervalo temporal comum com datas reconhecidas.")
         return
     st.markdown(f"##### {title}")
+    series_labels = [str(column) for column in counts.columns if column != "periodo"]
+    period_fmt = "%Y-%m" if frequency == "month" else "%Y"
+    period_start = pd.to_datetime(counts["periodo"].min()).strftime(period_fmt)
+    period_end = pd.to_datetime(counts["periodo"].max()).strftime(period_fmt)
+    period_range = f"{period_start} a {period_end}"
+    totals = {label: int(pd.to_numeric(counts[label], errors="coerce").fillna(0).sum()) for label in series_labels}
+    count_summary = "; ".join(f"{label}: {format_int_br(value)}" for label, value in totals.items())
+    common_note = f"Somatórios no intervalo comum datado ({period_range}): {count_summary}."
+
+    # Séries de fontes diferentes recebem cores distintas mesmo quando todas medem óbitos.
     long_counts = counts.melt("periodo", var_name="serie", value_name="obitos")
+    count_colors = comparison_series_color_map(series_labels)
     fig = px.line(long_counts, x="periodo", y="obitos", color="serie", markers=True,
+                  color_discrete_map=count_colors,
                   title=f"Óbitos por período — {title}",
                   labels={"periodo": "Período comum", "obitos": "Registros de óbito", "serie": "Base e definição"})
     fig.update_yaxes(rangemode="tozero")
-    render_plotly_chart(fig, calc_title=f"Comparação de óbitos — {title}")
+    fig = disable_death_red(preserve_trace_colors(fig))
+    render_plotly_chart(
+        fig, calc_title=f"Comparação de óbitos — {title}",
+        como_ler=f"Cada linha representa a contagem da base e do critério indicados na legenda. {common_note} As unidades de observação diferem entre sistemas e não há pareamento individual.",
+    )
+
+    # Mostra diretamente os totais que resumem as séries do intervalo compartilhado.
+    total_rows = [{"serie": label, "total": value} for label, value in totals.items()]
+    for combined_label, member_labels in (combined_totals or []):
+        members = [str(label) for label in member_labels]
+        if members and all(label in totals for label in members):
+            total_rows.append({"serie": combined_label, "total": sum(totals[label] for label in members)})
+    total_frame = pd.DataFrame(total_rows)
+    if not total_frame.empty:
+        total_frame["rotulo"] = total_frame["total"].map(format_int_br)
+        total_colors = comparison_series_color_map(total_frame["serie"].tolist())
+        fig_total = px.bar(
+            total_frame, x="total", y="serie", color="serie", orientation="h", text="rotulo",
+            color_discrete_map=total_colors, title=f"Totais no intervalo comum — {title}",
+            labels={"total": "Registros de óbito", "serie": "Base e definição"},
+            hover_data={"total": True, "rotulo": False, "serie": True},
+        )
+        fig_total.update_traces(textposition="outside", cliponaxis=False)
+        fig_total.update_layout(height=max(340, 58 * len(total_frame) + 150), showlegend=False)
+        combined_note = ""
+        if combined_totals:
+            combined_note = " O total CIHA + SIH é uma soma aritmética de registros dos dois sistemas, sem linkage nem deduplicação; pode haver sobreposição e não representa pessoas únicas."
+        fig_total = disable_death_red(preserve_trace_colors(fig_total))
+        render_plotly_chart(
+            fig_total, calc_title=f"Totais acumulados — {title}",
+            como_ler=f"Cada barra soma os registros com data válida nos períodos comuns ({period_range}); os valores exatos estão sobre as barras. Somatórios: "
+                     + "; ".join(f"{row['serie']}: {format_int_br(row['total'])}" for row in total_rows) + "."
+                     + combined_note,
+        )
+
     if not gaps.empty:
+        gap_labels = gaps["comparador"].drop_duplicates().astype(str).tolist()
+        gap_colors = comparison_series_color_map(gap_labels)
         fig_gap = px.bar(gaps, x="periodo", y="gap_comparador_menos_referencia", color="comparador",
-                         barmode="group", title=f"Gap de contagens — {title}",
+                         color_discrete_map=gap_colors, barmode="group", title=f"Gap de contagens — {title}",
                          labels={"periodo": "Período comum", "gap_comparador_menos_referencia": "Comparador − SINAN", "comparador": "Base comparadora"},
                          hover_data=["n_referencia", "n_comparador", "gap_pct_sobre_referencia"])
         fig_gap.add_hline(y=0, line_color="#555", line_width=1)
-        render_plotly_chart(fig_gap, calc_title=f"Gap de contagens — {title}")
+        fig_gap = disable_death_red(preserve_trace_colors(fig_gap))
+        render_plotly_chart(
+            fig_gap, calc_title=f"Gap de contagens — {title}",
+            como_ler=f"Cada barra representa comparador menos SINAN por período; valores positivos indicam contagem maior no comparador e valores negativos, menor. {common_note}",
+        )
         copyable_dataframe(gaps, width="stretch", hide_index=True)
         download_button(gaps, f"{file_stub}_gap.csv")
     copyable_dataframe(counts, width="stretch", hide_index=True)
@@ -20368,7 +20467,7 @@ def render_gap_pair(
 
 def render_gap_comparison(available: Sequence[Dict[str, object]], chosen: Sequence[str]) -> None:
     st.markdown("#### Comparação de gap")
-    st.caption("O gap é a diferença de contagens por período (comparador menos SINAN). É uma divergência agregada entre bases, sem pareamento de pessoas; unidades, critérios e datas de referência diferem. As linhas usam somente anos ou meses completos dentro do intervalo temporal comum; bases assistenciais não são somadas entre si.")
+    st.caption("O gap é a diferença de contagens por período (comparador menos SINAN). É uma divergência agregada entre bases, sem pareamento de pessoas; unidades, critérios e datas de referência diferem. As linhas usam somente anos ou meses completos dentro do intervalo temporal comum e mantêm CIHA e SIH separados. O gráfico de totais também mostra a soma aritmética CIHA + SIH, sem linkage ou deduplicação entre sistemas; ela pode conter sobreposição e não representa pessoas únicas.")
     frequency_label = st.selectbox("Período das comparações de gap", ["Ano", "Mês"], key="comp_gap_freq")
     frequency = {"Ano": "year", "Mês": "month"}[frequency_label]
     by_source = {item["source"]: item for item in available if item["source"] in chosen}
@@ -20445,7 +20544,11 @@ def render_gap_comparison(available: Sequence[Dict[str, object]], chosen: Sequen
         else:
             st.warning("O SIH precisa ter a coluna MORTE para contar óbitos hospitalares.")
     if sinan and ciha and sih and len(assist_specs) == 3:
-        render_gap_pair("SINAN × CIHA e SIH", assist_specs, frequency, [sinan, ciha, sih], "gap_sinan_ciha_sih")
+        assist_comparators = [label for _, label, _ in assist_specs if label.startswith(("CIHA", "SIH"))]
+        render_gap_pair(
+            "SINAN × CIHA e SIH", assist_specs, frequency, [sinan, ciha, sih], "gap_sinan_ciha_sih",
+            combined_totals=[("CIHA + SIH (soma aritmética)", assist_comparators)],
+        )
     else:
         st.info("Para este gráfico, carregue SINAN, CIHA e SIH e selecione pelo menos um campo CID válido em cada base.")
 

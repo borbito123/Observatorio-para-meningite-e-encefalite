@@ -28,13 +28,13 @@ A unidade contada é a **linha de AIH/RD**, não pessoa nem internação única.
 
 **Competência de processamento** é a referência temporal padrão quando ano e mês estão disponíveis. Pode-se optar por data de internação ou saída; estas podem pertencer a outro período. Os totais mantêm registros sem data quando nenhum filtro de ano é aplicado. A série temporal usa somente datas reconhecidas e não transforma lacunas em zero.
 
-Os dados do SIH não são publicados automaticamente na release. A área de comparação agora aceita carregar SINAN, SIM, CIHA e SIH diretamente, ou reaproveitar bases abertas em suas abas. Para tendências e gaps, as contagens permanecem separadas por sistema.
+Os Parquets anuais do SIH/RD **MENINGITE_qualquer_campo** também estão na release pública, de 1998 a 2026 (2026 parcial conforme os arquivos disponíveis). Selecione manualmente os anos desejados em **SIH → Bancos hospedados no github (Parquets)**; a seleção inicial é vazia e o limite padrão comporta todos os 29 anos. A área de comparação aceita SINAN, SIM, CIHA e SIH diretamente ou bases reaproveitadas das abas.
 
 ## Comparação de óbitos e gap entre bases
 
 Na seção **Comparação entre bancos de dados**, carregue ou selecione SINAN, SIM, CIHA e SIH. O bloco de comparação de gap oferece a série de óbitos por meningite do SINAN para todos os casos (`EVOLUCAO=2`), confirmados (`CLASSI_FIN=1` e `EVOLUCAO=2`) ou ambas. No SIM, escolha causa básica com CID do recorte ou menção em qualquer campo de causa. Na CIHA, entram atendimentos com `MORTE=1` e CID de meningite; no SIH, óbitos com `MORTE=1` e a estratificação por diagnóstico principal, união principal/secundário, CID associado ou CID notificação.
 
-Os gráficos apresentam as contagens e a diferença assinada (comparador menos SINAN) por ano ou mês completo no intervalo temporal comum. Datas e unidades diferem entre sistemas, não há pareamento individual e CIHA/SIH não são somados; portanto, o gap é uma comparação agregada e não estima subnotificação nem letalidade. Linhas com data ausente/inválida são informadas e excluídas do eixo temporal. A inclusão SIH depende dos campos CID e `MORTE` disponíveis e do recorte que já foi aplicado na extração original.
+Os gráficos apresentam as contagens e a diferença assinada (comparador menos SINAN) por ano ou mês completo no intervalo temporal comum, além de barras com os totais de cada série. Os somatórios aparecem também em **Como ler**. Para a visão assistencial, a barra **CIHA + SIH** é uma soma aritmética dos registros dos dois sistemas, sem linkage nem deduplicação; pode haver sobreposição e ela não representa pessoas únicas. Datas e unidades diferem entre sistemas, portanto o gap não estima subnotificação nem letalidade. Linhas com data ausente/inválida são informadas e excluídas do eixo temporal. A inclusão SIH depende dos campos CID e `MORTE` disponíveis e do recorte aplicado na extração original.
 
 ### Outros campos propostos (sem implementação de gráficos)
 
@@ -90,7 +90,7 @@ Link para a versão mais atual do streamlit (acessível de qualquer dispositivo)
 
 ## _O que o app faz_
 
-- Lê os parquets da release mais atual deste aplicativo (https://github.com/borbito123/Teste---Dados-Epidemiol-gicos-para-meningite-SINAN-CIHA-SIM---Rio-de-Janeiro/releases/tag/v1.0) e já os carrega automaticamente no programa. Cabe ao usuário escolher quais bancos de dados carregar. Atualmente são disponibilizados os dados referente ao estado do RJ e logo mais os bancos de todas as UFs juntas serão disponibilizados.
+- Lista os Parquets da [release atual do observatório](https://github.com/borbito123/Observatorio-para-meningite-e-encefalite/releases/tag/Release1); o usuário escolhe manualmente quais bases e anos carregar. A release inclui SINAN, SIM, CIHA e SIH/RD para o Rio de Janeiro, incluindo os 29 Parquets anuais `SIH_RD_MENINGITE_qualquer_campo_1998.parquet` a `SIH_RD_MENINGITE_qualquer_campo_2026.parquet`.
 - Também aceita **upload** dos parquets / duckdbs que o usuário escolher.
 - Fornece um breve dicionário operacional para guiar o usuário em relação aos campos mais relevantes para análise epidemiológica;
 - Gera gráficos epidemiológicos interativos.
