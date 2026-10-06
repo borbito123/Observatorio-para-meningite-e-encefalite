@@ -520,6 +520,24 @@ def _strip_database_prefix_from_title(fig: go.Figure) -> None:
     _clean_figure_annotations(fig)
 
 
+PLOT_TEXT_COLOR = "#1F2937"
+PLOT_TEXT_WEIGHT = 600
+PLOT_TITLE_WEIGHT = 700
+
+
+def _plotly_font_style(*, size: Optional[int] = None, weight: int = PLOT_TEXT_WEIGHT) -> Dict[str, object]:
+    """Retorna uma fonte de alto contraste compatível com Plotly 5 e 6."""
+    style: Dict[str, object] = {"color": PLOT_TEXT_COLOR}
+    if size is not None:
+        style["size"] = size
+    try:
+        if "weight" in go.layout.Font()._valid_props:
+            style["weight"] = weight
+    except Exception:
+        pass
+    return style
+
+
 def style_plotly_figure(fig: go.Figure) -> go.Figure:
     """Padroniza margem, legenda, fonte e cor de óbito/letalidade em todos os gráficos."""
     if fig is None:
@@ -533,14 +551,32 @@ def style_plotly_figure(fig: go.Figure) -> go.Figure:
     fig.update_layout(
         template="plotly_white",
         margin={"l": 36, "r": 28, "t": 104, "b": 72},
-        font={"size": 13},
-        title={"x": 0.0, "xanchor": "left", "y": 0.98, "yanchor": "top", "pad": {"b": 18}},
-        legend={"orientation": "h", "yanchor": "bottom", "y": 1.04, "xanchor": "left", "x": 0, "itemsizing": "constant"},
-        hoverlabel={"align": "left"},
+        font=_plotly_font_style(size=13),
+        title={"x": 0.0, "xanchor": "left", "y": 0.98, "yanchor": "top", "pad": {"b": 18}, "font": _plotly_font_style(weight=PLOT_TITLE_WEIGHT)},
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.04, "xanchor": "left", "x": 0, "itemsizing": "constant", "font": _plotly_font_style()},
+        hoverlabel={"align": "left", "font": _plotly_font_style()},
         hovermode=requested_hovermode or ("x unified" if is_line_like else "closest"),
     )
-    fig.update_xaxes(automargin=True, showgrid=True, zeroline=False)
-    fig.update_yaxes(automargin=True, zeroline=False)
+    fig.update_xaxes(
+        automargin=True,
+        showgrid=True,
+        zeroline=False,
+        tickfont=_plotly_font_style(),
+        title_font=_plotly_font_style(weight=PLOT_TITLE_WEIGHT),
+    )
+    fig.update_yaxes(
+        automargin=True,
+        zeroline=False,
+        tickfont=_plotly_font_style(),
+        title_font=_plotly_font_style(weight=PLOT_TITLE_WEIGHT),
+    )
+    for trace in getattr(fig, "data", []) or []:
+        try:
+            textfont = getattr(trace, "textfont", None)
+            if textfont is not None and "weight" in getattr(textfont, "_valid_props", set()):
+                trace.update(textfont={"weight": PLOT_TEXT_WEIGHT})
+        except (AttributeError, TypeError, ValueError):
+            pass
     return fig
 
 
