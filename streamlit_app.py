@@ -69,7 +69,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-10-06-v100-SIH-gap-hospital-strata"
+APP_VERSION = "2026-10-06-v100-SIH-gap-ciha-diagnoses"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos
@@ -661,9 +661,13 @@ def _plot_explanation(fig: go.Figure, calc_title: Optional[str]) -> str:
 
 def render_plotly_chart(
     fig: go.Figure, calc_title: Optional[str] = None, como_ler: Optional[str] = None,
+    layout_overrides: Optional[Dict[str, object]] = None,
 ) -> None:
     """Renderiza Plotly, uma explicação breve e o expander auditável de cálculo."""
-    st.plotly_chart(style_plotly_figure(fig), width="stretch", config=PLOTLY_CONFIG)
+    styled = style_plotly_figure(fig)
+    if layout_overrides:
+        styled.update_layout(**layout_overrides)
+    st.plotly_chart(styled, width="stretch", config=PLOTLY_CONFIG)
     explanation = como_ler or _plot_explanation(fig, calc_title)
     st.caption(f"**Como ler:** {explanation}")
     _render_calc_expander(calc_title)
@@ -20487,6 +20491,7 @@ def render_gap_pair(
     render_plotly_chart(
         fig, calc_title=f"Comparação de {measure_title.lower()} — {title}",
         como_ler=f"Cada linha representa a contagem da base e do critério indicados na legenda; os números junto aos pontos mostram as contagens absolutas por período. {common_note} As unidades de observação diferem entre sistemas e não há pareamento individual.",
+        layout_overrides={"margin": {"t": 178}, "height": 560},
     )
 
     # Mostra diretamente os totais que resumem as séries do intervalo compartilhado.
@@ -20529,6 +20534,7 @@ def render_gap_pair(
         render_plotly_chart(
             fig_gap, calc_title=f"Gap de contagens — {title}",
             como_ler=f"Cada barra representa comparador menos SINAN por período; o número junto à barra mostra essa diferença em registros, preservando o sinal. Valores positivos indicam contagem maior no comparador e valores negativos, menor. {common_note}",
+            layout_overrides={"margin": {"t": 178}, "height": 560},
         )
         copyable_dataframe(gaps, width="stretch", hide_index=True)
         download_button(gaps, f"{file_stub}_gap.csv")
@@ -20560,12 +20566,35 @@ def comparison_sinan_hospital_spec(item: Dict[str, object], mode: str) -> Tuple[
     return item, f"SINAN — {mode.lower()}", where_sql
 
 
-def comparison_ciha_modality_spec(item: Dict[str, object], mode: str) -> Tuple[Dict[str, object], str, str]:
+def comparison_ciha_diagnosis_options(selection: object) -> Dict[str, List[str]]:
+    """Campos por posição diagnóstica; só oferece união quando ambos existem."""
+    selected_cids = getattr(selection, "cid_cols", None) or []
+    principal = getattr(selection, "diag_princ_col", None) or choose_candidate(selected_cids, ["DIAG_PRINC", "CIDPRI", "CID_PRINC"])
+    secondary = getattr(selection, "diag_secun_col", None) or choose_candidate(selected_cids, ["DIAG_SECUN"])
+    options: Dict[str, List[str]] = {}
+    if principal and secondary:
+        options["Diagnóstico principal + secundário"] = list(dict.fromkeys([principal, secondary]))
+    if principal:
+        options["Apenas diagnóstico principal"] = [principal]
+    if secondary:
+        options["Apenas diagnóstico secundário"] = [secondary]
+    return options
+
+
+def comparison_ciha_modality_spec(
+    item: Dict[str, object], mode: str, diagnosis_mode: Optional[str] = None,
+) -> Tuple[Dict[str, object], str, str]:
     """Total preserva inclusive modalidade desconhecida; estratos usam MODALIDADE 01/02."""
     if mode not in GAP_CIHA_MODALITY_MODES:
         raise ValueError("Modalidade CIHA não reconhecida.")
     selection = item.get("sel")
-    cid_condition = cid_presence_expr(getattr(selection, "cid_cols", None) or [], CID_MENINGITE_REGEX)
+    diagnosis_options = comparison_ciha_diagnosis_options(selection)
+    if diagnosis_mode is None:
+        diagnosis_mode = next(iter(diagnosis_options), None)
+    if diagnosis_mode not in diagnosis_options:
+        raise ValueError("A CIHA não tem os campos exigidos pelo estrato diagnóstico escolhido (DIAG_PRINC e/ou DIAG_SECUN).")
+    # OR sobre campos: COUNT(*) conta uma vez mesmo com CID nos dois diagnósticos.
+    cid_condition = cid_presence_expr(diagnosis_options[diagnosis_mode], CID_MENINGITE_REGEX)
     if not cid_condition:
         raise ValueError("A CIHA precisa ter ao menos um campo de diagnóstico CID reconhecido.")
     where_sql = append_clause(item["base_where"], f"({cid_condition})")
@@ -20577,7 +20606,7 @@ def comparison_ciha_modality_spec(item: Dict[str, object], mode: str) -> Tuple[D
         where_sql = append_clause(where_sql, f"({clean_code_expr(modality_col, pad2=True)}) = {qstr(modality_code)}")
     label = {"Apenas hospitalar": "atendimentos hospitalares", "Apenas ambulatorial": "atendimentos ambulatoriais",
              "Total de atendimentos": "total de atendimentos"}[mode]
-    return item, f"CIHA — {label} com CID do recorte", where_sql
+    return item, f"CIHA — {label}, {diagnosis_mode.lower()} com CID do recorte", where_sql
 
 
 def render_gap_comparison(available: Sequence[Dict[str, object]], chosen: Sequence[str]) -> None:
@@ -20640,7 +20669,19 @@ def render_gap_comparison(available: Sequence[Dict[str, object]], chosen: Sequen
                                     key=sinan_mode_key, help="Todos os recortes exigem ATE_HOSPIT=1. Confirmados: CLASSI_FIN=1; descartados: CLASSI_FIN=2; total: qualquer classificação, inclusive ignorada/ausente.")
     ciha_mode = st.selectbox("Modalidade da CIHA no GAP", GAP_CIHA_MODALITY_MODES, key="comp_gap_ciha_mode",
                              help="Hospitalar: MODALIDADE=01; ambulatorial: MODALIDADE=02. Total inclui também modalidade ignorada/ausente. Os filtros-base continuam aplicados.")
-    st.caption("Recorte SINAN: ATE_HOSPIT=1, sem inferência pela data de internação. CIHA: modalidade escolhida e CID do recorte. SIH: critério CID escolhido. Todos respeitam os filtros-base; filtros prévios de classificação ou modalidade podem restringir ou zerar os estratos.")
+    ciha_diagnosis_options = comparison_ciha_diagnosis_options(ciha.get("sel") if ciha else None)
+    ciha_diagnosis_choices = list(ciha_diagnosis_options) or ["Sem campos de diagnóstico compatíveis"]
+    diagnosis_key = "comp_gap_ciha_diagnosis_mode"
+    if st.session_state.get(diagnosis_key) is not None and st.session_state[diagnosis_key] not in ciha_diagnosis_choices:
+        st.warning("O estrato diagnóstico anterior da CIHA não está disponível nesta base; confira a nova seleção.")
+        st.session_state[diagnosis_key] = ciha_diagnosis_choices[0]
+    ciha_diagnosis_mode = st.selectbox("Estrato diagnóstico da CIHA no GAP", ciha_diagnosis_choices,
+                                      key=diagnosis_key, disabled=not ciha_diagnosis_options,
+                                      help="Principal: DIAG_PRINC; secundário: DIAG_SECUN, inclusive se também houver meningite no principal. Principal + secundário usa OR e conta cada atendimento uma única vez.")
+    st.caption("Recorte SINAN: ATE_HOSPIT=1, sem inferência pela data de internação. CIHA: modalidade e estrato diagnóstico escolhidos; principal + secundário conta cada atendimento uma vez, mesmo com CID do recorte em ambos. SIH: critério CID escolhido. Todos respeitam os filtros-base; filtros prévios de classificação, diagnóstico ou modalidade podem restringir ou zerar os estratos.")
+    if ciha_diagnosis_options:
+        st.caption("Campos disponíveis na CIHA: " + ", ".join(dict.fromkeys(field for fields in ciha_diagnosis_options.values() for field in fields))
+                   + ". Uma base extraída somente pelo diagnóstico principal não permite recuperar os atendimentos exclusivamente secundários excluídos na origem.")
     if ciha_mode != "Apenas hospitalar":
         st.caption("Atenção: neste modo, a CIHA inclui atendimentos ambulatoriais e/ou modalidade desconhecida, enquanto o SINAN permanece restrito a casos com internação e o SIH a registros de AIH; a comparação não equivale a um total homogêneo de internações.")
     assist_specs: List[Tuple[Dict[str, object], str, str]] = []
@@ -20651,7 +20692,7 @@ def render_gap_comparison(available: Sequence[Dict[str, object]], chosen: Sequen
             st.warning(str(exc))
     if ciha:
         try:
-            assist_specs.append(comparison_ciha_modality_spec(ciha, ciha_mode))
+            assist_specs.append(comparison_ciha_modality_spec(ciha, ciha_mode, ciha_diagnosis_mode))
         except ValueError as exc:
             st.warning(str(exc))
     if sih and sih_mode in sih_options and sih_options[sih_mode]:
@@ -20662,7 +20703,7 @@ def render_gap_comparison(available: Sequence[Dict[str, object]], chosen: Sequen
         assist_comparators = [label for _, label, _ in assist_specs if label.startswith(("CIHA", "SIH"))]
         render_gap_pair(
             "SINAN com internação × CIHA e SIH", assist_specs, frequency, [sinan, ciha, sih], "gap_sinan_ciha_sih",
-            combined_series=[(f"CIHA + SIH — {ciha_mode.lower()} na CIHA (soma aritmética)", assist_comparators)],
+            combined_series=[(f"CIHA + SIH — {ciha_mode.lower()}, {ciha_diagnosis_mode.lower()} na CIHA (soma aritmética)", assist_comparators)],
             measure_title="Casos e registros assistenciais",
             measure_axis_label="Casos/atendimentos/internações",
         )

@@ -62,6 +62,21 @@ class TemporalGap(unittest.TestCase):
                 ('2024-12-31', '01', 'J189')
             ) AS rows(DT_ATEND, MODALIDADE, DIAG_PRINC)
         """)
+        connection.execute("""
+            CREATE TABLE ciha_diagnoses AS SELECT * FROM (VALUES
+                ('2024-01-01', '01', 'G009', 'J189'),
+                ('2024-01-02', '01', 'J189', 'G029'),
+                ('2024-01-03', '01', 'G009', 'G029'),
+                ('2024-01-04', '01', 'J189', 'J189'),
+                ('2024-02-01', '02', 'A390', NULL),
+                ('2024-02-02', '02', NULL, 'G03.9'),
+                ('2024-02-03', '02', 'G03.9', 'G009'),
+                ('2024-03-01', NULL, 'G009', NULL),
+                ('2024-12-31', NULL, NULL, 'G009'),
+                ('2024-04-01', '01', NULL, NULL),
+                ('2024-05-01', '1.0', 'g00.9', 'NA')
+            ) AS rows(DT_ATEND, MODALIDADE, DIAG_PRINC, DIAG_SECUN)
+        """)
         connection.close()
         cls.dt = app.date_expr("raw_date")
 
@@ -207,6 +222,42 @@ class TemporalGap(unittest.TestCase):
                 self.assertEqual(len(rendered[2].data), 3)
                 self.assertEqual(sum(len(trace.y) for trace in rendered[1].data), 4)
 
+    def test_ciha_diagnosis_strata_union_and_modality_intersections(self):
+        table = app.LoadedTable("CIHA", "duckdb", '"ciha_diagnoses"', db_path=self.db, table_name="ciha_diagnoses")
+        selection = app.default_selections("CIHA", ["DT_ATEND", "MODALIDADE", "DIAG_PRINC", "DIAG_SECUN"])
+        context = {"table": table, "sel": selection, "exprs": {"dt": app.date_expr("DT_ATEND")}, "base_where": ""}
+        expected = {
+            "Total de atendimentos": [9, 6, 5],
+            "Apenas hospitalar": [4, 3, 2],
+            "Apenas ambulatorial": [3, 2, 2],
+        }
+        modes = list(app.comparison_ciha_diagnosis_options(selection))
+        self.assertEqual(modes, ["Diagnóstico principal + secundário", "Apenas diagnóstico principal", "Apenas diagnóstico secundário"])
+        for modality, totals in expected.items():
+            for mode, n in zip(modes, totals):
+                with self.subTest(modality=modality, diagnosis=mode):
+                    _, label, where = app.comparison_ciha_modality_spec(context, modality, mode)
+                    self.assertIn(mode.lower(), label)
+                    self.assertEqual(app.count_rows(table, where), n)
+                    for freq in ("year", "month"):
+                        self.assertEqual(int(app.query_timeseries(table, context["exprs"]["dt"], where, freq).n.sum()), n)
+        # Both-field matches are in each individual stratum but only once in the union.
+        self.assertLess(expected["Total de atendimentos"][0], sum(expected["Total de atendimentos"][1:]))
+        filtered = {**context, "base_where": "WHERE DIAG_PRINC = 'J189'"}
+        self.assertEqual(app.count_rows(table, app.comparison_ciha_modality_spec(filtered, "Total de atendimentos", modes[2])[2]), 1)
+        self.assertEqual(app.count_rows(table, app.comparison_ciha_modality_spec(context, "Total de atendimentos")[2]), 9)
+
+    def test_ciha_missing_diagnosis_fields_do_not_silently_broaden_selection(self):
+        context = self.hospital_context("CIHA")
+        options = app.comparison_ciha_diagnosis_options(context["sel"])
+        self.assertEqual(list(options), ["Apenas diagnóstico principal"])
+        for mode in ("Apenas diagnóstico secundário", "Diagnóstico principal + secundário", "Inválido"):
+            with self.assertRaisesRegex(ValueError, "estrato diagnóstico"):
+                app.comparison_ciha_modality_spec(context, "Total de atendimentos", mode)
+        secondary = SimpleNamespace(diag_secun_col="DIAG_SECUN", cid_cols=[])
+        self.assertEqual(app.comparison_ciha_diagnosis_options(secondary), {"Apenas diagnóstico secundário": ["DIAG_SECUN"]})
+        self.assertEqual(app.comparison_ciha_diagnosis_options(None), {})
+
     def test_gap_ui_controls_update_counts_and_migrate_legacy_sinan_choice(self):
         wrapper = f'''
 import importlib.util, sys
@@ -241,6 +292,24 @@ a.render_gap_comparison([sinan, ciha, sih], ["SINAN", "CIHA", "SIH"])
             at.selectbox(key="comp_gap_sinan_assist_mode").select(mode).run()
             self.assertFalse(at.exception, [str(x.value) for x in at.exception])
             self.assertEqual(int(at.dataframe[1].value.iloc[:, 1].sum()), n)
+        # Reuse the actual rendered GAP with both CIHA diagnosis columns present.
+        diagnostic_wrapper = wrapper.replace('"ciha_modality"', '"ciha_diagnoses"').replace(
+            'SimpleNamespace(modalidade_col="MODALIDADE", cid_cols=["DIAG_PRINC"])',
+            'SimpleNamespace(modalidade_col="MODALIDADE", cid_cols=["DIAG_PRINC", "DIAG_SECUN"], diag_princ_col="DIAG_PRINC", diag_secun_col="DIAG_SECUN")')
+        at = AppTest.from_string(diagnostic_wrapper, default_timeout=60).run()
+        self.assertFalse(at.exception, [str(x.value) for x in at.exception])
+        self.assertEqual(at.selectbox(key="comp_gap_ciha_diagnosis_mode").value, "Diagnóstico principal + secundário")
+        for modality, totals in [("Total de atendimentos", [9, 6, 5]), ("Apenas hospitalar", [4, 3, 2]), ("Apenas ambulatorial", [3, 2, 2])]:
+            at.selectbox(key="comp_gap_ciha_mode").select(modality).run()
+            for mode, n in zip(app.comparison_ciha_diagnosis_options(SimpleNamespace(cid_cols=["DIAG_PRINC", "DIAG_SECUN"])), totals):
+                at.selectbox(key="comp_gap_ciha_diagnosis_mode").select(mode).run()
+                self.assertFalse(at.exception, [str(x.value) for x in at.exception])
+                counts, gaps = at.dataframe[1].value, at.dataframe[0].value
+                self.assertEqual(int(counts.iloc[:, 2].sum()), n)
+                self.assertIn(mode.lower(), counts.columns[2])
+                self.assertEqual(int(counts.iloc[:, 4].sum()), n + 2)
+                combined = gaps[gaps.comparador.str.startswith("CIHA + SIH")]
+                self.assertEqual(int(combined.gap_comparador_menos_referencia.sum()), n)
 
 
 if __name__ == "__main__":
