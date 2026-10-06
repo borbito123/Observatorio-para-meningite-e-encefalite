@@ -28,7 +28,7 @@ A unidade contada é a **linha de AIH/RD**, não pessoa nem internação única.
 
 **Competência de processamento** é a referência temporal padrão quando ano e mês estão disponíveis. Pode-se optar por data de internação ou saída; estas podem pertencer a outro período. Os totais mantêm registros sem data quando nenhum filtro de ano é aplicado. A série temporal usa somente datas reconhecidas e não transforma lacunas em zero.
 
-Os Parquets anuais do SIH/RD **MENINGITE_qualquer_campo** também estão na release pública, de 1998 a 2026 (2026 parcial conforme os arquivos disponíveis). Selecione manualmente os anos desejados em **SIH → Bancos hospedados no github (Parquets)**; a seleção inicial é vazia e o limite padrão comporta todos os 29 anos. A área de comparação aceita SINAN, SIM, CIHA e SIH diretamente ou bases reaproveitadas das abas.
+Os Parquets anuais do SIH/RD **MENINGITE_qualquer_campo** também estão na release pública, de 1998 a 2026 (2026 parcial conforme os arquivos disponíveis). Selecione manualmente os anos desejados em **SIH → Bancos hospedados no github (Parquets)**; a seleção inicial é vazia e o limite padrão é 68 arquivos, suficiente para carregar todos os 29 anos. Em **Desempenho e memória**, o padrão é 8 GB para o DuckDB e 6 threads, ambos ajustáveis conforme a máquina. A área de comparação aceita SINAN, SIM, CIHA e SIH diretamente ou bases reaproveitadas das abas.
 
 ## Comparação de óbitos e gap entre bases
 

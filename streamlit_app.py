@@ -69,13 +69,13 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-10-05-v100-SIH-gap-years-hospitalizations"
+APP_VERSION = "2026-10-05-v100-SIH-gap-performance-68"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos
 # =============================================================================
 
-DEFAULT_MAX_PARQUET_FILES_PER_LOAD = 40
+DEFAULT_MAX_PARQUET_FILES_PER_LOAD = 68
 DEFAULT_DISPLAY_ROW_LIMIT = 1000
 DEFAULT_COPY_ROW_LIMIT = 300
 DEFAULT_DOWNLOAD_ROW_LIMIT = 50000
@@ -84,8 +84,8 @@ DEFAULT_MAX_PREVIEW_ROWS = 5000
 DEFAULT_SQL_LAB_ROW_LIMIT = 5000
 DEFAULT_FULL_EXPORT_ROW_LIMIT = 100000
 UPLOAD_CHUNK_SIZE = 1024 * 1024
-DEFAULT_DUCKDB_MEMORY_LIMIT = "3GB"
-DEFAULT_DUCKDB_THREADS = 2
+DEFAULT_DUCKDB_MEMORY_LIMIT = "8GB"
+DEFAULT_DUCKDB_THREADS = 6
 DEFAULT_QUERY_CACHE_MAX_ENTRIES = 128
 DEFAULT_FASTPARQUET_ROW_LIMIT = 1500000
 DUCKDB_TEMP_SUBDIR = "meningite_duckdb_tmp"
@@ -683,13 +683,40 @@ def perf_int(key: str, default: int) -> int:
     return _session_int(key, default)
 
 
+def _migrate_performance_defaults() -> None:
+    """Atualiza valores antigos que eram os padrões, preservando ajustes personalizados."""
+    migration_key = "_performance_defaults_migration_version"
+    if int(st.session_state.get(migration_key, 0) or 0) >= 1:
+        return
+    previous_defaults = {
+        "perf_max_parquet_files": (40, 68),
+        "perf_duckdb_memory_limit": ("3GB", "8GB"),
+        "perf_duckdb_threads": (2, 6),
+    }
+    for key, (old_default, new_default) in previous_defaults.items():
+        current = st.session_state.get(key)
+        if current is None:
+            continue
+        if key == "perf_duckdb_memory_limit":
+            matches_old_default = str(current).strip().upper().replace(" ", "") == old_default
+        else:
+            try:
+                matches_old_default = int(current) == old_default
+            except (TypeError, ValueError):
+                matches_old_default = False
+        if matches_old_default:
+            st.session_state[key] = new_default
+    st.session_state[migration_key] = 1
+
+
 def render_performance_controls() -> None:
     """Expõe limites para evitar carregamento, renderização e exportação excessivos."""
+    _migrate_performance_defaults()
     with st.expander("Desempenho e memória", expanded=False):
         st.number_input(
             "Máximo de Parquets por carregamento",
             min_value=1,
-            max_value=60,
+            max_value=68,
             value=perf_int("perf_max_parquet_files", DEFAULT_MAX_PARQUET_FILES_PER_LOAD),
             step=1,
             key="perf_max_parquet_files",
@@ -699,7 +726,7 @@ def render_performance_controls() -> None:
             "Limite de memória do DuckDB",
             value=str(st.session_state.get("perf_duckdb_memory_limit", DEFAULT_DUCKDB_MEMORY_LIMIT)),
             key="perf_duckdb_memory_limit",
-            help="Exemplos válidos: 1GB, 2GB, 4096MB ou 75%. O DuckDB fará spill para disco quando possível.",
+            help="Exemplos válidos: 4GB, 8GB, 8192MB ou 75%. O DuckDB fará spill para disco quando possível.",
         )
         st.number_input(
             "Threads do DuckDB",
@@ -2956,7 +2983,7 @@ SOURCE_CONFIG: Dict[str, SourceConfig] = {
         title="Notificações e investigação de casos",
         default_db="sinan_meningite_rio_estado.duckdb",
         default_table="sinan_meningite_rio_estado_data",
-        expected_period="2007–2026",
+        expected_period="2007–2025",
         date_candidates=["DT_NOTIFIC", "DT_SIN_PRI", "DT_INVEST", "DT_ENCERRA", "DT_DIGITA"],
         sex_candidates=["CS_SEXO", "SEXO"],
         age_candidates=["NU_IDADE_N", "IDADE", "IDADE_ANOS", "IDADEANOS"],
@@ -2977,7 +3004,7 @@ SOURCE_CONFIG: Dict[str, SourceConfig] = {
         title="Óbitos e causas de morte",
         default_db="sim_do_rio_estado.duckdb",
         default_table="sim_do_rio_estado_data",
-        expected_period="2007–2026",
+        expected_period="2007–2024",
         date_candidates=["DTOBITO", "DT_OBITO", "DTATESTADO", "DTNASC", "DT_NASC"],
         sex_candidates=["SEXO", "CS_SEXO"],
         age_candidates=["IDADE", "IDADEANOS", "IDADE_ANOS"],
@@ -2996,7 +3023,7 @@ SOURCE_CONFIG: Dict[str, SourceConfig] = {
         title="Atendimentos/internações informados à CIHA",
         default_db="ciha_rio_estado.duckdb",
         default_table="ciha_rio_estado_data",
-        expected_period="2007–2026",
+        expected_period="2011–2025",
         date_candidates=["DT_ATEND", "DT_SAIDA", "DT_INTER", "DT_INTERNA", "DT_COMPET", "COMPET", "ANO_CMPT"],
         sex_candidates=["SEXO", "CS_SEXO"],
         age_candidates=["IDADE", "IDADE_ANOS", "IDADEANOS", "NU_IDADE_N"],
