@@ -69,7 +69,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-10-05-v100-SIH-any-field-gap-totals-colors"
+APP_VERSION = "2026-10-05-v100-SIH-gap-years-hospitalizations"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos
@@ -20278,7 +20278,7 @@ def render_comparison_base_inputs(loaded: Sequence[Dict[str, object]]) -> Dict[s
     return contexts
 
 
-def comparison_common_periods(contexts: Sequence[Dict[str, object]], frequency: str) -> Optional[pd.DatetimeIndex]:
+def comparison_common_bounds(contexts: Sequence[Dict[str, object]]) -> Optional[Tuple[pd.Timestamp, pd.Timestamp]]:
     spans = []
     for item in contexts:
         exprs = item.get("exprs", {})
@@ -20294,12 +20294,19 @@ def comparison_common_periods(contexts: Sequence[Dict[str, object]], frequency: 
     end = min(span[1] for span in spans)
     if start > end:
         return None
+    return start, end
+
+
+def comparison_common_periods(contexts: Sequence[Dict[str, object]], frequency: str) -> Optional[pd.DatetimeIndex]:
+    bounds = comparison_common_bounds(contexts)
+    if bounds is None:
+        return None
+    start, end = bounds
     if frequency == "year":
-        first_year = start.year if (start.month, start.day) == (1, 1) else start.year + 1
-        last_year = end.year if (end.month, end.day) == (12, 31) else end.year - 1
-        if first_year > last_year:
-            return None
-        return pd.date_range(pd.Timestamp(first_year, 1, 1), pd.Timestamp(last_year, 1, 1), freq="YS")
+        # Include every calendar year touched by the shared date span. The edge
+        # years can be partial; comparison_gap_frames restricts every series to
+        # the exact same shared dates before aggregating them by year.
+        return pd.date_range(pd.Timestamp(start.year, 1, 1), pd.Timestamp(end.year, 1, 1), freq="YS")
     first_month = start.to_period("M") + (0 if start.day == 1 else 1)
     last_month = end.to_period("M") - (0 if end.day == end.days_in_month else 1)
     if first_month > last_month:
@@ -20311,17 +20318,26 @@ def comparison_gap_frames(
     specs: Sequence[Tuple[Dict[str, object], str, str]], frequency: str,
     common_contexts: Sequence[Dict[str, object]],
 ) -> Tuple[pd.DataFrame, pd.DataFrame, List[str]]:
-    """Conta óbitos por linha de origem e alinha somente períodos cobertos por todas as bases."""
+    """Conta registros e alinha séries à cobertura temporal comum entre as bases."""
     periods = comparison_common_periods(common_contexts, frequency)
     if periods is None or periods.empty:
         return pd.DataFrame(), pd.DataFrame(), []
+    common_bounds = comparison_common_bounds(common_contexts)
     counts = pd.DataFrame({"periodo": periods})
     omitted_notes: List[str] = []
     for item, label, where_sql in specs:
         exprs = item["exprs"]
         dt = exprs["dt"]
+        series_where = where_sql
+        if frequency == "year" and common_bounds is not None:
+            start, end = common_bounds
+            shared_dates = (
+                f"CAST(({dt}) AS DATE) BETWEEN DATE '{start:%Y-%m-%d}' "
+                f"AND DATE '{end:%Y-%m-%d}'"
+            )
+            series_where = append_clause(series_where, shared_dates)
         try:
-            ts = query_timeseries(item["table"], dt, where_sql, frequency)
+            ts = query_timeseries(item["table"], dt, series_where, frequency)
             missing_date = count_rows(item["table"], append_clause(where_sql, f"({dt}) IS NULL"))
         except Exception as exc:
             st.warning(f"Falha ao calcular a série {label}: {exc}")
@@ -20383,6 +20399,8 @@ def render_gap_pair(
     title: str, specs: Sequence[Tuple[Dict[str, object], str, str]],
     frequency: str, common_contexts: Sequence[Dict[str, object]], file_stub: str,
     combined_totals: Optional[Sequence[Tuple[str, Sequence[str]]]] = None,
+    measure_title: str = "Óbitos",
+    measure_axis_label: str = "Registros de óbito",
 ) -> None:
     if len(specs) < 2:
         st.info("Carregue as bases necessárias para esta comparação.")
@@ -20401,17 +20419,17 @@ def render_gap_pair(
     count_summary = "; ".join(f"{label}: {format_int_br(value)}" for label, value in totals.items())
     common_note = f"Somatórios no intervalo comum datado ({period_range}): {count_summary}."
 
-    # Séries de fontes diferentes recebem cores distintas mesmo quando todas medem óbitos.
-    long_counts = counts.melt("periodo", var_name="serie", value_name="obitos")
+    # Séries de fontes diferentes recebem cores distintas, independentemente da unidade.
+    long_counts = counts.melt("periodo", var_name="serie", value_name="quantidade")
     count_colors = comparison_series_color_map(series_labels)
-    fig = px.line(long_counts, x="periodo", y="obitos", color="serie", markers=True,
+    fig = px.line(long_counts, x="periodo", y="quantidade", color="serie", markers=True,
                   color_discrete_map=count_colors,
-                  title=f"Óbitos por período — {title}",
-                  labels={"periodo": "Período comum", "obitos": "Registros de óbito", "serie": "Base e definição"})
+                  title=f"{measure_title} por período — {title}",
+                  labels={"periodo": "Período comum", "quantidade": measure_axis_label, "serie": "Base e definição"})
     fig.update_yaxes(rangemode="tozero")
     fig = disable_death_red(preserve_trace_colors(fig))
     render_plotly_chart(
-        fig, calc_title=f"Comparação de óbitos — {title}",
+        fig, calc_title=f"Comparação de {measure_title.lower()} — {title}",
         como_ler=f"Cada linha representa a contagem da base e do critério indicados na legenda. {common_note} As unidades de observação diferem entre sistemas e não há pareamento individual.",
     )
 
@@ -20428,7 +20446,7 @@ def render_gap_pair(
         fig_total = px.bar(
             total_frame, x="total", y="serie", color="serie", orientation="h", text="rotulo",
             color_discrete_map=total_colors, title=f"Totais no intervalo comum — {title}",
-            labels={"total": "Registros de óbito", "serie": "Base e definição"},
+            labels={"total": measure_axis_label, "serie": "Base e definição"},
             hover_data={"total": True, "rotulo": False, "serie": True},
         )
         fig_total.update_traces(textposition="outside", cliponaxis=False)
@@ -20467,7 +20485,7 @@ def render_gap_pair(
 
 def render_gap_comparison(available: Sequence[Dict[str, object]], chosen: Sequence[str]) -> None:
     st.markdown("#### Comparação de gap")
-    st.caption("O gap é a diferença de contagens por período (comparador menos SINAN). É uma divergência agregada entre bases, sem pareamento de pessoas; unidades, critérios e datas de referência diferem. As linhas usam somente anos ou meses completos dentro do intervalo temporal comum e mantêm CIHA e SIH separados. O gráfico de totais também mostra a soma aritmética CIHA + SIH, sem linkage ou deduplicação entre sistemas; ela pode conter sobreposição e não representa pessoas únicas.")
+    st.caption("O gap é a diferença de contagens por período (comparador menos SINAN), sem pareamento de pessoas; unidades, critérios e datas de referência diferem. No modo anual, os anos de borda são incluídos e limitados às datas exatas de cobertura comum; no mensal, entram apenas meses completos. CIHA e SIH permanecem separados, e a soma CIHA + SIH é apenas aritmética, sem linkage ou deduplicação, podendo conter sobreposição.")
     frequency_label = st.selectbox("Período das comparações de gap", ["Ano", "Mês"], key="comp_gap_freq")
     frequency = {"Ano": "year", "Mês": "month"}[frequency_label]
     by_source = {item["source"]: item for item in available if item["source"] in chosen}
@@ -20506,7 +20524,7 @@ def render_gap_comparison(available: Sequence[Dict[str, object]], chosen: Sequen
     else:
         st.info("Selecione/carregue SINAN e SIM para comparar seus óbitos.")
 
-    st.markdown("**Óbitos do SINAN × CIHA e SIH**")
+    st.markdown("**SINAN × atendimentos da CIHA e internações do SIH**")
     ciha = by_source.get("CIHA")
     sih = by_source.get("SIH")
     sih_options = {
@@ -20520,34 +20538,31 @@ def render_gap_comparison(available: Sequence[Dict[str, object]], chosen: Sequen
     shared_sinan_mode = st.selectbox("Série SINAN para comparar com CIHA/SIH", ["Todos os casos", "Apenas confirmados"], key="comp_gap_sinan_assist_mode")
     assist_specs: List[Tuple[Dict[str, object], str, str]] = []
     if sinan:
-        evol = sinan["exprs"].get("evol_code")
         classi = sinan["exprs"].get("classi_code")
-        if evol and (shared_sinan_mode == "Todos os casos" or classi):
-            clause = f"{evol} = '2'"
-            if shared_sinan_mode == "Apenas confirmados":
-                clause = f"{classi} = '1' AND {clause}"
-            assist_specs.append((sinan, f"SINAN — {shared_sinan_mode.lower()} com óbito por meningite", append_clause(sinan["base_where"], clause)))
+        if shared_sinan_mode == "Todos os casos":
+            assist_specs.append((sinan, "SINAN — todos os casos", sinan["base_where"]))
+        elif classi:
+            assist_specs.append((sinan, "SINAN — casos confirmados", append_clause(sinan["base_where"], f"{classi} = '1'")))
+        else:
+            st.warning("CLASSI_FIN não foi detectado; não é possível separar os casos confirmados do SINAN.")
     if ciha:
-        exprs = ciha["exprs"]
         cid_condition = cid_presence_expr(ciha["sel"].cid_cols or [], CID_MENINGITE_REGEX) if ciha.get("sel") else None
-        if exprs.get("morte_code") and cid_condition:
-            ciha_where = append_clause(ciha["base_where"], f"{exprs['morte_code']} = '1' AND ({cid_condition})")
-            assist_specs.append((ciha, "CIHA — atendimento com CID do recorte e MORTE=1", ciha_where))
+        if cid_condition:
+            ciha_where = append_clause(ciha["base_where"], f"({cid_condition})")
+            assist_specs.append((ciha, "CIHA — atendimentos com CID do recorte", ciha_where))
         else:
-            st.warning("A CIHA precisa ter MORTE e ao menos um campo de diagnóstico CID reconhecido.")
+            st.warning("A CIHA precisa ter ao menos um campo de diagnóstico CID reconhecido.")
     if sih and sih_mode in sih_options and sih_options[sih_mode]:
-        morte = sih.get("exprs", {}).get("morte_code")
-        if morte:
-            condition = sih_meningitis_condition(sih_options[sih_mode])
-            sih_where = append_clause(sih["base_where"], f"{morte} = '1' AND ({condition})")
-            assist_specs.append((sih, f"SIH — {sih_mode}, MORTE=1", sih_where))
-        else:
-            st.warning("O SIH precisa ter a coluna MORTE para contar óbitos hospitalares.")
+        condition = sih_meningitis_condition(sih_options[sih_mode])
+        sih_where = append_clause(sih["base_where"], f"({condition})")
+        assist_specs.append((sih, f"SIH — internações, {sih_mode.lower()}", sih_where))
     if sinan and ciha and sih and len(assist_specs) == 3:
         assist_comparators = [label for _, label, _ in assist_specs if label.startswith(("CIHA", "SIH"))]
         render_gap_pair(
             "SINAN × CIHA e SIH", assist_specs, frequency, [sinan, ciha, sih], "gap_sinan_ciha_sih",
             combined_totals=[("CIHA + SIH (soma aritmética)", assist_comparators)],
+            measure_title="Casos e registros assistenciais",
+            measure_axis_label="Casos/atendimentos/internações",
         )
     else:
         st.info("Para este gráfico, carregue SINAN, CIHA e SIH e selecione pelo menos um campo CID válido em cada base.")
@@ -20567,7 +20582,7 @@ def render_comparison(loaded: Sequence[Dict[str, object]]) -> None:
         freq = {"Ano": "year", "Mês": "month", "Semana": "week"}[freq_label]
         normalize = st.checkbox("Normalizar em índice 100 no primeiro período não-zero", value=False, key="comp_norm")
         stratify_cid = st.checkbox("Estratificar por tipo CID-10 quando disponível", value=False, key="comp_cid")
-        st.caption("Na comparação geral, o SINAN representa casos confirmados (CLASSI_FIN=1). O SIH usa o recorte de diagnóstico escolhido no bloco de carregamento. A comparação de gap abaixo usa definições próprias de óbito por base.")
+        st.caption("Na comparação geral, o SINAN representa casos confirmados (CLASSI_FIN=1). Na comparação de gap, SINAN × SIM compara óbitos; SINAN × CIHA/SIH compara casos com atendimentos e internações que tenham CID do recorte.")
         frames = []
         comparison_conversion_notes: List[str] = []
         for item in available:
