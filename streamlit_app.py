@@ -69,7 +69,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-10-05-v100-SIH-gap-performance-68"
+APP_VERSION = "2026-10-05-v100-SIH-gap-labels"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos
@@ -3344,6 +3344,7 @@ def query_municipality_top(table, municipality_sql, where_sql, top_n=15):
 
 
 def date_expr(col: str) -> str:
+    """Converte datas DATASUS sem transformar um AAAAMMDD inválido em ano espúrio."""
     txt = clean_str_expr(col)
     q = qident(col)
     return f"""
@@ -3351,7 +3352,7 @@ def date_expr(col: str) -> str:
         TRY_CAST({q} AS DATE),
         CASE WHEN regexp_matches({txt}, '^\\d{{4}}-\\d{{2}}-\\d{{2}}$') THEN CAST(try_strptime({txt}, '%Y-%m-%d') AS DATE) END,
         CASE WHEN regexp_matches({txt}, '^\\d{{8}}$') AND SUBSTR({txt}, 1, 4) BETWEEN '1900' AND '2099' THEN CAST(try_strptime({txt}, '%Y%m%d') AS DATE) END,
-        CASE WHEN regexp_matches({txt}, '^\\d{{8}}$') THEN CAST(try_strptime({txt}, '%d%m%Y') AS DATE) END,
+        CASE WHEN regexp_matches({txt}, '^\\d{{8}}$') AND SUBSTR({txt}, 5, 4) BETWEEN '1900' AND '2099' THEN CAST(try_strptime({txt}, '%d%m%Y') AS DATE) END,
         CASE WHEN regexp_matches({txt}, '^\\d{{6}}$') AND SUBSTR({txt}, 1, 4) BETWEEN '1900' AND '2099' THEN CAST(try_strptime({txt} || '01', '%Y%m%d') AS DATE) END,
         CASE WHEN regexp_matches({txt}, '^\\d{{4}}$') AND {txt} BETWEEN '1900' AND '2099' THEN CAST(try_strptime({txt} || '0101', '%Y%m%d') AS DATE) END,
         CASE WHEN regexp_matches({txt}, '^\\d{{2}}/\\d{{2}}/\\d{{4}}$') THEN CAST(try_strptime({txt}, '%d/%m/%Y') AS DATE) END,
@@ -20448,16 +20449,19 @@ def render_gap_pair(
 
     # Séries de fontes diferentes recebem cores distintas, independentemente da unidade.
     long_counts = counts.melt("periodo", var_name="serie", value_name="quantidade")
+    long_counts["rotulo"] = long_counts["quantidade"].map(format_int_br)
     count_colors = comparison_series_color_map(series_labels)
     fig = px.line(long_counts, x="periodo", y="quantidade", color="serie", markers=True,
+                  text="rotulo", hover_data={"rotulo": False},
                   color_discrete_map=count_colors,
                   title=f"{measure_title} por período — {title}",
                   labels={"periodo": "Período comum", "quantidade": measure_axis_label, "serie": "Base e definição"})
+    fig.update_traces(textposition="top center", cliponaxis=False)
     fig.update_yaxes(rangemode="tozero")
     fig = disable_death_red(preserve_trace_colors(fig))
     render_plotly_chart(
         fig, calc_title=f"Comparação de {measure_title.lower()} — {title}",
-        como_ler=f"Cada linha representa a contagem da base e do critério indicados na legenda. {common_note} As unidades de observação diferem entre sistemas e não há pareamento individual.",
+        como_ler=f"Cada linha representa a contagem da base e do critério indicados na legenda; os números junto aos pontos mostram as contagens absolutas por período. {common_note} As unidades de observação diferem entre sistemas e não há pareamento individual.",
     )
 
     # Mostra diretamente os totais que resumem as séries do intervalo compartilhado.
@@ -20492,15 +20496,18 @@ def render_gap_pair(
     if not gaps.empty:
         gap_labels = gaps["comparador"].drop_duplicates().astype(str).tolist()
         gap_colors = comparison_series_color_map(gap_labels)
-        fig_gap = px.bar(gaps, x="periodo", y="gap_comparador_menos_referencia", color="comparador",
+        gap_plot = gaps.copy()
+        gap_plot["rotulo"] = gap_plot["gap_comparador_menos_referencia"].map(format_int_br)
+        fig_gap = px.bar(gap_plot, x="periodo", y="gap_comparador_menos_referencia", color="comparador", text="rotulo",
                          color_discrete_map=gap_colors, barmode="group", title=f"Gap de contagens — {title}",
                          labels={"periodo": "Período comum", "gap_comparador_menos_referencia": "Comparador − SINAN", "comparador": "Base comparadora"},
-                         hover_data=["n_referencia", "n_comparador", "gap_pct_sobre_referencia"])
+                         hover_data={"n_referencia": True, "n_comparador": True, "gap_pct_sobre_referencia": True, "rotulo": False})
+        fig_gap.update_traces(textposition="outside", cliponaxis=False)
         fig_gap.add_hline(y=0, line_color="#555", line_width=1)
         fig_gap = disable_death_red(preserve_trace_colors(fig_gap))
         render_plotly_chart(
             fig_gap, calc_title=f"Gap de contagens — {title}",
-            como_ler=f"Cada barra representa comparador menos SINAN por período; valores positivos indicam contagem maior no comparador e valores negativos, menor. {common_note}",
+            como_ler=f"Cada barra representa comparador menos SINAN por período; o número junto à barra mostra essa diferença em registros, preservando o sinal. Valores positivos indicam contagem maior no comparador e valores negativos, menor. {common_note}",
         )
         copyable_dataframe(gaps, width="stretch", hide_index=True)
         download_button(gaps, f"{file_stub}_gap.csv")

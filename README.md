@@ -145,6 +145,8 @@ A se ponderar: A17 e A39 se enquadrariam no CID G01, mas atualmnte se encontram 
 ### Comparação entre bancos de dados
 - Comparação temporal (semanas, meses, anos)
 - Possibilidade de estratiificar por CID-10, utilizando os gráficos convertidos para facilitar a equivalência.
+- Os gráficos de GAP exibem contagens absolutas junto aos pontos das linhas e diferenças em registros junto às barras, mantendo o sinal negativo e os somatórios em “Como ler”.
+- A conversão de datas é compartilhada entre as análises: anos e meses usam o calendário, enquanto semanas usam a convenção ISO. Datas compactas inválidas não devem ser reinterpretadas como anos espúrios; os testes em `tests/test_temporal_gap.py` conferem soma mensal versus anual e os anos de borda.
 
 Observação: A comparação entre bases é **exploratória** e faz mais sentido quando o agravo, o território e a janela temporal são os mesmos.
 
