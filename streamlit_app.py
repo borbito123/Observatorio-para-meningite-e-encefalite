@@ -15010,6 +15010,31 @@ casos de indivíduos com até 2 anos (≤ 24 meses)."
             st.info("Para o gráfico de óbito no puerpério, o campo OBITOPUERP precisa existir no SIM e ser detectado automaticamente.")
         return
 
+    if exprs.get("dt") and exprs.get("modalidade_label"):
+        modalidade = query_yearly_category(table, exprs["dt"], exprs["modalidade_label"], base_where)
+        if not modalidade.empty:
+            st.markdown("**Modalidade do atendimento — hospitalar vs ambulatorial**")
+            modalidade = add_text_column(modalidade)
+            fig_modalidade = px.bar(
+                modalidade,
+                x="ano",
+                y="n",
+                color="categoria",
+                text="texto",
+                title="Atendimentos por modalidade hospitalar e ambulatorial",
+                labels={"ano": "Ano", "n": "Atendimentos", "categoria": "Modalidade", "pct": "% no ano"},
+                hover_data={"texto": False, "pct": ":.2f", "total_ano": True},
+            )
+            fig_modalidade.update_layout(barmode="stack")
+            render_plotly_chart(fig_modalidade, calc_title="Atendimentos por modalidade hospitalar e ambulatorial")
+            render_interval_total(modalidade, value_col="n", by_col="categoria")
+            copyable_dataframe(modalidade, width="stretch", hide_index=True)
+            download_button(modalidade, "ciha_modalidade_hospitalar_ambulatorial.csv")
+        else:
+            st.info("Sem dados de modalidade no recorte atual da CIHA.")
+    else:
+        st.info("Para gerar o gráfico de hospitalar vs ambulatorial, os campos de data e MODALIDADE precisam existir na CIHA e ser detectados automaticamente.")
+
     ind = query_ciha_indicators(table, exprs, base_where)
     st.info(
         "**Morte administrativa** é a contagem operacional do campo `MORTE = 1` na CIHA. "
@@ -15060,31 +15085,6 @@ casos de indivíduos com até 2 anos (≤ 24 meses)."
         )
         render_plotly_chart(fig, calc_title="CIHA — Atendimentos e mortes administrativas")
         render_interval_total(ciha_count_long, value_col="n", by_col="indicador")
-
-    if exprs.get("dt") and exprs.get("modalidade_label"):
-        modalidade = query_yearly_category(table, exprs["dt"], exprs["modalidade_label"], base_where)
-        if not modalidade.empty:
-            st.markdown("**Modalidade do atendimento — hospitalar vs ambulatorial**")
-            modalidade = add_text_column(modalidade)
-            fig_modalidade = px.bar(
-                modalidade,
-                x="ano",
-                y="n",
-                color="categoria",
-                text="texto",
-                title="Atendimentos por modalidade hospitalar e ambulatorial",
-                labels={"ano": "Ano", "n": "Atendimentos", "categoria": "Modalidade", "pct": "% no ano"},
-                hover_data={"texto": False, "pct": ":.2f", "total_ano": True},
-            )
-            fig_modalidade.update_layout(barmode="stack")
-            render_plotly_chart(fig_modalidade, calc_title="Atendimentos por modalidade hospitalar e ambulatorial")
-            render_interval_total(modalidade, value_col="n", by_col="categoria")
-            copyable_dataframe(modalidade, width="stretch", hide_index=True)
-            download_button(modalidade, "ciha_modalidade_hospitalar_ambulatorial.csv")
-        else:
-            st.info("Sem dados de modalidade no recorte atual da CIHA.")
-    else:
-        st.info("Para gerar o gráfico de hospitalar vs ambulatorial, os campos de data e MODALIDADE precisam existir na CIHA e ser detectados automaticamente.")
 
     if not ind.empty and exprs.get("morte_code"):
         morte_code = exprs["morte_code"]
