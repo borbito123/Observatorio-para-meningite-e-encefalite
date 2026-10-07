@@ -178,3 +178,12 @@ Basta selecionar quais anos deseja-se analisar.
 
 ### Opção 2: upload
 Envie um ou mais arquivos `.parquet ou .duckdb` na respectiva aba do banco de dados desejado.
+
+
+## Retenção da sessão e dos bancos (07/10/2026)
+
+A configuração `.streamlit/config.toml` preserva a mesma sessão e seus uploads por até 25 minutos após uma desconexão. As conexões e tabelas dos bancos continuam em `st.cache_resource` sem expiração automática; os resultados das consultas mantêm o prazo de 30 minutos e o limite de 128 entradas. Esse limite pode remover resultados antigos antes do prazo, sem descarregar o banco.
+
+O botão **Limpar cache de consultas** agora limpa somente os resultados SQL, preservando as bases carregadas. **Liberar bancos da memória** libera explicitamente as conexões/tabelas compartilhadas; a próxima consulta recarrega as bases selecionadas.
+
+Execute a partir da raiz do repositório, com `streamlit run streamlit_app.py`, ou use `streamlit run streamlit_app.py --server.disconnectedSessionTTL 1500` ao iniciar de outra pasta. Reinicie o servidor para aplicar a configuração. No Drive, baixe também a pasta `.streamlit` junto ao script e execute a partir dessa pasta do aplicativo. O prazo permite reconectar à mesma sessão; atualizar a página criando outra sessão, reiniciar o servidor, suspender o aplicativo na hospedagem ou esgotar a memória pode exigir novo carregamento.

@@ -14,7 +14,12 @@ campos como texto, para preservar zeros à esquerda em identificadores como NU_N
 a usar exatamente o mesmo caminho de consulta dos demais formatos.
 
 Executar:
-    streamlit run app_meningite_epidemiologico.py
+    streamlit run "streamlit_app.py" --server.disconnectedSessionTTL 1500
+
+A configuração .streamlit/config.toml mantém a mesma sessão por 25 minutos
+após uma desconexão. A opção acima também funciona ao executar de outra pasta.
+Reinicie o servidor após alterar a configuração. Reinícios do servidor e
+uma nova sessão no navegador exigem selecionar/enviar os arquivos novamente.
 
 Dependências:
     pip install streamlit duckdb pandas numpy plotly fastparquet dbfread
@@ -69,7 +74,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-10-06-v100-SIH-gap-ciha-diagnoses"
+APP_VERSION = "2026-10-07-v100-session-retention-25min"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos
@@ -862,13 +867,23 @@ def render_performance_controls() -> None:
             help="Acima deste limite, o app preserva memória e usa DuckDB read_parquet diretamente.",
         )
         st.caption(fastparquet_status())
+        reconnect_minutes = int(st.get_option("server.disconnectedSessionTTL")) / 60
+        st.caption(
+            f"A mesma sessão pode ser retomada por até {reconnect_minutes:g} minutos após uma desconexão. "
+            "As bases são reutilizadas entre interações e os resultados das consultas ficam em cache por 30 minutos."
+        )
         if st.button("Limpar cache de consultas", key="clear_query_cache"):
-            st.cache_data.clear()
-            try:
-                st.cache_resource.clear()
-            except Exception:
-                pass
-            st.success("Cache limpo. As próximas consultas serão recalculadas.")
+            _run_query_cached.clear()
+            st.success("Resultados de consultas limpos. As bases carregadas continuam disponíveis.")
+        if st.button(
+            "Liberar bancos da memória",
+            key="clear_database_cache",
+            help="Libera as conexões e tabelas em cache para todos os usuários. As bases selecionadas serão recarregadas na próxima consulta.",
+        ):
+            _run_query_cached.clear()
+            get_shared_db.clear()
+            get_duckdb_file_db.clear()
+            st.success("Cache dos bancos liberado. As bases selecionadas serão recarregadas na próxima consulta.")
 
 
 # =============================================================================
@@ -4461,7 +4476,7 @@ class _SharedDB:
         self.lock = threading.Lock()
 
 
-@st.cache_resource(show_spinner=False)
+@st.cache_resource(show_spinner=False, ttl=None)
 def get_duckdb_file_db(
     db_path: str,
     runtime_settings: Tuple[str, int, str],
@@ -4592,7 +4607,7 @@ def _should_materialize() -> bool:
     return bool(st.session_state.get("perf_materialize_tables", True))
 
 
-@st.cache_resource(show_spinner=False)
+@st.cache_resource(show_spinner=False, ttl=None)
 def get_shared_db(runtime_settings: Tuple[str, int, str]) -> "_SharedDB":
     """Conexão in-memory única, reutilizada entre reruns e consultas.
 
