@@ -14,9 +14,9 @@ campos como texto, para preservar zeros à esquerda em identificadores como NU_N
 a usar exatamente o mesmo caminho de consulta dos demais formatos.
 
 Executar:
-    streamlit run "streamlit_app.py" --server.disconnectedSessionTTL 1500
+    streamlit run "streamlit_app.py" --server.disconnectedSessionTTL 3600
 
-A configuração .streamlit/config.toml mantém a mesma sessão por 25 minutos
+A configuração .streamlit/config.toml mantém a mesma sessão por 1 hora
 após uma desconexão. A opção acima também funciona ao executar de outra pasta.
 Reinicie o servidor após alterar a configuração. Reinícios do servidor e
 uma nova sessão no navegador exigem selecionar/enviar os arquivos novamente.
@@ -74,7 +74,7 @@ st.set_page_config(
     layout="wide",
 )
 
-APP_VERSION = "2026-10-07-v100-session-retention-25min"
+APP_VERSION = "2026-10-07-v100-session-retention-1hour"
 
 # =============================================================================
 # Controles de desempenho e limites defensivos

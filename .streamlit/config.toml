@@ -1,4 +1,4 @@
 [server]
-# Preserve session state and uploaded files for 25 minutes after disconnection.
+# Preserve session state and uploaded files for 1 hour after disconnection.
 # Database resources have no automatic TTL; query results are cached for 30 minutes.
-disconnectedSessionTTL = 1500
+disconnectedSessionTTL = 3600

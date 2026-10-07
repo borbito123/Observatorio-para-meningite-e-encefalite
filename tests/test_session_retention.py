@@ -33,31 +33,31 @@ class SessionRetention(unittest.TestCase):
         app.get_shared_db.clear()
         app.get_duckdb_file_db.clear()
 
-    def test_server_loads_25_minute_retention(self):
+    def test_server_loads_one_hour_retention(self):
         # Start a real Server object in a fresh process so configuration is read
         # before its session storage is created.
         result = subprocess.run(
             [sys.executable, "-c", "from streamlit.web.server.server import Server; "
              "server = Server('streamlit_app.py', False); "
              "ttl = server._runtime._session_mgr._session_storage._cache.ttl; "
-             "assert ttl == 1500, ttl; print('session TTL =', ttl)"],
+             "assert ttl == 3600, ttl; print('session TTL =', ttl)"],
             cwd=APP_PATH.parent, capture_output=True, text=True,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("session TTL = 1500", result.stdout)
+        self.assertIn("session TTL = 3600", result.stdout)
 
-    def test_disconnected_session_is_available_at_24_minutes(self):
+    def test_disconnected_session_is_available_at_59_minutes(self):
         # Use Streamlit's real storage with a controlled clock; no wall-clock wait.
         clock = [0.0]
         factory = lambda *args, **kwargs: TTLCache(*args, **kwargs, timer=lambda: clock[0])
         with patch("streamlit.runtime.memory_session_storage.TTLCache", factory):
-            storage = MemorySessionStorage(ttl_seconds=1500)
+            storage = MemorySessionStorage(ttl_seconds=3600)
         info = SimpleNamespace(session=SimpleNamespace(id="same-session", uploads=["base.parquet"]))
         storage.save(info)
-        clock[0] = 24 * 60
+        clock[0] = 59 * 60
         self.assertIs(storage.get("same-session"), info)
         self.assertEqual(storage.get("same-session").session.uploads, ["base.parquet"])
-        clock[0] = 26 * 60
+        clock[0] = 61 * 60
         self.assertIsNone(storage.get("same-session"))
 
     def test_query_cache_clear_preserves_materialized_parquet(self):
