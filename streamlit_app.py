@@ -10353,7 +10353,6 @@ def render_loader(source: str) -> Optional[LoadedTable]:
 
     load_modes = [GITHUB_HOSTED_PARQUETS_LABEL, "Upload DuckDB", "Upload Parquet", "Upload CSV", "Upload DBF"]
     if source == "SIH":
-        load_modes = ["Upload DuckDB", "Upload Parquet", "Upload CSV", "Upload DBF", GITHUB_HOSTED_PARQUETS_LABEL]
         st.caption("Selecione um único recorte RD por carregamento. Os scripts de principal, morte, associado e qualquer CID podem conter as mesmas AIHs.")
     load_mode_key = f"load_mode_{source}"
     if st.session_state.get(load_mode_key) not in (None, *load_modes):
