@@ -5921,18 +5921,29 @@ def render_sinan_criterion_timeseries_chart(
     where_sql: str,
     key_prefix: str,
     default_etiology: str = "Todos os casos",
+    single_criterion: bool = False,
 ) -> None:
-    """Renderiza pontos anuais e tendência LOESS da composição de CRITERIO."""
-    st.markdown("#### Critérios diagnósticos ao longo do tempo")
-    st.caption(
-        "Como ler: cada cor representa um código oficial de `CRITERIO` do Quadro V. Os pontos são os resultados "
-        "anuais efetivamente observados; a linha é uma tendência LOESS descritiva traçada sobre esses pontos, e não "
-        "uma contagem observada adicional. Em **Percentual no ano**, cada ponto é `casos daquele critério no ano ÷ "
-        "todos os casos elegíveis daquele ano × 100`; em **Número absoluto**, mostra-se diretamente a contagem anual. "
-        "O denominador é, portanto, recalculado ano a ano. Na legenda, clique sobre o nome de um critério para ocultar "
-        "sua respectiva linha; clique novamente para restaurá-la. Uma explicação didática do algoritmo, das escolhas e das "
-        "limitações está na seção **Metodologia — Gráficos de linha com suavização LOESS**."
-    )
+    """Renderiza as séries de CRITERIO ou destaca um critério por vez."""
+    if single_criterion:
+        title = "Esmiuçando os critérios diagnósticos ao longo do tempo"
+        st.markdown(f"#### {title}")
+        st.caption(
+            "Cada ficha tem um campo CRITERIO. Selecione o critério de confirmação registrado para acompanhar "
+            "sua frequência anual em número absoluto ou percentual dos casos elegíveis do ano. "
+            "A ficha registra os exames em campos separados de CRITERIO."
+        )
+    else:
+        title = "Critérios diagnósticos ao longo do tempo"
+        st.markdown(f"#### {title}")
+        st.caption(
+            "Como ler: cada cor representa um código oficial de `CRITERIO` do Quadro V. Os pontos são os resultados "
+            "anuais efetivamente observados; a linha é uma tendência LOESS descritiva traçada sobre esses pontos, e não "
+            "uma contagem observada adicional. Em **Percentual no ano**, cada ponto é `casos daquele critério no ano ÷ "
+            "todos os casos elegíveis daquele ano × 100`; em **Número absoluto**, mostra-se diretamente a contagem anual. "
+            "O denominador é, portanto, recalculado ano a ano. Na legenda, clique sobre o nome de um critério para ocultar "
+            "sua respectiva linha; clique novamente para restaurá-la. Uma explicação didática do algoritmo, das escolhas e das "
+            "limitações está na seção **Metodologia — Gráficos de linha com suavização LOESS**."
+        )
     dt_sql = exprs.get("dt")
     classi_code = exprs.get("classi_code")
     criterion_code = exprs.get("criterio_code")
@@ -5961,6 +5972,14 @@ def render_sinan_criterion_timeseries_chart(
     if scope is None:
         return
     selected_where, stratum, scope_label, criterion_codes = scope
+    selected_criterion = None
+    if single_criterion:
+        selected_criterion = st.selectbox(
+            "Critério diagnóstico registrado",
+            list(criterion_codes or SINAN_CRITERIO),
+            format_func=SINAN_CRITERIO.__getitem__,
+            key=f"{key_prefix}_criterion_timeseries_code",
+        )
     measure = st.radio(
         "Medida exibida",
         ["Percentual no ano", "Número absoluto"],
@@ -5981,10 +6000,12 @@ def render_sinan_criterion_timeseries_chart(
         st.info(f"Não há registros com data válida em {scope_label} no recorte atual.")
         return
 
+    if selected_criterion is not None:
+        temporal_df = temporal_df.loc[temporal_df["codigo"].eq(selected_criterion)]
     temporal_df = temporal_df.copy()
     temporal_df["ano"] = pd.to_numeric(temporal_df["ano"], errors="coerce").astype("Int64")
     temporal_df["n"] = pd.to_numeric(temporal_df["n"], errors="coerce").fillna(0)
-    if criterion_codes is not None:
+    if selected_criterion is not None or criterion_codes is not None:
         plotted = temporal_df.copy()
     else:
         active_codes = temporal_df.groupby("codigo", dropna=False)["n"].sum()
@@ -6005,6 +6026,8 @@ def render_sinan_criterion_timeseries_chart(
             if criterion_codes is not None
             else set(SINAN_CRITERIO)
         )
+        if selected_criterion is not None:
+            allowed_code_set = {selected_criterion}
         criterion_order = [
             label for code, label in SINAN_CRITERIO.items() if code in allowed_code_set
         ]
@@ -6081,7 +6104,7 @@ def render_sinan_criterion_timeseries_chart(
                 )
             )
         fig.update_layout(
-            title="Critérios diagnósticos ao longo do tempo",
+            title=title,
             xaxis_title="Ano",
             yaxis_title=y_label,
             legend_title_text="Critério diagnóstico",
@@ -6095,12 +6118,18 @@ def render_sinan_criterion_timeseries_chart(
         # curva LOESS, preservando uma única cor fixa para cada critério.
         render_plotly_chart(
             preserve_trace_colors(fig),
-            calc_title="Série temporal dos critérios diagnósticos",
+            calc_title=title if single_criterion else "Série temporal dos critérios diagnósticos",
         )
+        render_interval_total(plotted, by_col="criterio", value_label="casos", max_items=len(SINAN_CRITERIO))
 
     if criterion_codes is not None:
         denominator_note = (
             "O denominador anual inclui os casos com data válida e com um dos sete critérios do recorte bacteriano."
+        )
+    elif single_criterion:
+        denominator_note = (
+            "O denominador de cada ano inclui todos os casos elegíveis com data válida no recorte, "
+            "inclusive os que estão sem critério válido."
         )
     else:
         denominator_note = (
@@ -6117,7 +6146,7 @@ def render_sinan_criterion_timeseries_chart(
         "teste de significância ou evidência causal. Oscilações em anos com denominadores pequenos exigem cautela; "
         "confira no cursor e na tabela o total anual, os casos do critério e a quantidade com `CRITERIO` válido."
     )
-    if criterion_codes is not None:
+    if criterion_codes is not None and selected_criterion is None:
         first_year = int(pd.to_numeric(temporal_df["ano"], errors="coerce").min())
         last_year = int(pd.to_numeric(temporal_df["ano"], errors="coerce").max())
         st.caption(
@@ -6129,10 +6158,10 @@ def render_sinan_criterion_timeseries_chart(
         temporal_df["valor_loess"] = pd.to_numeric(plotted["valor_loess"], errors="coerce")
     display_df = temporal_df.drop(columns=["ordem"], errors="ignore")
     copyable_dataframe(display_df, width="stretch", hide_index=True)
-    download_button(
-        display_df,
-        f"sinan_criterios_tempo_{safe_filename(scope_label)}.csv",
-    )
+    filename = f"sinan_criterios_tempo_{safe_filename(scope_label)}"
+    if selected_criterion is not None:
+        filename += f"_criterio_{selected_criterion}"
+    download_button(display_df, f"{filename}.csv")
 
 
 def query_category_top_with_outros(table: LoadedTable, category_sql: str, where_sql: str, top_n: int = 15, outros_label: str = "Outros municípios") -> pd.DataFrame:
@@ -15829,6 +15858,13 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
         conversion_base_where,
         key_prefix="sinan_cid_etiology",
     )
+    render_sinan_criterion_timeseries_chart(
+        table,
+        exprs,
+        conversion_base_where,
+        key_prefix="sinan_cid_etiology_single",
+        single_criterion=True,
+    )
 
     if exprs.get("con_label"):
         con_coverage_text = ""
@@ -18617,6 +18653,14 @@ def render_detailed_etiology_analysis_tab(
         key_prefix="sinan_detailed_etiology_confirmed",
         default_etiology="Meningites bacterianas",
     )
+    render_sinan_criterion_timeseries_chart(
+        table,
+        exprs,
+        base_where,
+        key_prefix="sinan_detailed_etiology_confirmed_single",
+        default_etiology="Meningites bacterianas",
+        single_criterion=True,
+    )
     st.divider()
 
     classi_code = exprs.get("classi_code")
@@ -21114,9 +21158,11 @@ def render_methodology():
         "naquela categoria, inclusive os que estão sem CRITERIO válido."
     )
     st.markdown(
-        "Os dois gráficos alternam entre número absoluto e percentual. Na composição, o percentual é calculado "
-        "sobre o recorte completo. Na série temporal, o denominador inclui os casos elegíveis com data válida de "
-        "cada ano. A série exibe os valores observados como pontos e a tendência calculada com LOESS."
+        "Os gráficos alternam entre número absoluto e percentual. Na composição, o percentual é calculado "
+        "sobre o recorte completo. Nas séries temporais, o denominador inclui os casos elegíveis com data válida de "
+        "cada ano. Os pontos são os valores observados e a curva mostra a tendência LOESS. O texto abaixo do gráfico "
+        "soma as contagens dos métodos no período. Em **Esmiuçando os critérios diagnósticos ao longo do tempo**, "
+        "o seletor de CRITERIO limita a série ao código de confirmação registrado, mantendo o denominador anual."
     )
     st.markdown("### Referência CID-10")
     render_cid_reference()
