@@ -18473,61 +18473,67 @@ def render_detailed_etiology_analysis_tab(
         base_where,
         key_prefix="sinan_detailed_etiology",
     )
-    st.markdown("#### Recorte etiológico da série temporal entre confirmados")
+    # Campo 51 da ficha SINAN. O recorte bacteriano exclui meningococcemia isolada (01)
+    # e a forma tuberculosa, que tem uma opção própria.
+    etiology_codes = {
+        "Meningites bacterianas": ("02", "03", "05", "09", "10"),
+        "Todos os casos": (),
+        "Meningites assépticas": ("07",),
+        "Meningite tuberculosa": ("04",),
+        "Meningites por outras etiologias": ("08",),
+    }
     temporal_etiology_group = st.radio(
-        "Estratificação etiológica dos critérios ao longo do tempo",
-        ["Meningites bacterianas", "Meningites assépticas"],
+        "Recorte da série temporal dos critérios diagnósticos",
+        list(etiology_codes),
         horizontal=True,
         key="sinan_detailed_etiology_confirmed_timeseries_group",
     )
     classi_code = exprs.get("classi_code")
     con_code = exprs.get("con_code")
     criterio_code = exprs.get("criterio_code")
-    if classi_code and con_code and criterio_code:
-        eligible_criterion_codes = [
-            code for code in SINAN_CRITERIO if code not in {"04", "06", "07"}
-        ]
-        eligible_criteria_sql = ", ".join(qstr(code) for code in eligible_criterion_codes)
-        con_codes = ["02", "03", "05", "09", "10"] if temporal_etiology_group == "Meningites bacterianas" else ["07"]
-        con_codes_sql = ", ".join(qstr(code) for code in con_codes)
-        temporal_etiology_where = append_clause(base_where, f"({classi_code}) = '1'")
-        temporal_etiology_where = append_clause(
-            temporal_etiology_where, f"({con_code}) IN ({con_codes_sql})"
+    con_codes = etiology_codes[temporal_etiology_group]
+    if con_codes and not con_code:
+        st.warning(
+            "CON_DIAGES precisa estar presente para selecionar uma etiologia. "
+            "O recorte Todos os casos continua disponível."
         )
-        temporal_etiology_where = append_clause(
-            temporal_etiology_where, f"({criterio_code}) IN ({eligible_criteria_sql})"
-        )
-        st.info(
-            "Esta série inclui exclusivamente casos confirmados do grupo etiológico selecionado. São excluídos os "
-            "casos determinados por critério clínico (`04`), quimiocitológico (`06`) ou clínico-epidemiológico (`07`), "
-            "pois esses três critérios, isoladamente, não demonstram a etiologia bacteriana ou asséptica. Permanecem "
-            "no eixo e na legenda todos os demais critérios do Quadro V — cultura (`01`), CIE (`02`), látex (`03`), "
-            "bacterioscopia (`05`), isolamento viral (`08`), PCR (`09`) e outro (`10`) — mesmo quando a série inteira é zero."
-        )
-        if temporal_etiology_group == "Meningites assépticas":
+    else:
+        temporal_where = base_where
+        criterion_codes = None
+        population_note = None
+        if con_codes:
+            con_codes_sql = ", ".join(qstr(code) for code in con_codes)
+            temporal_where = append_clause(temporal_where, f"({con_code}) IN ({con_codes_sql})")
+            population_note = f"CLASSI_FIN=1 e CON_DIAGES em ({', '.join(con_codes)})"
+
+        bacterial_scope = temporal_etiology_group == "Meningites bacterianas"
+        if bacterial_scope and criterio_code:
+            criterion_codes = [code for code in SINAN_CRITERIO if code not in {"04", "06", "07"}]
+            criterion_codes_sql = ", ".join(qstr(code) for code in criterion_codes)
+            temporal_where = append_clause(temporal_where, f"({criterio_code}) IN ({criterion_codes_sql})")
+            population_note += f" e CRITERIO em ({', '.join(criterion_codes)})"
             st.caption(
-                "No Quadro III, as etiologias assépticas nomeadas admitem principalmente os critérios 07, 08 e 09. "
-                "Como 07 é excluído neste recorte por não comprovar sozinho o agente, a informação observada tende a se "
-                "concentrar em isolamento viral (08) e PCR (09); os demais critérios continuam visíveis como referência "
-                "de ausência de registro, e não como métodos esperados para toda meningite asséptica."
+                "O recorte bacteriano exclui os critérios clínico (04), quimiocitológico (06) e "
+                "clínico-epidemiológico (07). Os demais critérios do Quadro V aparecem mesmo com contagem zero."
             )
+        elif con_codes:
+            st.caption(
+                "O gráfico mostra os critérios registrados no SINAN. Casos com CRITERIO vazio ou fora de 01–10 "
+                "entram no denominador anual e não são atribuídos a nenhuma linha."
+            )
+        else:
+            st.caption("Inclui casos confirmados e descartados, independentemente de CON_DIAGES.")
+
         render_sinan_criterion_timeseries_chart(
             table,
             exprs,
-            temporal_etiology_where,
+            temporal_where,
             key_prefix="sinan_detailed_etiology_confirmed",
-            fixed_stratum="Casos confirmados",
-            criterion_codes=eligible_criterion_codes,
+            fixed_stratum="Casos confirmados" if con_codes else "Total de casos",
+            criterion_codes=criterion_codes,
             scope_label=temporal_etiology_group.lower(),
-            population_note=(
-                f"CLASSI_FIN=1, CON_DIAGES em ({', '.join(con_codes)}) e CRITERIO diferente de 04, 06 e 07"
-            ),
-            show_zero_series=True,
-        )
-    else:
-        st.warning(
-            "CLASSI_FIN, CON_DIAGES e CRITERIO precisam estar presentes para estratificar a série temporal "
-            "entre meningites bacterianas e assépticas."
+            population_note=population_note,
+            show_zero_series=bacterial_scope,
         )
     st.divider()
 
@@ -21005,10 +21011,11 @@ def render_methodology():
         "alternar entre percentual dentro de cada ano e número absoluto. Os valores anuais observados permanecem como "
         "pontos e a tendência é desenhada por LOESS local linear, com pesos tricúbicos, janela de 2/3 dos anos e sem "
         "reponderação robusta. Anos sem um critério específico são mantidos com zero para não interromper artificialmente "
-        "a série. Em **Análise etiológica detalhada**, a mesma visualização aparece logo abaixo da composição, restrita "
-        "aos casos confirmados e alternável entre meningites bacterianas e assépticas; em ambos os recortes são excluídos "
-        "os critérios clínico (04), quimiocitológico (06) e clínico-epidemiológico (07), pois isoladamente não determinam "
-        "etiologia. Os sete critérios restantes permanecem visíveis mesmo quando não houve nenhum registro."
+        "a série. Em **Análise etiológica detalhada**, o gráfico permite selecionar todos os casos classificados "
+        "(confirmados e descartados) ou apenas os casos confirmados de uma etiologia: bacteriana (02, 03, 05, 09, 10), "
+        "asséptica (07), tuberculosa (04) ou outra etiologia (08), segundo CON_DIAGES. O recorte bacteriano exclui "
+        "os critérios clínico (04), quimiocitológico (06) e clínico-epidemiológico (07), e exibe os sete critérios "
+        "restantes mesmo com contagem zero. Nos demais recortes, o denominador anual inclui casos sem CRITERIO válido."
     )
     st.markdown("### Referência CID-10")
     render_cid_reference()
