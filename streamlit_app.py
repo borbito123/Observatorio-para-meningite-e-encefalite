@@ -5734,7 +5734,7 @@ def render_sinan_criterion_scope(
     default_etiology: str = "Todos os casos",
     fixed_etiology: Optional[str] = None,
     include_all_notifications: bool = False,
-    compare_final_classifications: bool = False,
+    comparison_label: Optional[str] = None,
 ) -> Optional[Tuple[str, str, str]]:
     """Seleciona o recorte usado na composição e na série anual de CRITERIO."""
     # Campo 51 da ficha SINAN. A forma tuberculosa tem um recorte próprio.
@@ -5759,8 +5759,8 @@ def render_sinan_criterion_scope(
     con_codes = etiology_codes[etiology]
     if not con_codes:
         strata = ["Total de casos", "Casos confirmados", "Casos descartados"]
-        if compare_final_classifications:
-            strata.insert(0, SINAN_COMPARE_FINAL_CLASSIFICATIONS)
+        if comparison_label:
+            strata.insert(0, comparison_label)
         if include_all_notifications:
             strata.append("Todas as notificações")
         stratum = st.radio(
@@ -7197,6 +7197,7 @@ def query_sinan_category_outcomes(
     category_col: str = "categoria",
     default_label: str = "Sem informação/ignorado",
     top_n: Optional[int] = None,
+    single_group: Optional[str] = None,
 ) -> pd.DataFrame:
     """Distribui uma categoria (ex.: sexo, raça/cor) por confirmados, descartados e sem classificação/ignorados.
 
@@ -7205,10 +7206,16 @@ def query_sinan_category_outcomes(
     nos demais indicadores do SINAN para esse grupo.
     """
     cat_ident = qident(category_col)
+    group_order = [single_group] if single_group is not None else SINAN_OUTCOME_GROUP_ORDER
+    group_sql = qstr(single_group) if single_group is not None else f"""
+        CASE WHEN ({classi_sql}) = '1' THEN 'Casos confirmados'
+             WHEN ({classi_sql}) = '2' THEN 'Casos descartados'
+             ELSE 'Sem classificação / ignorados' END
+    """
     base_sql = f"""
         SELECT
             COALESCE({category_sql}, {qstr(default_label)}) AS {cat_ident},
-            {classi_sql} AS classi
+            ({group_sql}) AS grupo
         FROM {table.ref_sql}
         {where_sql}
     """
@@ -7216,7 +7223,7 @@ def query_sinan_category_outcomes(
         categorias_cte = f"""
             categorias AS (
                 SELECT {cat_ident}, ROW_NUMBER() OVER (ORDER BY COUNT(*) DESC, {cat_ident}) AS ordem_categoria
-                FROM ({base_sql}) base_para_top
+                FROM base
                 GROUP BY 1
                 LIMIT {int(top_n)}
             )
@@ -7225,12 +7232,12 @@ def query_sinan_category_outcomes(
         categorias_cte = f"""
             categorias AS (
                 SELECT DISTINCT {cat_ident}, DENSE_RANK() OVER (ORDER BY {cat_ident}) AS ordem_categoria
-                FROM ({base_sql}) base_para_categorias
+                FROM base
             )
         """
     group_values = ", ".join(
         f"({qstr(label)}, {idx})"
-        for idx, label in enumerate(SINAN_OUTCOME_GROUP_ORDER, start=1)
+        for idx, label in enumerate(group_order, start=1)
     )
     sql = f"""
         WITH base AS (
@@ -7241,25 +7248,13 @@ def query_sinan_category_outcomes(
             SELECT g.grupo, g.ordem_grupo, c.{cat_ident}, c.ordem_categoria
             FROM grupos_ref g
             CROSS JOIN categorias c
-        ), grupos AS (
-            SELECT 'Casos confirmados' AS grupo, {cat_ident}
-            FROM base
-            WHERE classi = '1'
-            UNION ALL
-            SELECT 'Casos descartados' AS grupo, {cat_ident}
-            FROM base
-            WHERE classi = '2'
-            UNION ALL
-            SELECT 'Sem classificação / ignorados' AS grupo, {cat_ident}
-            FROM base
-            WHERE classi IS NULL OR classi NOT IN ('1', '2')
         ), counts AS (
             SELECT grupo, {cat_ident}, COUNT(*) AS n
-            FROM grupos
+            FROM base
             GROUP BY 1, 2
         ), totals AS (
             SELECT grupo, COUNT(*) AS denominador
-            FROM grupos
+            FROM base
             GROUP BY 1
         )
         SELECT
@@ -18544,7 +18539,6 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
     age = exprs.get("age")
     education = exprs.get("education")
     demography_case_base_where = base_where if (source == "SINAN" and base_where is not None) else graph_where
-    outcome_demography_where = base_where if base_where is not None else graph_where
     sinan_case_filter_options = ["Total de casos", "Casos confirmados", "Casos descartados / sem classificação"]
 
     def sinan_case_filter_where(selection: str) -> str:
@@ -18604,6 +18598,7 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
         )
         render_interval_total(pyr, value_col="n", by_col="sexo")
         suffix = sinan_case_filter_suffix(selection)
+        suffix = suffix or (safe_filename(selection) if selection else "")
         filename = f"{source.lower()}_piramide_{suffix}.csv" if suffix else f"{source.lower()}_piramide.csv"
         download_button(pyr, filename)
 
@@ -18652,7 +18647,7 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
                 etiology_key="sinan_age_raincloud_etiology",
                 stratum_key="sinan_age_raincloud_stratum",
                 include_all_notifications=True,
-                compare_final_classifications=True,
+                comparison_label=SINAN_COMPARE_FINAL_CLASSIFICATIONS,
             )
             if scope is None:
                 return
@@ -19107,21 +19102,49 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
             st.warning("Configure idade para gerar os gráficos etários. As categorias territoriais ainda podem ser exibidas abaixo.")
 
         if sex or race:
+            st.markdown("#### Sexo, raça/cor e pirâmide etária")
+            comparison_label = "Comparar confirmados, descartados e sem classificação"
+            scope = render_sinan_criterion_scope(
+                exprs, demography_case_base_where,
+                etiology_key="sinan_demographic_profiles_etiology",
+                stratum_key="sinan_demographic_profiles_stratum",
+                include_all_notifications=True,
+                comparison_label=comparison_label,
+            )
             outcome_specs = []
-            if sex:
+            if scope is not None and sex:
                 outcome_specs.append(("Sexo", sex, "sexo"))
-            if race:
+            if scope is not None and race:
                 outcome_specs.append(("Raça/cor", race, "raca_cor"))
+
+            if scope is not None:
+                selected_where, stratum, scope_label = scope
+                compare_outcomes = stratum == comparison_label
+                profile_where = selected_where if compare_outcomes else sinan_criterion_stratum_where(
+                    classi_code, selected_where, stratum,
+                )
+                group_label = scope_label[:1].upper() + scope_label[1:]
+                st.caption(
+                    "O recorte vale para os três gráficos. Os percentuais de sexo e raça/cor usam o total de "
+                    "fichas do grupo exibido. A pirâmide usa fichas com idade válida e sexo feminino ou masculino."
+                )
+                if compare_outcomes and age and sex:
+                    st.caption(
+                        "Na comparação por classificação final, sexo e raça/cor aparecem lado a lado por grupo. "
+                        "A pirâmide reúne todas as notificações do recorte."
+                    )
+
             for label, expr, cat_col in outcome_specs:
                 out_df = query_sinan_category_outcomes(
                     table,
                     expr,
                     classi_code,
-                    outcome_demography_where,
+                    profile_where,
                     category_col=cat_col,
+                    single_group=None if compare_outcomes else group_label,
                 )
                 if out_df.empty or pd.to_numeric(out_df.get("denominador"), errors="coerce").fillna(0).max() <= 0:
-                    st.info(f"Sem casos confirmados, descartados ou sem classificação para calcular {label.lower()} com os filtros atuais.")
+                    st.info(f"Sem registros para calcular {label.lower()} no recorte selecionado.")
                     continue
                 out_df = add_text(out_df)
                 categoria_order = out_df.sort_values("ordem_categoria")[cat_col].drop_duplicates().tolist()
@@ -19134,7 +19157,7 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
                     orientation="h",
                     barmode="group",
                     text="texto",
-                    title=f"{label} — confirmados, descartados e sem classificação/ignorados",
+                    title=f"{label} — {scope_label}",
                     labels={
                         cat_col: label,
                         "n": "Registros",
@@ -19143,22 +19166,18 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
                         "denominador": "Total no grupo",
                     },
                     hover_data={"texto": False, "pct": ":.2f", "denominador": True},
-                    category_orders={cat_col: categoria_order, "grupo": SINAN_OUTCOME_GROUP_ORDER},
+                    category_orders={cat_col: categoria_order, "grupo": SINAN_OUTCOME_GROUP_ORDER if compare_outcomes else [group_label]},
                 )
                 fig_outcome.update_layout(yaxis={"categoryorder": "array", "categoryarray": categoria_order[::-1]})
-                render_plotly_chart(fig_outcome, calc_title=f"{label} — confirmados, descartados e sem classificação")
+                render_plotly_chart(fig_outcome, calc_title=f"{label} — {scope_label}")
                 render_interval_total(out_df, value_col="n", by_col="grupo")
                 out_export = out_df.drop(columns=["ordem_categoria", "ordem_grupo"], errors="ignore")
                 copyable_dataframe(out_export, width="stretch", hide_index=True)
-                download_button(out_export, f"sinan_{safe_filename(label)}_confirmados_descartados_sem_classificacao.csv")
+                download_button(out_export, f"sinan_{safe_filename(label)}_{safe_filename(scope_label)}.csv")
 
                 if label == "Sexo" and age and sex:
-                    pyramid_selection = st.selectbox(
-                        "Grupo de casos para a pirâmide etária",
-                        sinan_case_filter_options,
-                        key="sinan_age_pyramid_case_filter",
-                    )
-                    render_age_pyramid_chart(sinan_case_filter_where(pyramid_selection), pyramid_selection)
+                    pyramid_selection = "Todas as notificações" if compare_outcomes else group_label
+                    render_age_pyramid_chart(profile_where, pyramid_selection)
 
         render_sinan_education_chart()
 
