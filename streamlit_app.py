@@ -665,7 +665,7 @@ PLOT_EXPLANATION_RULES: List[Tuple[str, str]] = [
     ("critério de confirmação", "Mostra quais critérios do campo CRITERIO foram registrados no estrato selecionado, permitindo comparar o peso relativo de cultura, PCR, clínica e demais critérios oficiais."),
     ("critérios diagnósticos ao longo do tempo", "Mostra os valores anuais observados como pontos e a tendência LOESS local linear como curva; a suavização usa 2/3 dos anos vizinhos e deve ser lida junto aos denominadores anuais."),
     (
-        "análise isolada dos critérios de confirmação",
+        "análise esmiuçada dos critérios de confirmação",
         "A curva mostra a tendência suavizada do critério escolhido. Em percentual, o denominador é o total de "
         "casos elegíveis com data válida em cada ano, inclusive os sem CRITERIO válido.",
     ),
@@ -5790,6 +5790,13 @@ def render_sinan_criterion_scope(
     return selected_where, "Casos confirmados", scope_label
 
 
+SINAN_CRITERION_DETAIL_TITLE = "Análise esmiuçada dos critérios de confirmação"
+SINAN_RECORDED_CRITERION_NOTE = (
+    "Este gráfico mostra apenas o critério registrado no campo **Critério de Confirmação** (`CRITERIO`). "
+    f"Para comparar com os resultados de exames registrados na ficha, consulte **{SINAN_CRITERION_DETAIL_TITLE}**."
+)
+
+
 def render_sinan_criterion_distribution_chart(
     table: LoadedTable,
     exprs: Dict[str, Optional[str]],
@@ -5801,6 +5808,7 @@ def render_sinan_criterion_distribution_chart(
     if fixed_etiology is None:
         heading = "Composição dos critérios diagnósticos registrados"
         st.markdown(f"#### {heading}")
+        st.caption(SINAN_RECORDED_CRITERION_NOTE)
     else:
         heading = "Critérios diagnósticos utilizados na classificação"
         st.markdown(f"##### {heading}")
@@ -6142,7 +6150,7 @@ def render_sinan_criterion_timeseries_chart(
 ) -> None:
     """Renderiza as séries de CRITERIO ou destaca um critério por vez."""
     if single_criterion:
-        title = "Análise isolada dos critérios de confirmação"
+        title = SINAN_CRITERION_DETAIL_TITLE
         st.markdown(f"#### {title}")
         st.caption(
             "Escolha um critério registrado no campo CRITERIO. A curva LOESS suaviza a série desse critério "
@@ -6151,6 +6159,7 @@ def render_sinan_criterion_timeseries_chart(
     else:
         title = "Critérios diagnósticos ao longo do tempo"
         st.markdown(f"#### {title}")
+        st.caption(SINAN_RECORDED_CRITERION_NOTE)
         st.caption(
             "Como ler: cada cor representa um código oficial de `CRITERIO` do Quadro V. Os pontos são os resultados "
             "anuais efetivamente observados. Os dez critérios aparecem, inclusive com zero nos anos com casos "
@@ -21382,7 +21391,7 @@ def render_methodology():
         "Os gráficos alternam entre número absoluto e percentual. Na composição, o percentual é calculado "
         "sobre o recorte completo. Nas séries temporais, o denominador inclui os casos elegíveis com data válida de "
         "cada ano. Os pontos são os valores observados e a curva mostra a tendência LOESS. O texto abaixo do gráfico "
-        "soma as contagens dos métodos no período. Em **Análise isolada dos critérios de confirmação**, "
+        "soma as contagens dos métodos no período. Em **Análise esmiuçada dos critérios de confirmação**, "
         "a curva LOESS, as contagens anuais, a comparação de outros métodos e a listagem de casos usam o mesmo "
         "código registrado em CRITERIO."
     )
