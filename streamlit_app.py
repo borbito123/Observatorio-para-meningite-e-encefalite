@@ -5777,10 +5777,10 @@ def render_sinan_criterion_scope(
 
     criterion_codes = None
     if etiology == "Meningites bacterianas" and agent is None and st.checkbox(
-        "Usar apenas os sete critérios do recorte bacteriano anterior",
-        value=True,
-        key=f"{etiology_key}_restrict_bacterial_criteria",
-        help="Desmarque para incluir todos os casos confirmados do grupo, inclusive os que estão sem critério válido.",
+        "Aplicar recorte histórico de sete critérios",
+        value=False,
+        key=f"{etiology_key}_bacterial_legacy_criteria",
+        help="Exclui clínico (04), quimiocitológico (06), clínico-epidemiológico (07) e registros sem critério válido.",
     ):
         criterion_codes = [code for code in SINAN_CRITERIO if code not in {"04", "06", "07"}]
         criterion_codes_sql = ", ".join(qstr(code) for code in criterion_codes)
@@ -5902,9 +5902,11 @@ def render_sinan_criterion_distribution_chart(
     valid_count = int(
         pd.to_numeric(criterion_df.get("criterios_validos"), errors="coerce").fillna(0).max()
     )
-    valid_count_text = f"{valid_count:,}".replace(",", ".")
+    valid_count_text = format_int_br(valid_count)
+    missing_count_text = format_int_br(denominator - valid_count)
     st.caption(
-        f"O recorte inclui {denominator_text} caso(s), dos quais {valid_count_text} têm critério válido. "
+        f"O recorte inclui {denominator_text} caso(s), com {valid_count_text} na soma dos métodos "
+        f"e {missing_count_text} sem código válido em CRITERIO. "
         "O percentual do recorte usa todos os casos selecionados. Se houver casos sem critério válido, a soma "
         "pode ficar abaixo de 100%. A tabela também mostra o percentual entre casos com critério válido."
     )
@@ -6121,6 +6123,16 @@ def render_sinan_criterion_timeseries_chart(
             calc_title=title if single_criterion else "Série temporal dos critérios diagnósticos",
         )
         render_interval_total(plotted, by_col="criterio", value_label="casos", max_items=len(SINAN_CRITERIO))
+
+    if selected_criterion is None:
+        annual_totals = temporal_df.drop_duplicates(subset=["ano"])
+        total_cases = int(annual_totals["denominador_ano"].sum())
+        cases_in_methods = int(annual_totals["criterios_validos_ano"].sum())
+        st.caption(
+            f"O recorte temporal reúne {format_int_br(total_cases)} casos com data válida, "
+            f"com {format_int_br(cases_in_methods)} na soma dos métodos "
+            f"e {format_int_br(total_cases - cases_in_methods)} sem código válido em CRITERIO."
+        )
 
     if criterion_codes is not None:
         denominator_note = (
@@ -21153,9 +21165,9 @@ def render_methodology():
         "e 10 para bacterianas, 07 para assépticas, 04 para tuberculosa, 08 para outras etiologias e 06 para meningite "
         "não especificada. Bacterianas, assépticas e outras etiologias podem ser vistas em conjunto ou detalhadas "
         "pelos códigos de CON_DIAGES e pelos campos CLA_ME_BAC, CLA_ME_ASS e CLA_ME_ETI, conforme o grupo. "
-        "No total bacteriano, o recorte anterior restringe a análise a sete critérios. Desmarque essa opção para "
-        "incluir todos os casos do grupo no denominador. As categorias específicas usam todos os casos confirmados "
-        "naquela categoria, inclusive os que estão sem CRITERIO válido."
+        "O total bacteriano inclui por padrão todos os casos confirmados do grupo. A opção de recorte histórico "
+        "restringe a análise a sete critérios. As categorias específicas usam todos os casos confirmados na "
+        "categoria, inclusive os que estão sem CRITERIO válido."
     )
     st.markdown(
         "Os gráficos alternam entre número absoluto e percentual. Na composição, o percentual é calculado "
