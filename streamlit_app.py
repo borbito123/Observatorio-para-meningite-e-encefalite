@@ -5481,8 +5481,9 @@ def query_sinan_criterion_distribution(
     criterion_sql: str,
     where_sql: str,
     stratum: str,
+    criterion_codes: Optional[Sequence[str]] = None,
 ) -> pd.DataFrame:
-    """Distribui os dez critérios oficiais no estrato válido selecionado."""
+    """Distribui os critérios oficiais selecionados no estrato."""
     if stratum == "Casos confirmados":
         stratum_clause = f"({classi_sql}) = '1'"
     elif stratum == "Casos descartados":
@@ -5490,11 +5491,14 @@ def query_sinan_criterion_distribution(
     else:
         stratum_clause = f"({classi_sql}) IN ('1', '2')"
     selected_where = append_clause(where_sql, stratum_clause)
+    allowed_codes = [code for code in SINAN_CRITERIO if criterion_codes is None or code in criterion_codes]
+    if not allowed_codes:
+        return pd.DataFrame()
     criterion_rows_sql = ",\n                ".join(
-        f"({qstr(code)}, {qstr(label)}, {order})"
-        for order, (code, label) in enumerate(SINAN_CRITERIO.items(), start=1)
+        f"({qstr(code)}, {qstr(SINAN_CRITERIO[code])}, {order})"
+        for order, code in enumerate(allowed_codes, start=1)
     )
-    valid_codes_sql = ", ".join(qstr(code) for code in SINAN_CRITERIO)
+    valid_codes_sql = ", ".join(qstr(code) for code in allowed_codes)
     sql = f"""
         WITH criterios(codigo, criterio, ordem) AS (
             VALUES {criterion_rows_sql}
@@ -5667,6 +5671,67 @@ def _loess_predict(
     return np.asarray(predictions, dtype=float)
 
 
+def render_sinan_criterion_scope(
+    exprs: Dict[str, Optional[str]],
+    where_sql: str,
+    etiology_key: str,
+    stratum_key: str,
+    default_etiology: str = "Todos os casos",
+) -> Optional[Tuple[str, str, str, Optional[Sequence[str]]]]:
+    """Seleciona o recorte usado na composição e na série anual de CRITERIO."""
+    # Campo 51 da ficha SINAN. O grupo bacteriano mantém o recorte histórico
+    # sem meningococcemia isolada (01) e com a forma tuberculosa separada.
+    etiology_codes = {
+        "Todos os casos": (),
+        "Meningites bacterianas": ("02", "03", "05", "09", "10"),
+        "Meningites assépticas": ("07",),
+        "Meningite tuberculosa": ("04",),
+        "Meningites por outras etiologias": ("08",),
+    }
+    etiology_options = list(etiology_codes)
+    etiology = st.radio(
+        "Recorte por etiologia",
+        etiology_options,
+        index=etiology_options.index(default_etiology),
+        horizontal=True,
+        key=etiology_key,
+    )
+    con_codes = etiology_codes[etiology]
+    if not con_codes:
+        stratum = st.radio(
+            "Classificação final",
+            ["Total de casos", "Casos confirmados", "Casos descartados"],
+            horizontal=True,
+            key=stratum_key,
+            help="Total de casos inclui confirmados e descartados.",
+        )
+        return where_sql, stratum, stratum.lower(), None
+
+    con_code = exprs.get("con_code")
+    if not con_code:
+        st.warning(
+            "CON_DIAGES precisa estar presente para selecionar uma etiologia. "
+            "O recorte Todos os casos continua disponível."
+        )
+        return None
+
+    con_codes_sql = ", ".join(qstr(code) for code in con_codes)
+    selected_where = append_clause(where_sql, f"({con_code}) IN ({con_codes_sql})")
+    st.caption(f"Casos confirmados com CON_DIAGES em {', '.join(con_codes)}.")
+    criterion_codes = None
+    if etiology == "Meningites bacterianas":
+        criterion_codes = [code for code in SINAN_CRITERIO if code not in {"04", "06", "07"}]
+        criterion_codes_sql = ", ".join(qstr(code) for code in criterion_codes)
+        selected_where = append_clause(
+            selected_where, f"({exprs['criterio_code']}) IN ({criterion_codes_sql})"
+        )
+        st.caption(
+            "O recorte bacteriano inclui somente registros com um dos sete critérios selecionados, "
+            "excluindo clínico (04), quimiocitológico (06) e clínico-epidemiológico (07)."
+        )
+    return selected_where, "Casos confirmados", etiology.lower(), criterion_codes
+
+
 def render_sinan_criterion_distribution_chart(
     table: LoadedTable,
     exprs: Dict[str, Optional[str]],
@@ -5676,8 +5741,7 @@ def render_sinan_criterion_distribution_chart(
     """Renderiza a composição de CRITERIO, com o mesmo cálculo em diferentes seções."""
     st.markdown("#### Composição dos critérios diagnósticos registrados")
     st.caption(
-        "Este gráfico é diferente da análise de presença de critério: aqui cada barra corresponde a um dos "
-        "dez critérios oficiais do Quadro V e mostra sua participação no estrato selecionado."
+        "Cada barra mostra a frequência de um critério oficial de confirmação no recorte selecionado."
     )
     classi_code = exprs.get("classi_code")
     criterion_code = exprs.get("criterio_code")
@@ -5687,19 +5751,28 @@ def render_sinan_criterion_distribution_chart(
         )
         return
 
-    stratum_options = ["Total de casos", "Casos confirmados", "Casos descartados"]
-    stratum = st.radio(
-        "Estratificação da composição dos critérios diagnósticos",
-        stratum_options,
+    scope = render_sinan_criterion_scope(
+        exprs,
+        where_sql,
+        etiology_key=f"{key_prefix}_distribution_group",
+        stratum_key=f"{key_prefix}_criterion_distribution_stratum",
+    )
+    if scope is None:
+        return
+    selected_where, stratum, scope_label, criterion_codes = scope
+    measure = st.radio(
+        "Medida exibida",
+        ["Número absoluto", "Percentual no recorte"],
         horizontal=True,
-        key=f"{key_prefix}_criterion_distribution_stratum",
+        key=f"{key_prefix}_criterion_distribution_measure",
     )
     criterion_df = query_sinan_criterion_distribution(
         table,
         classi_code,
         criterion_code,
-        where_sql,
+        selected_where,
         stratum,
+        criterion_codes=criterion_codes,
     )
     denominator = (
         int(pd.to_numeric(criterion_df.get("denominador_estrato"), errors="coerce").fillna(0).max())
@@ -5707,7 +5780,7 @@ def render_sinan_criterion_distribution_chart(
         else 0
     )
     if denominator <= 0:
-        st.info(f"Não há registros válidos em {stratum.lower()} no recorte atual.")
+        st.info(f"Não há registros válidos em {scope_label} no recorte atual.")
         return
 
     criterion_df = criterion_df.copy()
@@ -5715,20 +5788,23 @@ def render_sinan_criterion_distribution_chart(
         f"{int(n):,} ({float(pct):.2f}%)".replace(",", "X").replace(".", ",").replace("X", ".")
         for n, pct in zip(criterion_df["n"], criterion_df["pct_estrato"])
     ]
-    plotted = criterion_df.loc[pd.to_numeric(criterion_df["n"], errors="coerce").fillna(0) > 0].copy()
+    plotted = criterion_df
+    if criterion_codes is None:
+        plotted = criterion_df.loc[criterion_df["n"] > 0].copy()
     denominator_text = f"{denominator:,}".replace(",", ".")
     if plotted.empty:
         st.info(
             f"Há {denominator_text} caso(s) no estrato, mas nenhum possui CRITERIO válido do Quadro V."
         )
     else:
+        x_col = "pct_estrato" if measure == "Percentual no recorte" else "n"
         fig = px.bar(
             plotted,
-            x="n",
+            x=x_col,
             y="criterio",
             orientation="h",
             text="texto",
-            title=f"Critérios diagnósticos registrados — {stratum.lower()}",
+            title=f"Critérios diagnósticos registrados — {scope_label}",
             labels={
                 "criterio": "Critério diagnóstico",
                 "n": "Casos",
@@ -5740,6 +5816,7 @@ def render_sinan_criterion_distribution_chart(
             hover_data={
                 "texto": False,
                 "codigo": True,
+                "n": True,
                 "pct_estrato": ":.2f",
                 "pct_criterios_validos": ":.2f",
                 "denominador_estrato": True,
@@ -5747,6 +5824,8 @@ def render_sinan_criterion_distribution_chart(
                 "ordem": False,
             },
         )
+        if x_col == "pct_estrato":
+            fig.update_xaxes(range=[0, 100], ticksuffix="%")
         fig.update_layout(yaxis={"categoryorder": "total ascending"})
         render_plotly_chart(fig, calc_title="Composição dos critérios diagnósticos registrados")
 
@@ -5755,16 +5834,15 @@ def render_sinan_criterion_distribution_chart(
     )
     valid_count_text = f"{valid_count:,}".replace(",", ".")
     st.caption(
-        f"Denominador: {denominator_text} caso(s) em {stratum.lower()}, considerando apenas CLASSI_FIN válido (1 ou 2); "
-        f"{valid_count_text} possuem um código CRITERIO oficial de 01 a 10. O percentual exibido nas barras usa todos "
-        "os casos do estrato, inclusive aqueles sem critério válido; por isso, a soma pode ser inferior a 100%. "
-        "A tabela também informa o percentual calculado somente entre os critérios válidos."
+        f"O recorte inclui {denominator_text} caso(s), dos quais {valid_count_text} têm critério válido. "
+        "O percentual do recorte usa todos os casos selecionados. Se houver casos sem critério válido, a soma "
+        "pode ficar abaixo de 100%. A tabela também mostra o percentual entre casos com critério válido."
     )
     display_df = criterion_df.drop(columns=["ordem", "texto"], errors="ignore")
     copyable_dataframe(display_df, width="stretch", hide_index=True)
     download_button(
         display_df,
-        f"sinan_composicao_criterios_{stratum.lower().replace(' ', '_')}.csv",
+        f"sinan_composicao_criterios_{scope_label.replace(' ', '_')}.csv",
     )
 
 
@@ -5773,16 +5851,10 @@ def render_sinan_criterion_timeseries_chart(
     exprs: Dict[str, Optional[str]],
     where_sql: str,
     key_prefix: str,
-    fixed_stratum: Optional[str] = None,
-    criterion_codes: Optional[Sequence[str]] = None,
-    scope_label: Optional[str] = None,
-    population_note: Optional[str] = None,
-    show_zero_series: bool = False,
+    default_etiology: str = "Todos os casos",
 ) -> None:
     """Renderiza pontos anuais e tendência LOESS da composição de CRITERIO."""
-    heading_context = scope_label or (fixed_stratum.lower() if fixed_stratum else "")
-    heading_suffix = f" — {heading_context}" if heading_context else ""
-    st.markdown(f"#### Critérios diagnósticos ao longo do tempo{heading_suffix}")
+    st.markdown("#### Critérios diagnósticos ao longo do tempo")
     st.caption(
         "Como ler: cada cor representa um código oficial de `CRITERIO` do Quadro V. Os pontos são os resultados "
         "anuais efetivamente observados; a linha é uma tendência LOESS descritiva traçada sobre esses pontos, e não "
@@ -5810,43 +5882,40 @@ def render_sinan_criterion_timeseries_chart(
         )
         return
 
-    if fixed_stratum is None:
-        c_stratum, c_measure = st.columns(2)
-        with c_stratum:
-            stratum = st.radio(
-                "Estratificação temporal dos critérios diagnósticos",
-                ["Total de casos", "Casos confirmados", "Casos descartados"],
-                horizontal=True,
-                key=f"{key_prefix}_criterion_timeseries_stratum",
-            )
-    else:
-        stratum = fixed_stratum
-        c_measure = st.container()
-    with c_measure:
-        measure = st.radio(
-            "Medida exibida",
-            ["Percentual no ano", "Número absoluto"],
-            horizontal=True,
-            key=f"{key_prefix}_criterion_timeseries_measure",
-        )
+    scope = render_sinan_criterion_scope(
+        exprs,
+        where_sql,
+        etiology_key=f"{key_prefix}_timeseries_group",
+        stratum_key=f"{key_prefix}_criterion_timeseries_stratum",
+        default_etiology=default_etiology,
+    )
+    if scope is None:
+        return
+    selected_where, stratum, scope_label, criterion_codes = scope
+    measure = st.radio(
+        "Medida exibida",
+        ["Percentual no ano", "Número absoluto"],
+        horizontal=True,
+        key=f"{key_prefix}_criterion_timeseries_measure",
+    )
 
     temporal_df = query_sinan_criterion_timeseries(
         table,
         dt_sql,
         classi_code,
         criterion_code,
-        where_sql,
+        selected_where,
         stratum,
         criterion_codes=criterion_codes,
     )
     if temporal_df.empty:
-        st.info(f"Não há registros com data válida em {stratum.lower()} no recorte atual.")
+        st.info(f"Não há registros com data válida em {scope_label} no recorte atual.")
         return
 
     temporal_df = temporal_df.copy()
     temporal_df["ano"] = pd.to_numeric(temporal_df["ano"], errors="coerce").astype("Int64")
     temporal_df["n"] = pd.to_numeric(temporal_df["n"], errors="coerce").fillna(0)
-    if show_zero_series:
+    if criterion_codes is not None:
         plotted = temporal_df.copy()
     else:
         active_codes = temporal_df.groupby("codigo", dropna=False)["n"].sum()
@@ -5943,7 +6012,7 @@ def render_sinan_criterion_timeseries_chart(
                 )
             )
         fig.update_layout(
-            title=f"Critérios diagnósticos ao longo do tempo — {heading_context or stratum.lower()}",
+            title=f"Critérios diagnósticos ao longo do tempo — {scope_label}",
             xaxis_title="Ano",
             yaxis_title=y_label,
             legend_title_text="Critério diagnóstico",
@@ -5960,10 +6029,9 @@ def render_sinan_criterion_timeseries_chart(
             calc_title="Série temporal dos critérios diagnósticos",
         )
 
-    if population_note:
+    if criterion_codes is not None:
         denominator_note = (
-            "O denominador de cada ano contém somente os casos com data válida que atendem ao recorte etiológico "
-            f"informado: {population_note}."
+            "O denominador anual inclui os casos com data válida e com um dos sete critérios do recorte bacteriano."
         )
     else:
         denominator_note = (
@@ -5980,7 +6048,7 @@ def render_sinan_criterion_timeseries_chart(
         "teste de significância ou evidência causal. Oscilações em anos com denominadores pequenos exigem cautela; "
         "confira no cursor e na tabela o total anual, os casos do critério e a quantidade com `CRITERIO` válido."
     )
-    if show_zero_series:
+    if criterion_codes is not None:
         first_year = int(pd.to_numeric(temporal_df["ano"], errors="coerce").min())
         last_year = int(pd.to_numeric(temporal_df["ano"], errors="coerce").max())
         st.caption(
@@ -5994,7 +6062,7 @@ def render_sinan_criterion_timeseries_chart(
     copyable_dataframe(display_df, width="stretch", hide_index=True)
     download_button(
         display_df,
-        f"sinan_criterios_tempo_{safe_filename(heading_context or stratum)}.csv",
+        f"sinan_criterios_tempo_{safe_filename(scope_label)}.csv",
     )
 
 
@@ -18473,68 +18541,17 @@ def render_detailed_etiology_analysis_tab(
         base_where,
         key_prefix="sinan_detailed_etiology",
     )
-    # Campo 51 da ficha SINAN. O recorte bacteriano exclui meningococcemia isolada (01)
-    # e a forma tuberculosa, que tem uma opção própria.
-    etiology_codes = {
-        "Meningites bacterianas": ("02", "03", "05", "09", "10"),
-        "Todos os casos": (),
-        "Meningites assépticas": ("07",),
-        "Meningite tuberculosa": ("04",),
-        "Meningites por outras etiologias": ("08",),
-    }
-    temporal_etiology_group = st.radio(
-        "Recorte da série temporal dos critérios diagnósticos",
-        list(etiology_codes),
-        horizontal=True,
-        key="sinan_detailed_etiology_confirmed_timeseries_group",
+    render_sinan_criterion_timeseries_chart(
+        table,
+        exprs,
+        base_where,
+        key_prefix="sinan_detailed_etiology_confirmed",
+        default_etiology="Meningites bacterianas",
     )
-    classi_code = exprs.get("classi_code")
-    con_code = exprs.get("con_code")
-    criterio_code = exprs.get("criterio_code")
-    con_codes = etiology_codes[temporal_etiology_group]
-    if con_codes and not con_code:
-        st.warning(
-            "CON_DIAGES precisa estar presente para selecionar uma etiologia. "
-            "O recorte Todos os casos continua disponível."
-        )
-    else:
-        temporal_where = base_where
-        criterion_codes = None
-        population_note = None
-        if con_codes:
-            con_codes_sql = ", ".join(qstr(code) for code in con_codes)
-            temporal_where = append_clause(temporal_where, f"({con_code}) IN ({con_codes_sql})")
-            population_note = f"CLASSI_FIN=1 e CON_DIAGES em ({', '.join(con_codes)})"
-
-        bacterial_scope = temporal_etiology_group == "Meningites bacterianas"
-        if bacterial_scope and criterio_code:
-            criterion_codes = [code for code in SINAN_CRITERIO if code not in {"04", "06", "07"}]
-            criterion_codes_sql = ", ".join(qstr(code) for code in criterion_codes)
-            temporal_where = append_clause(temporal_where, f"({criterio_code}) IN ({criterion_codes_sql})")
-            population_note += f" e CRITERIO em ({', '.join(criterion_codes)})"
-            st.caption(
-                "O recorte bacteriano exclui os critérios clínico (04), quimiocitológico (06) e "
-                "clínico-epidemiológico (07). Os demais critérios do Quadro V aparecem mesmo com contagem zero."
-            )
-        elif con_codes:
-            st.caption(
-                "O gráfico mostra os critérios registrados no SINAN. Casos com CRITERIO vazio ou fora de 01–10 "
-                "entram no denominador anual e não são atribuídos a nenhuma linha."
-            )
-
-        render_sinan_criterion_timeseries_chart(
-            table,
-            exprs,
-            temporal_where,
-            key_prefix="sinan_detailed_etiology_confirmed",
-            fixed_stratum="Casos confirmados" if con_codes else None,
-            criterion_codes=criterion_codes,
-            scope_label=temporal_etiology_group.lower() if con_codes else None,
-            population_note=population_note,
-            show_zero_series=bacterial_scope,
-        )
     st.divider()
 
+    classi_code = exprs.get("classi_code")
+    con_code = exprs.get("con_code")
     con_label = exprs.get("con_label")
     if not classi_code or not con_code or not con_label:
         st.warning(
@@ -21000,21 +21017,18 @@ def render_methodology():
         "instáveis; por isso, a tabela e o cursor devem ser consultados antes de interpretar mudanças nas bordas da série."
     )
     st.markdown(
-        "A composição de `CRITERIO`, disponível em **Análise etiológica e CID-10** e **Análise etiológica detalhada**, "
-        "pode ser alternada entre total válido (`CLASSI_FIN` 1 ou 2), confirmados e descartados. As barras exibem "
-        "contagem e percentual do estrato completo; a tabela também apresenta o percentual entre critérios válidos."
+        "Em **Análise etiológica e CID-10** e **Análise etiológica detalhada**, os gráficos de composição e série "
+        "anual de `CRITERIO` permitem escolher o recorte por etiologia independentemente. No recorte **Todos os casos**, "
+        "a classificação final permite escolher total de casos (confirmados e descartados), apenas confirmados ou apenas "
+        "descartados. Os recortes por etiologia incluem confirmados segundo CON_DIAGES e usam os códigos 02, 03, 05, 09 "
+        "e 10 para bacterianas, 07 para assépticas, 04 para tuberculosa e 08 para outras etiologias. No recorte bacteriano, "
+        "são excluídos os critérios clínico (04), quimiocitológico (06) e clínico-epidemiológico (07). Os sete critérios "
+        "restantes aparecem mesmo com contagem zero. Os demais recortes incluem casos sem CRITERIO válido no denominador."
     )
     st.markdown(
-        "Em **Análise etiológica e CID-10**, a série anual de `CRITERIO` reutiliza esses mesmos estratos e permite "
-        "alternar entre percentual dentro de cada ano e número absoluto. Os valores anuais observados permanecem como "
-        "pontos e a tendência é desenhada por LOESS local linear, com pesos tricúbicos, janela de 2/3 dos anos e sem "
-        "reponderação robusta. Anos sem um critério específico são mantidos com zero para não interromper artificialmente "
-        "a série. Em **Análise etiológica detalhada**, o recorte **Todos os casos** permite escolher o total de "
-        "casos classificados, apenas confirmados ou apenas descartados. Os recortes por etiologia usam CON_DIAGES entre "
-        "confirmados para selecionar meningites bacterianas (02, 03, 05, 09, 10), assépticas (07), tuberculosas (04) "
-        "ou de outras etiologias (08). O recorte bacteriano exclui "
-        "os critérios clínico (04), quimiocitológico (06) e clínico-epidemiológico (07), e exibe os sete critérios "
-        "restantes mesmo com contagem zero. Nos demais recortes, o denominador anual inclui casos sem CRITERIO válido."
+        "Os dois gráficos alternam entre número absoluto e percentual. Na composição, o percentual é calculado "
+        "sobre o recorte completo. Na série temporal, o denominador inclui os casos elegíveis com data válida de "
+        "cada ano. A série exibe os valores observados como pontos e a tendência calculada com LOESS."
     )
     st.markdown("### Referência CID-10")
     render_cid_reference()
