@@ -19612,7 +19612,6 @@ def render_detailed_etiology_analysis_tab(
         exprs,
         base_where,
         key_prefix="sinan_detailed_etiology_confirmed_single",
-        default_etiology="Meningites bacterianas",
         single_criterion=True,
     )
     st.divider()
@@ -22102,8 +22101,9 @@ def render_methodology():
         "instáveis; por isso, a tabela e o cursor devem ser consultados antes de interpretar mudanças nas bordas da série."
     )
     st.markdown(
-        "Em **Análise etiológica e CID-10** e **Análise etiológica detalhada**, os gráficos de composição e série "
-        "anual de `CRITERIO` permitem escolher o recorte por etiologia independentemente. No recorte **Todos os casos**, "
+        "Em **Análise etiológica e CID-10** e **Análise etiológica detalhada**, a composição e a série anual de "
+        "`CRITERIO` usam uma única estratificação. A análise esmiuçada tem seus próprios filtros e começa em "
+        "**Todos os casos** nas duas seções. Nesse recorte, "
         "a classificação final permite escolher total de casos (confirmados e descartados), apenas confirmados ou apenas "
         "descartados. Os recortes por etiologia incluem confirmados segundo CON_DIAGES e usam os códigos 02, 03, 05, 09 "
         "e 10 para bacterianas, 07 para assépticas, 04 para tuberculosa, 08 para outras etiologias e 06 para meningite "
