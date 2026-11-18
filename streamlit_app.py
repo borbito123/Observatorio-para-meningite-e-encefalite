@@ -6103,6 +6103,63 @@ def sinan_confirmation_method_flag(code: str, columns: Dict[str, str], only_find
     return "(" + " OR ".join(comparisons) + ")" if comparisons else "FALSE"
 
 
+def query_sinan_coexistence_by_material(
+    table: LoadedTable,
+    where_sql: str,
+    criterion_sql: str,
+    fields: Dict[str, Dict[str, str]],
+) -> pd.DataFrame:
+    """Resume cada método na sua própria coorte CRITERIO, por material e em conjunto."""
+    method_order = ("09", "01", "03", "05", "02", "08")
+    bacterial_codes = {"03": ("01", "06", "07", "14", "28"), "09": ("01", "06", "07", "28")}
+    findings = {code: sinan_confirmation_method_flag(code, fields[code], True) for code in method_order}
+    queries = []
+    for order, code in enumerate(method_order):
+        method = SINAN_CRITERIO[code].split(" — ", 1)[1]
+        method = method[:1].upper() + method[1:]
+        specimens = SINAN_CONFIRMATION_LAB_FIELDS[code][1]
+        other_findings = " OR ".join(findings[other] for other in method_order if other != code)
+        for material_order, (field, label) in enumerate(
+            [(None, "Qualquer material disponível"), *specimens.items()]
+        ):
+            columns = fields[code]
+            if field is not None:
+                columns = {field: columns[field]} if field in columns else {}
+            result = sinan_confirmation_method_flag(code, columns, False)
+            finding = sinan_confirmation_method_flag(code, columns, True)
+            bacterial = finding
+            if code in bacterial_codes:
+                codes = ", ".join(map(qstr, bacterial_codes[code]))
+                bacterial = " OR ".join(
+                    f"COALESCE(({expr}) IN ({codes}), FALSE)" for expr in columns.values()
+                )
+            checks = {
+                "com_resultado": result,
+                "com_achado": finding,
+                "achado_bacteriano": bacterial if code != "08" else "",
+                "sem_achado_outro_metodo": f"{finding} AND NOT ({other_findings})",
+            }
+            metrics = ", ".join(
+                f"COUNT(*) FILTER (WHERE {check}) AS {name}" if columns and check else f"NULL AS {name}"
+                for name, check in checks.items()
+            )
+            queries.append(f"""
+                SELECT {order} AS ordem_metodo, {material_order} AS ordem_material,
+                       {qstr(method)} AS metodo, {qstr(label)} AS material,
+                       {qstr(field) if field else "NULL"} AS campo,
+                       COUNT(*) AS fichas_criterio, {metrics}
+                FROM base
+                WHERE ({criterion_sql}) = {qstr(code)}
+            """)
+    union_sql = " UNION ALL ".join(queries)
+    return run_query(table, f"""
+        WITH base AS (SELECT * FROM {table.ref_sql} {where_sql})
+        SELECT * EXCLUDE (ordem_metodo, ordem_material)
+        FROM ({union_sql})
+        ORDER BY ordem_metodo, ordem_material
+    """)
+
+
 def sinan_lab_record_status_sql(domain: Dict[str, str], codes_sql: str) -> str:
     """Classifica os códigos de uma ficha pela mesma ordem das tabelas agregadas."""
     findings = ", ".join(qstr(value) for value in domain if value not in SINAN_CONFIRMATION_SPECIAL_CODES)
@@ -6746,6 +6803,36 @@ def render_sinan_confirmation_detail(
         return focal_field
 
     if coexistence:
+        st.markdown("##### Resultados e coexistência por método e material")
+        st.caption(
+            "A tabela usa a população selecionada no topo. Em cada método entram apenas fichas com o "
+            "respectivo código em CRITERIO. O total de fichas do método se repete por material. "
+            "Uma ficha pode aparecer em vários materiais e conta uma vez em «Qualquer material disponível»."
+        )
+        st.caption(
+            "Resultado registrado inclui achados e os códigos 51 e 75 quando previstos. "
+            "A última coluna exige achado do próprio método no material da linha e ausência de achado "
+            "nos campos disponíveis dos outros métodos, em qualquer material. A coluna de achado bacteriano "
+            "exclui achados virais e fúngicos e fica vazia para isolamento viral."
+        )
+        summary = query_sinan_coexistence_by_material(table, where_sql, criterion, fields).rename(columns={
+            "metodo": "Método",
+            "material": "Material",
+            "campo": "Campo SINAN",
+            "fichas_criterio": "Fichas com o método em CRITERIO",
+            "com_resultado": "Com resultado registrado",
+            "com_achado": "Com achado",
+            "achado_bacteriano": "Com achado bacteriano",
+            "sem_achado_outro_metodo": "Com achado e sem achado em outro método",
+        })
+        missing_fields = [
+            field for method, (_, specimens) in SINAN_CONFIRMATION_LAB_FIELDS.items()
+            for field in specimens if field not in fields[method]
+        ]
+        if missing_fields:
+            st.caption("Campos ausentes da base, exibidos sem contagem: " + ", ".join(missing_fields) + ".")
+        copyable_dataframe(summary, width="stretch", hide_index=True)
+        download_button(summary, "sinan_coexistencia_por_metodo_e_material.csv", label="Baixar tabela de coexistência (CSV)")
         if not any(columns for other, columns in fields.items() if other != code):
             st.info("A base não contém campos de outros métodos laboratoriais para calcular a coexistência.")
             return
