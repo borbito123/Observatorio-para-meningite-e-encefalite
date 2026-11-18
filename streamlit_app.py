@@ -14,7 +14,7 @@ campos como texto, para preservar zeros à esquerda em identificadores como NU_N
 a usar exatamente o mesmo caminho de consulta dos demais formatos.
 
 Executar:
-    streamlit run "streamlit_app.py" --server.disconnectedSessionTTL 3600
+    streamlit run "app_meningite_epidemiologico_v100_plenamente funcional.py" --server.disconnectedSessionTTL 3600
 
 A configuração .streamlit/config.toml mantém a mesma sessão por 1 hora
 após uma desconexão. A opção acima também funciona ao executar de outra pasta.
@@ -665,7 +665,7 @@ PLOT_EXPLANATION_RULES: List[Tuple[str, str]] = [
     ("critério de confirmação", "Mostra quais critérios do campo CRITERIO foram registrados no estrato selecionado, permitindo comparar o peso relativo de cultura, PCR, clínica e demais critérios oficiais."),
     ("critérios diagnósticos ao longo do tempo", "Mostra os valores anuais observados como pontos e a tendência LOESS local linear como curva; a suavização usa 2/3 dos anos vizinhos e deve ser lida junto aos denominadores anuais."),
     (
-        "análise esmiuçada dos critérios de confirmação",
+        "análise esmiuçada para os critérios diagnósticos",
         "Os pontos mostram os valores observados e a curva mostra a tendência. Em percentual, o denominador é o total de "
         "casos elegíveis com data válida em cada ano, inclusive os sem CRITERIO válido.",
     ),
@@ -2737,11 +2737,12 @@ def sinan_lcr_analysis_value_expr(
         apply_quality_criteria=apply_quality_criteria,
     )
     meta = sinan_lcr_param_metadata(param_key or "")
-    # Percentuais diferenciais fora de 0-100 permanecem no dado bruto e nas
-    # tabelas de auditoria, mas nunca são usados em gráficos ou inferências que
-    # exigem uma proporção válida. Os demais tetos/sentinelas continuam sendo
-    # uma opção analítica, pois sua interpretação depende da origem do banco.
-    if enforce_percent_range and meta and "percentual" in meta.tipo_valor:
+    if (
+        sinan_lcr_quality_criteria_enabled(apply_quality_criteria)
+        and enforce_percent_range
+        and meta
+        and "percentual" in meta.tipo_valor
+    ):
         return f"CASE WHEN ({clean}) IS NULL OR ({clean}) < 0 OR ({clean}) > 100 THEN NULL ELSE ({clean}) END"
     return clean
 
@@ -2754,11 +2755,7 @@ def sinan_lcr_numeric_audit_exprs(value_expr: str, param_key: str) -> Dict[str, 
     sent_sql = _sql_numeric_tuple(codes)
     flag_sentinela = f"CASE WHEN {bruto} IN ({sent_sql}) THEN TRUE ELSE FALSE END"
     sem_sentinela = f"CASE WHEN {bruto} IN ({sent_sql}) THEN NULL ELSE {bruto} END"
-    valor_analise = sinan_lcr_analysis_value_expr(
-        value_expr,
-        param_key,
-        enforce_percent_range=True,
-    )
+    valor_analise = sinan_lcr_clean_value_expr(value_expr, param_key)
     if meta and meta.teto_plausivel is not None:
         flag_acima = f"CASE WHEN ({sem_sentinela}) IS NOT NULL AND ({sem_sentinela}) > {repr(float(meta.teto_plausivel))} THEN TRUE ELSE FALSE END"
     else:
@@ -5000,10 +4997,8 @@ def sinan_quimio_code_expr(sel: ColumnSelection) -> Optional[str]:
 def build_expressions(source: str, sel: ColumnSelection) -> Dict[str, Optional[str]]:
     exprs: Dict[str, Optional[str]] = {
         "dt": date_expr(sel.date_col) if sel.date_col else None,
-        "sex_raw": literal_str_expr(sel.sex_col) if sel.sex_col else None,
         "sex": sex_expr(sel.sex_col) if sel.sex_col else None,
         "age": build_age_sql(sel),
-        "race_raw": literal_str_expr(sel.race_col) if sel.race_col else None,
         "race": case_from_mapping(clean_code_expr(sel.race_col), RACA_COR, "Sem informação/ignorado") if sel.race_col else None,
         "education": education_label_expr(source, sel.education_col) if sel.education_col else None,
         "mun_res": clean_str_expr(sel.municipality_res_col) if sel.municipality_res_col else None,
@@ -5483,6 +5478,8 @@ def query_sinan_criterion_presence_by_classification(
 
 def sinan_criterion_stratum_where(classi_sql: str, where_sql: str, stratum: str) -> str:
     """Aplica a mesma classificação final aos gráficos e à listagem por caso."""
+    if stratum == "Todas as notificações":
+        return where_sql
     if stratum == "Casos confirmados":
         stratum_clause = f"({classi_sql}) = '1'"
     elif stratum == "Casos descartados":
@@ -5736,6 +5733,7 @@ def render_sinan_criterion_scope(
     stratum_key: str,
     default_etiology: str = "Todos os casos",
     fixed_etiology: Optional[str] = None,
+    include_all_notifications: bool = False,
 ) -> Optional[Tuple[str, str, str]]:
     """Seleciona o recorte usado na composição e na série anual de CRITERIO."""
     # Campo 51 da ficha SINAN. A forma tuberculosa tem um recorte próprio.
@@ -5759,12 +5757,12 @@ def render_sinan_criterion_scope(
         )
     con_codes = etiology_codes[etiology]
     if not con_codes:
+        strata = ["Total de casos", "Casos confirmados", "Casos descartados"]
+        if include_all_notifications:
+            strata.append("Todas as notificações")
         stratum = st.radio(
-            "Classificação final",
-            ["Total de casos", "Casos confirmados", "Casos descartados"],
-            horizontal=True,
-            key=stratum_key,
-            help="Total de casos inclui confirmados e descartados.",
+            "Classificação final", strata, horizontal=True, key=stratum_key,
+            help="Total de casos inclui confirmados e descartados. Todas as notificações também inclui registros sem classificação válida.",
         )
         return where_sql, stratum, stratum.lower()
 
@@ -5786,7 +5784,9 @@ def render_sinan_criterion_scope(
     return selected_where, "Casos confirmados", scope_label
 
 
-SINAN_CRITERION_DETAIL_TITLE = "Análise esmiuçada dos critérios de confirmação"
+SINAN_CRITERION_DETAIL_TITLE = (
+    "Análise esmiuçada para os critérios diagnósticos quando eles aparecem como o critério de classificação do caso"
+)
 SINAN_RECORDED_CRITERION_NOTE = (
     "Este gráfico mostra apenas o critério registrado no campo **Critério de Confirmação** (`CRITERIO`). "
     f"Para comparar com os resultados de exames registrados na ficha, consulte **{SINAN_CRITERION_DETAIL_TITLE}**."
@@ -5899,10 +5899,9 @@ def render_sinan_criterion_distribution_chart(
         f"O recorte inclui {denominator_text} caso(s), com {valid_count_text} na soma dos métodos "
         f"e {missing_count_text} sem código válido em CRITERIO. "
         "O percentual do recorte usa todos os casos selecionados. Se houver casos sem critério válido, a soma "
-        "pode ficar abaixo de 100%. A tabela também mostra o percentual entre casos com critério válido."
+        "pode ficar abaixo de 100%. Passe o cursor sobre as barras para ver também o percentual entre casos com critério válido."
     )
     display_df = criterion_df.drop(columns=["ordem", "texto"], errors="ignore")
-    copyable_dataframe(display_df, width="stretch", hide_index=True)
     file_prefix = "sinan_criterios_classificacao" if fixed_etiology else "sinan_composicao_criterios"
     file_scope = re.sub(r"[^\w]+", "_", scope_label.lower()).strip("_")
     download_button(display_df, f"{file_prefix}_{file_scope}.csv")
@@ -5912,19 +5911,32 @@ def render_sinan_criterion_case_table(
     table: LoadedTable,
     exprs: Dict[str, Optional[str]],
     case_where: str,
+    selected_criterion: str,
     total_cases: int,
     key_prefix: str,
 ) -> None:
-    """Exibe uma página dos registros que compõem a série do critério selecionado."""
+    """Exibe as fichas com o critério selecionado registrado em CRITERIO."""
     st.markdown("##### Casos com o critério selecionado")
+    st.caption(
+        f"Cada linha é uma ficha do SINAN no período e no recorte selecionados com "
+        f"{SINAN_CRITERIO[selected_criterion]} registrado no campo CRITERIO. "
+        "A coluna «Situação do caso» mostra a classificação final da ficha (CLASSI_FIN). "
+        "A lista inclui todas as fichas com esse critério, independentemente de haver resultado do exame "
+        "documentado nos campos laboratoriais ou de haver outros métodos registrados."
+    )
     if total_cases == 0:
         st.info("Não há casos com esse critério no recorte temporal selecionado.")
         return
 
-    names = {"NM_PACIENT": "Nome do paciente", "NU_NOTIFIC": "Número de notificação"}
+    names = {
+        "NM_PACIENT": "Nome do paciente",
+        "NU_NOTIFIC": "Número de notificação",
+        "CLASSIFICACAO_FINAL": "Situação do caso",
+    }
     fields = {
         "NM_PACIENT": exprs.get("nm_pacient_raw"),
         "NU_NOTIFIC": exprs.get("nu_notific_raw"),
+        "CLASSIFICACAO_FINAL": exprs.get("classi_label"),
         "CON_DIAGES": exprs.get("con_raw") or exprs.get("con_code"),
         "CRITERIO": exprs.get("criterio_raw") or exprs.get("criterio_code"),
         "CLA_ME_BAC": exprs.get("cla_me_bac_raw") or exprs.get("cla_me_bac_code"),
@@ -5971,284 +5983,518 @@ def render_sinan_criterion_case_table(
     st.dataframe(cases, width="stretch", hide_index=True, column_config=names)
 
 
-def sinan_lab_method_evidence(table: LoadedTable, exprs: Dict[str, Optional[str]]) -> Dict[str, Tuple[str, str, int, int]]:
-    """Agrupa resultados válidos e informativos por método, incluindo todos os materiais disponíveis."""
-    method_fields = {
-        "01": ("VII", ("LAB_CTLIQU", "LAB_CTLESA", "LAB_CTSANG", "LAB_CTESCA")),
-        "05": ("VIII", ("LAB_BCLIQU", "LAB_BCLESA", "LAB_BCSANG", "LAB_BCESCA")),
-        "02": ("IX", ("LAB_CILIQU", "LAB_CISANG")),
-        "03": ("X", ("LAB_AGLIQU", "LAB_AGSANG")),
-        "08": ("XI", ("LAB_ISLIQU", "LAB_ISFEZE")),
-        "09": ("XII", ("LAB_PCLIQU", "LAB_PCLESA", "LAB_PCSANG", "LAB_PCESCA")),
-    }
+SINAN_CONFIRMATION_LAB_FIELDS = {
+    "01": ("VII", {"LAB_CTLIQU": "Líquor", "LAB_CTLESA": "Lesão petequial",
+                   "LAB_CTSANG": "Sangue/soro", "LAB_CTESCA": "Escarro"}),
+    "02": ("IX", {"LAB_CILIQU": "Líquor", "LAB_CISANG": "Sangue/soro"}),
+    "03": ("X", {"LAB_AGLIQU": "Líquor", "LAB_AGSANG": "Sangue/soro"}),
+    "05": ("VIII", {"LAB_BCLIQU": "Líquor", "LAB_BCLESA": "Lesão petequial",
+                    "LAB_BCSANG": "Sangue/soro", "LAB_BCESCA": "Escarro"}),
+    "08": ("XI", {"LAB_ISLIQU": "Líquor", "LAB_ISFEZE": "Fezes"}),
+    "09": ("XII", {"LAB_PCLIQU": "Líquor", "LAB_PCLESA": "Lesão petequial",
+                   "LAB_PCSANG": "Sangue/soro", "LAB_PCESCA": "Escarro"}),
+}
+SINAN_CONFIRMATION_FIELD_STATUS = {
+    "achado": "Resultado com achado",
+    "sem_agente": "Nenhum agente (51)",
+    "nao_identificado": "Não identificado (75)",
+    "nao_realizado": "Não realizado (61)",
+    "ignorado": "Ignorado (62)",
+    "vazio": "Em branco",
+    "invalido": "Fora do domínio",
+}
+SINAN_CONFIRMATION_SPECIAL_CODES = {
+    "51": "sem_agente",
+    "75": "nao_identificado",
+    "61": "nao_realizado",
+    "62": "ignorado",
+}
+SINAN_CONFIRMATION_INDIRECT_NOTES = {
+    "04": "A ficha registra sinais e sintomas em campos próprios. Eles permitem descrever o quadro, "
+          "mas não determinam, individualmente, que houve confirmação clínica.",
+    "06": "O preenchimento de parâmetros do líquor documenta dados do quimiocitológico. "
+          "A ausência de valores não informa se o exame deixou de ser realizado.",
+    "07": "Os campos de contato com caso suspeito ou confirmado não operacionalizam, por si, "
+          "a confirmação clínico-epidemiológica.",
+    "10": "A ficha não tem campo laboratorial padronizado para identificar a técnica registrada como ‘Outros’.",
+}
+
+
+def sinan_confirmation_fields(
+    table: LoadedTable, exprs: Dict[str, Optional[str]],
+) -> Dict[str, Dict[str, str]]:
+    """Resolve as colunas disponíveis do campo 49, inclusive as mapeadas pelo usuário."""
     columns = schema_df(table)["coluna"].tolist()
-    methods = {}
-    for code, (quadro, fields) in method_fields.items():
-        valid_codes = _sinan_quadro_mapping(quadro)
-        valid_sql = ", ".join(qstr(value) for value in valid_codes)
-        informative_sql = ", ".join(qstr(value) for value in valid_codes if value not in {"61", "62"})
-        valid, informative = [], []
-        for field in fields:
-            value_sql = exprs.get(f"{field.lower()}_code")
-            if not value_sql:
-                col = choose_candidate(columns, [field])
-                if not col:
-                    continue
-                value_sql = dictionary_code_expr(col, pad2=True)
-            valid.append(f"COALESCE(({value_sql}) IN ({valid_sql}), FALSE)")
-            informative.append(f"COALESCE(({value_sql}) IN ({informative_sql}), FALSE)")
-        methods[code] = (
-            "(" + " OR ".join(valid) + ")" if valid else "FALSE",
-            "(" + " OR ".join(informative) + ")" if informative else "FALSE",
-            len(valid), len(fields),
-        )
-    return methods
+    fields = {}
+    for code, (_, specimens) in SINAN_CONFIRMATION_LAB_FIELDS.items():
+        fields[code] = {}
+        for field in specimens:
+            expression = exprs.get(f"{field.lower()}_code")
+            if expression is None:
+                column = choose_candidate(columns, [field])
+                if column:
+                    expression = dictionary_code_expr(column, pad2=True)
+            if expression is not None:
+                fields[code][field] = expression
+    return fields
 
 
-def render_sinan_other_exam_counts(
+def sinan_confirmation_count_by_status(
     table: LoadedTable,
-    methods: Dict[str, Tuple[str, str, int, int]],
     where_sql: str,
-    selected_criterion: str,
-    total_cases: int,
-) -> None:
-    """Compara o critério registrado com resultados de outros métodos do campo 49."""
-    title = "Critério de confirmação e registro de outros métodos"
-    st.markdown(f"##### {title}")
-    st.caption(f"Critério selecionado: {SINAN_CRITERIO[selected_criterion]}.")
-    other_methods = [evidence for code, evidence in methods.items() if code != selected_criterion]
-    has_valid = [valid for valid, _, available, _ in other_methods if available]
-    has_informative = [info for _, info, available, _ in other_methods if available]
-    available_fields = sum(available for _, _, available, _ in other_methods)
-    expected_fields = sum(expected for _, _, _, expected in other_methods)
-    counts = {"registrados": total_cases, "sem_outro_valido": None, "sem_outro_informativo": None}
-    if available_fields:
-        data = run_query(
-            table,
-            f"""
-            SELECT COUNT(*) AS registrados,
-                   COUNT(*) FILTER (WHERE NOT ({" OR ".join(has_valid)})) AS sem_outro_valido,
-                   COUNT(*) FILTER (WHERE NOT ({" OR ".join(has_informative)})) AS sem_outro_informativo
+    criterion_sql: str,
+    fields: Dict[str, str],
+    code: str,
+) -> pd.DataFrame:
+    """Conta todas as fichas por estado e campo, com cruzamento de CRITERIO."""
+    domains = SINAN_CRITERIO if code == "CRITERIO" else _sinan_quadro_mapping(
+        SINAN_CONFIRMATION_LAB_FIELDS[code][0]
+    )
+    domain_sql = ", ".join(qstr(value) for value in domains)
+    branches = " ".join(
+        f"WHEN valores.codigo = {qstr(value)} THEN {qstr(status)}"
+        for value, status in SINAN_CONFIRMATION_SPECIAL_CODES.items() if value in domains
+    )
+    values = ", ".join(f"({qstr(field)}, ({expression}))" for field, expression in fields.items())
+    valid_criteria = ", ".join(qstr(value) for value in SINAN_CRITERIO)
+    return run_query(
+        table,
+        f"""
+        WITH base AS (
+            SELECT * FROM {table.ref_sql} {where_sql}
+        )
+        SELECT valores.campo,
+               CASE {branches}
+                    WHEN valores.codigo IN ({domain_sql}) THEN 'achado'
+                    WHEN valores.codigo IS NULL THEN 'vazio' ELSE 'invalido' END AS situacao,
+               COUNT(*) AS n,
+               COUNT(*) FILTER (WHERE ({criterion_sql}) = {qstr(code)}) AS mesmo_criterio,
+               COUNT(*) FILTER (WHERE ({criterion_sql}) IN ({valid_criteria})
+                                 AND ({criterion_sql}) <> {qstr(code)}) AS outro_criterio
+        FROM base, LATERAL (VALUES {values}) AS valores(campo, codigo)
+        GROUP BY 1, 2
+        """,
+    )
+
+
+def sinan_confirmation_method_flag(code: str, columns: Dict[str, str], only_findings: bool) -> str:
+    domain = _sinan_quadro_mapping(SINAN_CONFIRMATION_LAB_FIELDS[code][0])
+    excluded = {"61", "62", "51", "75"} if only_findings else {"61", "62"}
+    values = ", ".join(qstr(value) for value in domain if value not in excluded)
+    comparisons = [f"COALESCE(({expression}) IN ({values}), FALSE)" for expression in columns.values()]
+    return "(" + " OR ".join(comparisons) + ")" if comparisons else "FALSE"
+
+
+def query_sinan_lab_result_breakdown(
+    table: LoadedTable,
+    where_sql: str,
+    criterion_sql: str,
+    field_expressions: Dict[str, str],
+    code: str,
+) -> pd.DataFrame:
+    """Conta um estado por ficha e cada código distinto uma vez por ficha."""
+    quadro, _ = SINAN_CONFIRMATION_LAB_FIELDS[code]
+    domain = _sinan_quadro_mapping(quadro)
+    findings = ", ".join(qstr(value) for value in domain if value not in SINAN_CONFIRMATION_SPECIAL_CODES)
+    special = {
+        state: f"list_contains(codigos, {qstr(value)})"
+        for value, state in SINAN_CONFIRMATION_SPECIAL_CODES.items() if value in domain
+    }
+    if "nao_realizado" in special and "ignorado" in special:
+        special = {
+            **{state: special[state] for state in ("sem_agente", "nao_identificado") if state in special},
+            "nao_realizado_e_ignorado": f"{special['nao_realizado']} AND {special['ignorado']}",
+            "nao_realizado": special["nao_realizado"],
+            "ignorado": special["ignorado"],
+        }
+    branches = "\n                    ".join(
+        f"WHEN {condition} THEN {qstr(state)}" for state, condition in special.items()
+    )
+    fields = ", ".join(f"({expression})" for expression in field_expressions.values())
+    valid_criteria = ", ".join(qstr(value) for value in SINAN_CRITERIO)
+    return run_query(
+        table,
+        f"""
+        WITH base AS (
+            SELECT list_distinct(list_value({fields})) AS codigos,
+                   ({criterion_sql}) AS criterio
             FROM {table.ref_sql}
             {where_sql}
-            """,
+        ), registros AS (
+            SELECT 'situacao' AS tipo, criterio,
+                   CASE
+                       WHEN list_has_any(codigos, [{findings}]) THEN 'achado'
+                       {branches}
+                       WHEN len(codigos) = 0 THEN 'vazio'
+                       ELSE 'invalido'
+                   END AS registro
+            FROM base
+            UNION ALL
+            SELECT 'codigo', criterio, unnest(codigos)
+            FROM base
         )
-        counts = data.iloc[0].to_dict()
-    else:
-        st.info("A base não contém os campos laboratoriais avaliados. Apenas o total registrado está disponível.")
-
-    measures = {
-        "registrados": "Total do critério registrado em CRITERIO",
-        "sem_outro_valido": "Sem outro método com resultado válido",
-        "sem_outro_informativo": "Sem outro método com resultado informativo",
-    }
-    chart_data = pd.DataFrame({"medida": list(measures.values()), "casos": [counts[key] for key in measures]})
-    fig = px.bar(
-        chart_data, x="medida", y="casos",
-        title=title, labels={"casos": "Casos", "medida": ""},
-    )
-    fig.update_traces(
-        text=[format_int_br(n) if pd.notna(n) else "" for n in chart_data["casos"]],
-        textposition="outside",
-        cliponaxis=False,
-    )
-    fig.update_xaxes(tickmode="array", tickvals=list(measures.values()), ticktext=[
-        "Total registrado<br>em CRITERIO",
-        "Sem outro método<br>com resultado válido",
-        "Sem outro método<br>com resultado informativo",
-    ])
-    fig.update_yaxes(rangemode="tozero")
-    render_plotly_chart(fig, calc_title=title)
-    st.caption(
-        f"A comparação usa {available_fields} de {expected_fields} campos de resultados dos outros métodos no campo 49. "
-        "O critério de confirmação vem de CRITERIO. Para detectar outro método, a análise ignora os resultados "
-        "do próprio método, além da punção, do aspecto e dos achados quimiocitológicos do líquor. "
-        "A medida de código válido inclui não realizado e ignorado quando previstos no dicionário. A medida "
-        "de resultado informativo exclui esses códigos e inclui resultados negativos previstos no dicionário. "
-        "Campos vazios, ausentes e fora do dicionário deixam a realização do exame indeterminada. "
-        "As duas medidas de ausência são subconjuntos do total e se sobrepõem. Resultado registrado em outro método "
-        "indica evidência laboratorial documentada, enquanto CRITERIO indica a modalidade registrada para confirmação."
+        SELECT tipo, registro, COUNT(*) AS n,
+               COUNT(*) FILTER (WHERE criterio = {qstr(code)}) AS mesmo_criterio,
+               COUNT(*) FILTER (WHERE criterio IN ({valid_criteria})
+                                 AND criterio <> {qstr(code)}) AS outro_criterio,
+               COUNT(*) FILTER (WHERE criterio IS NULL OR criterio NOT IN ({valid_criteria})) AS sem_criterio
+        FROM registros
+        GROUP BY tipo, registro
+        """,
     )
 
 
-def render_sinan_method_confirmation_crosscheck(
+def render_sinan_lab_result_tables(
     table: LoadedTable,
     exprs: Dict[str, Optional[str]],
-    cohort_where: str,
-    selected_code: str,
-    evidence: Tuple[str, str, int, int],
+    where_sql: str,
+    code: str,
+    key_prefix: str,
 ) -> None:
-    """Cruza o campo CRITERIO com resultados em qualquer material do método selecionado."""
-    title = f"{SINAN_CRITERIO[selected_code]} como exame e como critério de confirmação"
-    st.markdown(f"##### {title}")
-    valid, informative, available, expected = evidence
-    if not available:
-        st.info("A base não contém campos de resultados para esse método.")
+    quadro, specimens = SINAN_CONFIRMATION_LAB_FIELDS[code]
+    domain = _sinan_quadro_mapping(quadro)
+    fields = sinan_confirmation_fields(table, exprs)[code]
+    method_name = SINAN_CRITERIO[code].split(" — ", 1)[1]
+    st.markdown(f"##### Esmiunçando o critério diagnóstico {method_name}")
+    if not fields:
+        st.info("A base não contém campos de resultado desse método.")
         return
-    criterion = exprs["criterio_code"]
-    criteria_sql = ", ".join(qstr(code) for code in SINAN_CRITERIO)
-    code_sql = qstr(selected_code)
-    labels = {
-        1: "Com resultado informativo",
-        2: "Preenchido apenas com não realizado ou ignorado",
-        3: "Sem código válido nos campos disponíveis",
+    missing = [field for field in specimens if field not in fields]
+    if missing:
+        st.caption("Campos ausentes da base: " + ", ".join(missing) + ".")
+    all_materials = "Todos os materiais disponíveis"
+    options = [all_materials, *fields]
+    default = options.index("LAB_BCLIQU") if code == "05" and "LAB_BCLIQU" in fields else 0
+    material = st.selectbox(
+        "Material das tabelas",
+        options,
+        index=default,
+        format_func=lambda value: f"{specimens[value]} ({value})" if value in fields else value,
+        key=f"{key_prefix}_loess_result_material_{code}",
+    )
+    selected_fields = fields if material == all_materials else {material: fields[material]}
+    combined = len(selected_fields) > 1
+    counts = query_sinan_lab_result_breakdown(table, where_sql, exprs["criterio_code"], selected_fields, code)
+    columns = {
+        "n": "Fichas",
+        "mesmo_criterio": f"CRITERIO {code}",
+        "outro_criterio": "Outro critério válido",
+        "sem_criterio": "Sem critério válido",
     }
-    data = run_query(
-        table,
-        f"""
-        WITH casos AS (
-            SELECT CASE WHEN {informative} THEN 1 WHEN {valid} THEN 2 ELSE 3 END AS situacao,
-                   ({criterion}) AS criterio
-            FROM {table.ref_sql}
-            {cohort_where}
-        )
-        SELECT situacao,
-               COUNT(*) AS total,
-               COUNT(*) FILTER (WHERE criterio = {code_sql}) AS selecionado,
-               COUNT(*) FILTER (WHERE criterio IN ({criteria_sql}) AND criterio <> {code_sql}) AS outro,
-               COUNT(*) FILTER (WHERE criterio IS NULL OR criterio NOT IN ({criteria_sql})) AS sem_criterio
-        FROM casos GROUP BY 1
-        """,
-    ).set_index("situacao").reindex(list(labels), fill_value=0)
-    total = int(data["total"].sum())
+    labels = {
+        key: label for key, label in SINAN_CONFIRMATION_FIELD_STATUS.items()
+        if key not in SINAN_CONFIRMATION_SPECIAL_CODES.values()
+        or any(value in domain for value, state in SINAN_CONFIRMATION_SPECIAL_CODES.items() if state == key)
+    }
+    labels["vazio"] = "Campo vazio" if not combined else "Todos os campos vazios"
+    labels["invalido"] = "Código fora do dicionário" if not combined else "Código fora do dicionário, sem código válido"
+    if combined and {"61", "62"} <= domain.keys():
+        labels["nao_realizado_e_ignorado"] = "Não realizado e ignorado em materiais distintos"
+    summary = counts.loc[counts["tipo"].eq("situacao")].set_index("registro")[list(columns)]
+    summary = summary.reindex(labels, fill_value=0)
+    total = int(summary["n"].sum())
     if not total:
-        st.info("Nenhum caso no recorte completo.")
+        st.info("Não há fichas para as tabelas no recorte selecionado.")
         return
-    data.insert(0, "Registro do exame", data.index.map(labels))
-    data["% do recorte"] = 100 * data["total"] / total
-    data = data.rename(columns={
-        "total": "Casos", "selecionado": f"CRITERIO {selected_code}",
-        "outro": "Outro critério válido", "sem_criterio": "Sem critério válido",
-    })
+    with_finding = int(summary.loc["achado", "n"])
+    summary.loc["total"] = summary.sum()
+    summary.insert(0, "Registro do exame", summary.index.map({**labels, "total": "Total do recorte"}))
+    summary["% do recorte"] = summary["n"] * 100 / total
     st.caption(
-        f"Cruzamento no recorte completo, com {available} de {expected} campos desse método. "
-        "Um resultado informativo pode ser positivo ou negativo. CRITERIO indica a modalidade registrada para confirmação."
+        f"Quadro {quadro} do dicionário do SINAN. O denominador é o recorte completo com data válida "
+        f"({format_int_br(total)} fichas). CRITERIO indica o método registrado na confirmação, "
+        "sem especificar em qual material foi realizado."
     )
-    st.dataframe(data, width="stretch", hide_index=True,
-                 column_config={"% do recorte": st.column_config.NumberColumn(format="%.2f%%")})
+    if combined:
+        st.caption(
+            "Cada ficha entra em um único estado. A prioridade é achado, nenhum agente (51), "
+            "não identificado (75), registro de não realizado ou ignorado, código fora do dicionário "
+            "e campo vazio, aplicando apenas os códigos previstos para o método. "
+            "Quando 61 e 62 coexistem sem resultado, a ficha aparece na linha mista."
+        )
+    if code == "08":
+        st.caption("O Quadro XI prevê 75 («Não identificado»). Os códigos 61 e 62 ficam fora desse domínio.")
+    pct_config = st.column_config.NumberColumn(format="%.2f%%")
+    st.dataframe(
+        summary.rename(columns=columns), width="stretch", hide_index=True,
+        column_config={"% do recorte": pct_config},
+    )
+
+    st.markdown("###### Realização documentada por material")
+    by_material = sinan_confirmation_count_by_status(table, where_sql, exprs["criterio_code"], fields, code)
+    result_rows = by_material.loc[by_material["situacao"].isin(["achado", "sem_agente", "nao_identificado"])]
+    material_summary = result_rows.groupby("campo")[["n", "mesmo_criterio"]].sum().reindex(fields, fill_value=0)
+    material_summary = material_summary.rename(columns={
+        "n": "Com resultado registrado",
+        "mesmo_criterio": f"Com resultado e CRITERIO {code}",
+    })
+    material_summary.insert(
+        1, "% do recorte", material_summary["Com resultado registrado"] * 100 / total,
+    )
+    material_summary.insert(0, "Campo", material_summary.index)
+    material_summary.insert(0, "Material", material_summary.index.map(specimens))
+    st.caption(
+        "Resultado registrado inclui achado, nenhum agente ou não identificado, conforme o método. "
+        "A última coluna conta fichas que também registraram o método em CRITERIO. "
+        "Esse campo não informa qual material fundamentou a confirmação. "
+        "Uma ficha com resultados em vários materiais pode entrar em mais de uma linha."
+    )
+    st.dataframe(
+        material_summary, width="stretch", hide_index=True,
+        column_config={"% do recorte": pct_config},
+    )
+
+    st.markdown("###### Achados por código do dicionário")
+    by_code = counts.loc[counts["tipo"].eq("codigo")].rename(columns={"registro": "Código"})
+    findings = by_code.loc[by_code["Código"].isin(domain.keys() - SINAN_CONFIRMATION_SPECIAL_CODES.keys())].copy()
+    if findings.empty:
+        st.info("Nenhum achado codificado foi registrado no material e recorte selecionados.")
+    else:
+        findings.insert(1, "Achado registrado", findings["Código"].map(domain))
+        findings["% do recorte"] = findings["n"] * 100 / total
+        findings["% das fichas com achado"] = findings["n"] * 100 / with_finding
+        findings = findings.sort_values(["n", "Código"], ascending=[False, True])
+        st.caption(
+            "Cada código é contado uma vez por ficha. Ao reunir materiais, a mesma ficha pode contribuir "
+            "para mais de um achado, e a soma dos percentuais entre fichas com achado pode ultrapassar 100%."
+            if combined else
+            "O percentual entre fichas com achado usa como denominador o total da linha «Resultado com achado»."
+        )
+        st.dataframe(
+            findings[["Código", "Achado registrado", *columns, "% do recorte", "% das fichas com achado"]].rename(columns=columns),
+            width="stretch", hide_index=True,
+            column_config={"% do recorte": pct_config, "% das fichas com achado": pct_config},
+        )
+    invalid = by_code.loc[~by_code["Código"].isin(domain)].copy()
+    if not invalid.empty:
+        with st.expander("Valores fora do dicionário"):
+            st.caption("Os valores aparecem mesmo quando a ficha também tem código válido em outro material selecionado.")
+            st.dataframe(
+                invalid[["Código", *columns]].sort_values(["n", "Código"], ascending=[False, True]).rename(columns=columns),
+                width="stretch", hide_index=True,
+            )
 
 
-def render_sinan_clinical_method_combinations(
+def query_sinan_confirmation_method_profile(
     table: LoadedTable,
-    case_where: str,
-    selected_code: str,
-    methods: Dict[str, Tuple[str, str, int, int]],
-) -> None:
-    """Conta outros métodos distintos com resultado informativo no recorte do critério escolhido."""
-    title = f"{SINAN_CRITERIO[selected_code]} e outros métodos registrados"
-    st.markdown(f"##### {title}")
-    flags = {code: info for code, (_, info, available, _) in methods.items() if available}
-    if not flags:
-        st.info("A base não contém campos de outros métodos para essa comparação.")
-        return
-    method_count = " + ".join(f"CASE WHEN {flag} THEN 1 ELSE 0 END" for flag in flags.values())
-    branches = " ".join(f"WHEN {flag} THEN {qstr(code)}" for code, flag in flags.items())
-    data = run_query(
+    where_sql: str,
+    criterion_sql: str,
+    fields: Dict[str, Dict[str, str]],
+    code: str,
+    focal_field: Optional[str] = None,
+    only_findings: bool = False,
+) -> pd.DataFrame:
+    """Conta cada ficha uma vez por método e devolve o perfil de coexistência."""
+    focal_fields = fields.get(code, {})
+    if focal_field:
+        focal_fields = {focal_field: focal_fields[focal_field]}
+    focal = (
+        sinan_confirmation_method_flag(code, focal_fields, only_findings)
+        if code in fields else "FALSE"
+    )
+    other_flags = [
+        f"CAST({sinan_confirmation_method_flag(other, columns, only_findings)} AS INTEGER)"
+        for other, columns in fields.items() if other != code and columns
+    ]
+    other_total = " + ".join(other_flags) or "0"
+    valid_criteria = ", ".join(qstr(value) for value in SINAN_CRITERIO)
+    return run_query(
         table,
         f"""
-        SELECT CASE WHEN ({method_count}) >= 2 THEN 'varios'
-                    {branches}
-                    ELSE 'nenhum' END AS combinacao,
-               COUNT(*) AS casos
+        SELECT {focal} AS resultado_focal,
+               CASE WHEN ({criterion_sql}) = {qstr(code)} THEN 'Mesmo critério'
+                    WHEN ({criterion_sql}) IN ({valid_criteria}) THEN 'Outro critério válido'
+                    ELSE 'Sem critério válido' END AS criterio,
+               LEAST(4, {other_total}) AS outros_metodos,
+               COUNT(*) AS n
         FROM {table.ref_sql}
-        {case_where}
-        GROUP BY 1
+        {where_sql}
+        GROUP BY 1, 2, 3
         """,
     )
-    labels = {
-        "nenhum": "Sem outro método com resultado informativo",
-        **{code: f"Somente {SINAN_CRITERIO[code].split(' — ', 1)[1]}" for code in flags},
-        "varios": "Dois ou mais outros métodos",
-    }
-    data = data.set_index("combinacao").reindex(labels, fill_value=0).reset_index()
-    data["Combinação registrada"] = data["combinacao"].map(labels)
+
+
+def render_sinan_confirmation_profile_bars(data: pd.DataFrame, title: str) -> None:
+    data = data.copy()
+    total = int(data["n"].sum())
+    if not total:
+        st.info("Nenhuma ficha atende à definição selecionada.")
+        return
+    data["Percentual"] = data["n"] * 100 / total
+    data["Rótulo"] = [
+        f"{format_int_br(n)} ({format_pct_br(pct)})" for n, pct in zip(data["n"], data["Percentual"])
+    ]
     fig = px.bar(
-        data, x="casos", y="Combinação registrada", orientation="h", title=title,
-        labels={"casos": "Casos"}, text="casos",
-        category_orders={"Combinação registrada": list(labels.values())},
+        data, x="n", y="Categoria", orientation="h", text="Rótulo", title=title,
+        labels={"n": "Fichas"}, hover_data={"Rótulo": False, "Percentual": ":.2f"},
     )
     fig.update_yaxes(autorange="reversed")
     fig.update_traces(textposition="outside", cliponaxis=False)
+    fig.update_layout(showlegend=False, margin=dict(r=112))
     render_plotly_chart(fig, calc_title=title)
-    st.caption(
-        "Cada exame conta uma vez por método, mesmo com resultados em vários materiais. Punção, aspecto "
-        "e achados quimiocitológicos do líquor ficam fora da contagem de outros métodos. Os grupos refletem "
-        "os resultados informativos documentados nos campos disponíveis. A realização de exames sem registro fica indeterminada."
-    )
+    st.caption(f"Denominador exibido no gráfico: {format_int_br(total)} fichas.")
 
 
-def render_sinan_gram_confirmation_crosscheck(
+def render_sinan_confirmation_detail(
     table: LoadedTable,
     exprs: Dict[str, Optional[str]],
-    cohort_where: str,
+    where_sql: str,
+    code: str,
+    view: str,
+    key_prefix: str,
 ) -> None:
-    """Cruza resultado de LAB_BCLIQU com o critério de confirmação no recorte completo."""
-    st.markdown("##### Bacterioscopia do líquor e critério de confirmação")
-    gram = exprs.get("lab_bcliqu_code")
-    if not gram:
-        st.info("O campo LAB_BCLIQU não foi encontrado na base carregada.")
-        return
     criterion = exprs["criterio_code"]
-    positive_codes = ", ".join(qstr(code) for code in _sinan_quadro_mapping("VIII") if code not in {"51", "61", "62"})
-    labels = {
-        1: "Com achado bacterioscópico",
-        2: "Nenhum agente identificado (51)",
-        3: "Não realizada (61)",
-        4: "Ignorada (62)",
-        5: "Campo vazio",
-        6: "Código fora do dicionário",
-    }
-    valid_criteria = ", ".join(qstr(code) for code in SINAN_CRITERIO)
-    data = run_query(
-        table,
-        f"""
-        WITH casos AS (
-            SELECT ({gram}) AS gram, ({criterion}) AS criterio
-            FROM {table.ref_sql}
-            {cohort_where}
+    if view == "Preenchimento de CRITERIO":
+        data = sinan_confirmation_count_by_status(table, where_sql, criterion, {"CRITERIO": criterion}, "CRITERIO")
+        counts = data.set_index("situacao")["n"].reindex(["achado", "vazio", "invalido"], fill_value=0)
+        counts.index = ["Código oficial preenchido", "Em branco", "Fora do domínio"]
+        render_sinan_confirmation_profile_bars(
+            counts.rename_axis("Categoria").reset_index(), "Preenchimento do critério de confirmação",
         )
-        SELECT CASE
-                   WHEN gram IN ({positive_codes}) THEN 1
-                   WHEN gram = '51' THEN 2
-                   WHEN gram = '61' THEN 3
-                   WHEN gram = '62' THEN 4
-                   WHEN gram IS NULL THEN 5
-                   ELSE 6
-               END AS situacao,
-               COUNT(*) AS total,
-               COUNT(*) FILTER (WHERE criterio = '05') AS bacterioscopia,
-               COUNT(*) FILTER (WHERE criterio IN ({valid_criteria}) AND criterio <> '05') AS outro,
-               COUNT(*) FILTER (WHERE criterio IS NULL OR criterio NOT IN ({valid_criteria})) AS sem_criterio
-        FROM casos
-        GROUP BY 1
-        ORDER BY 1
-        """,
-    ).set_index("situacao").reindex(list(labels), fill_value=0)
-    total = int(data["total"].sum())
-    if total == 0:
-        st.info("Nenhum caso elegível para cruzar resultado e critério de confirmação.")
+        st.caption("CRITERIO tem dez códigos oficiais e não define um código específico para ignorado.")
         return
-    with_result = int(data.loc[[1, 2], "total"].sum())
-    as_criterion = int(data["bacterioscopia"].sum())
-    st.caption(
-        f"No recorte completo com data válida, {format_int_br(with_result)} de {format_int_br(total)} casos têm "
-        f"resultado da bacterioscopia do líquor em LAB_BCLIQU ({format_pct_br(100 * with_result / total)}). "
-        f"Em {format_int_br(as_criterion)} casos ({format_pct_br(100 * as_criterion / total)}), "
-        "a bacterioscopia foi registrada como critério de confirmação em CRITERIO. "
-        "O código 05 de CRITERIO indica o método de confirmação, independentemente do material examinado."
+
+    fields = sinan_confirmation_fields(table, exprs)
+    method_fields = fields.get(code, {})
+    is_lab_method = code in fields
+    if is_lab_method and not method_fields:
+        st.info("A base não contém os campos de resultado desse método.")
+        return
+    method_name = SINAN_CRITERIO[code].split(" — ", 1)[1].capitalize()
+    if is_lab_method:
+        expected_fields = SINAN_CONFIRMATION_LAB_FIELDS[code][1]
+        label = lambda field: f"{expected_fields[field]} ({field})" if field else "Qualquer material disponível"
+        absent = ", ".join(field for field in expected_fields if field not in method_fields)
+        if absent:
+            st.caption(f"Campos ausentes da base para este método: {absent}.")
+        materials = list(method_fields) if view == "Completude por material" else [None, *method_fields]
+        focal_field = st.selectbox("Material do método", materials, format_func=label, key=f"{key_prefix}_detail_specimen")
+    else:
+        st.caption(SINAN_CONFIRMATION_INDIRECT_NOTES[code])
+        focal_field = None
+
+    if view == "Completude por material":
+        if not is_lab_method:
+            if code == "06" and exprs.get("quimio_code") and exprs.get("quimio_inferred_from_params"):
+                data = run_query(table, f"""
+                    SELECT CASE WHEN ({exprs['quimio_code']}) = '1' THEN 'Com parâmetro registrado'
+                                ELSE 'Sem parâmetro disponível' END AS "Categoria", COUNT(*) AS n
+                    FROM {table.ref_sql} {where_sql} GROUP BY 1
+                """)
+                render_sinan_confirmation_profile_bars(data, "Registro de parâmetros quimiocitológicos")
+                parameters = {
+                    "hema": "Hemácias", "neutro": "Neutrófilos", "glico": "Glicose", "leuco": "Leucócitos",
+                    "eosi": "Eosinófilos", "prot": "Proteínas", "mono": "Monócitos", "linfo": "Linfócitos",
+                    "clor": "Cloreto",
+                }
+                stats = ["COUNT(*) AS total"]
+                for param in parameters:
+                    value = exprs.get(f"lab_{param}")
+                    if value:
+                        usable = sinan_lcr_clean_value_expr(value, param)
+                        stats.append(f"COUNT(*) FILTER (WHERE ({usable}) >= 0) AS {param}")
+                counts = run_query(table, f"SELECT {', '.join(stats)} FROM {table.ref_sql} {where_sql}").iloc[0]
+                total = int(counts["total"])
+                if total:
+                    detail = pd.DataFrame([
+                        {"Parâmetro": label, "Com valor": int(counts[param]),
+                         "Sem valor utilizável": total - int(counts[param]),
+                         "% com valor": round(100 * counts[param] / total, 2)}
+                        for param, label in parameters.items() if param in counts
+                    ])
+                    copyable_dataframe(detail, width="stretch", hide_index=True)
+            elif code == "06" and exprs.get("quimio_code"):
+                data = run_query(table, f"""
+                    SELECT CASE ({exprs['quimio_code']}) WHEN '1' THEN 'Realizado'
+                                WHEN '2' THEN 'Não realizado' WHEN '9' THEN 'Ignorado'
+                                ELSE CASE WHEN ({exprs['quimio_code']}) IS NULL THEN 'Em branco'
+                                          ELSE 'Fora do domínio' END END AS "Categoria", COUNT(*) AS n
+                    FROM {table.ref_sql} {where_sql} GROUP BY 1
+                """)
+                render_sinan_confirmation_profile_bars(data, "Indicador de realização do quimiocitológico")
+            else:
+                st.info("Para este critério, a ficha permite medir o uso registrado em CRITERIO.")
+            return
+        data = sinan_confirmation_count_by_status(table, where_sql, criterion, method_fields, code)
+        domain = _sinan_quadro_mapping(SINAN_CONFIRMATION_LAB_FIELDS[code][0])
+        optional = {"sem_agente": "51", "nao_identificado": "75", "nao_realizado": "61", "ignorado": "62"}
+        statuses = [value for value in SINAN_CONFIRMATION_FIELD_STATUS if value not in optional or optional[value] in domain]
+        shown = data.loc[data["campo"].eq(focal_field)].set_index("situacao")["n"].reindex(statuses, fill_value=0)
+        shown.index = shown.index.map(SINAN_CONFIRMATION_FIELD_STATUS)
+        render_sinan_confirmation_profile_bars(
+            shown.rename_axis("Categoria").reset_index(), f"{method_name} — {label(focal_field)}",
+        )
+        data = data.set_index(["campo", "situacao"]).reindex(
+            pd.MultiIndex.from_product([method_fields, statuses], names=["campo", "situacao"]), fill_value=0,
+        ).reset_index()
+        totals = data.groupby("campo")["n"].transform("sum")
+        data["% do material"] = (100 * data["n"] / totals).round(2)
+        aggregate = data.assign(
+            preenchimento_valido=data["n"].where(~data["situacao"].isin(["vazio", "invalido"]), 0),
+            resultado_disponivel=data["n"].where(data["situacao"].isin(["achado", "sem_agente", "nao_identificado"]), 0),
+        ).groupby("campo", sort=False)[["n", "preenchimento_valido", "resultado_disponivel"]].sum()
+        selected = aggregate.loc[focal_field]
+        if selected["n"]:
+            st.caption(
+                f"Preenchimento válido: {format_int_br(selected['preenchimento_valido'])} "
+                f"({format_pct_br(100 * selected['preenchimento_valido'] / selected['n'])}). "
+                f"Resultado disponível: {format_int_br(selected['resultado_disponivel'])} "
+                f"({format_pct_br(100 * selected['resultado_disponivel'] / selected['n'])})."
+            )
+        data["situação"] = data.pop("situacao").map(SINAN_CONFIRMATION_FIELD_STATUS)
+        data["sem_criterio_valido"] = data["n"] - data["mesmo_criterio"] - data["outro_criterio"]
+        display = data[["campo", "situação", "n", "% do material", "mesmo_criterio", "outro_criterio", "sem_criterio_valido"]]
+        copyable_dataframe(display, width="stretch", hide_index=True)
+        download_button(display, f"sinan_completude_criterio_{code}.csv", label="Baixar completude por material (CSV)")
+        st.caption(
+            "O estado preenchido inclui códigos administrativos válidos. Resultado disponível inclui achado, "
+            "nenhum agente ou não identificado, quando previstos no domínio do método."
+        )
+        return
+
+    if view == "Resultado e critério" and not is_lab_method:
+        st.info("Use a série anual para a contagem deste critério ou a visão de coexistência para os exames documentados nessas fichas.")
+        return
+    selected_rule = st.radio(
+        "Resultados que contam", ["Qualquer resultado registrado", "Apenas resultado com achado"],
+        horizontal=True, key=f"{key_prefix}_detail_result_rule",
+        help="A regra com achado exclui os códigos 51 e 75. Nenhuma regra inclui em branco, fora do domínio, 61 ou 62.",
     )
-    data.insert(0, "Registro em LAB_BCLIQU", data.index.map(labels))
-    data["% do recorte"] = 100 * data["total"] / total
-    data = data.rename(columns={
-        "total": "Casos",
-        "bacterioscopia": "CRITERIO 05",
-        "outro": "Outro critério válido",
-        "sem_criterio": "Sem critério válido",
-    })
-    st.dataframe(
-        data, width="stretch", hide_index=True,
-        column_config={"% do recorte": st.column_config.NumberColumn(format="%.2f%%")},
+    only_findings = selected_rule == "Apenas resultado com achado"
+    data = query_sinan_confirmation_method_profile(
+        table, where_sql, criterion, fields, code, focal_field, only_findings,
     )
+    criterion_groups = ["Mesmo critério", "Outro critério válido", "Sem critério válido"]
+    if view == "Resultado e critério":
+        data["Resultado"] = data["resultado_focal"].map({True: "Com resultado pela regra", False: "Sem resultado pela regra"})
+        categories = [
+            f"{result} · {group}"
+            for result in ["Com resultado pela regra", "Sem resultado pela regra"] for group in criterion_groups
+        ]
+        data["Categoria"] = data["Resultado"] + " · " + data["criterio"]
+        counts = data.groupby("Categoria")["n"].sum().reindex(categories, fill_value=0).reset_index()
+        render_sinan_confirmation_profile_bars(counts, f"{method_name} — resultado e confirmação")
+        return
+
+    if is_lab_method:
+        data = data.loc[data["resultado_focal"]]
+        confirmation = st.radio(
+            "Critério de confirmação nas fichas com resultado",
+            ["Todos", *criterion_groups], horizontal=True, key=f"{key_prefix}_detail_confirmation",
+        )
+        if confirmation != "Todos":
+            data = data.loc[data["criterio"].eq(confirmation)]
+        st.caption("Isolado significa zero outros métodos. Cada método adicional conta uma vez por ficha, mesmo em vários materiais.")
+    else:
+        if not any(fields.values()):
+            st.info("A base não contém os campos laboratoriais necessários para calcular a coexistência.")
+            return
+        data = data.loc[data["criterio"].eq("Mesmo critério")]
+        st.caption("Denominador formado pelas fichas com este CRITERIO. A contagem inclui apenas métodos laboratoriais do campo 49.")
+    counts = data.groupby("outros_metodos")["n"].sum().reindex(range(5), fill_value=0)
+    counts.index = ["Isolado (0)" if is_lab_method else "Nenhum método", "1 método", "2 métodos", "3 métodos", "4 ou mais métodos"]
+    title = "Análise dos métodos mediante realização ou não de outros critérios diagnósticos"
+    render_sinan_confirmation_profile_bars(counts.rename_axis("Categoria").reset_index(), title)
 
 
 def render_sinan_criterion_timeseries_chart(
@@ -6264,9 +6510,8 @@ def render_sinan_criterion_timeseries_chart(
         title = SINAN_CRITERION_DETAIL_TITLE
         st.markdown(f"#### {title}")
         st.caption(
-            "Escolha um critério registrado no campo CRITERIO. Os pontos mostram os casos observados em cada ano "
-            "e a curva LOESS mostra a tendência. O cursor sobre cada ponto exibe a contagem e o percentual anual. "
-            "A ficha registra os exames em campos próprios."
+            "Consulte a série anual de CRITERIO, a completude da ficha, os resultados por material "
+            "e a coexistência de métodos laboratoriais."
         )
     else:
         title = "Critérios diagnósticos ao longo do tempo"
@@ -6306,21 +6551,42 @@ def render_sinan_criterion_timeseries_chart(
         etiology_key=f"{key_prefix}_timeseries_group",
         stratum_key=f"{key_prefix}_criterion_timeseries_stratum",
         default_etiology=default_etiology,
+        include_all_notifications=single_criterion,
     )
     if scope is None:
         return
     selected_where, stratum, scope_label = scope
     selected_criterion = None
     if single_criterion:
+        view = st.radio(
+            "Visão da análise",
+            ["Série anual", "Preenchimento de CRITERIO", "Completude por material", "Resultado e critério", "Coexistência de métodos"],
+            horizontal=True, key=f"{key_prefix}_detail_view",
+        )
+        cohort_where = sinan_criterion_stratum_where(classi_code, selected_where, stratum)
+        cohort_where = append_clause(cohort_where, f"({dt_sql}) IS NOT NULL")
+        if view == "Preenchimento de CRITERIO":
+            render_sinan_confirmation_detail(table, exprs, cohort_where, "CRITERIO", view, key_prefix)
+            return
         selected_criterion = st.selectbox(
-            "Critério de confirmação registrado",
+            "Método ou critério de confirmação",
             list(SINAN_CRITERIO),
             format_func=SINAN_CRITERIO.__getitem__,
             key=f"{key_prefix}_criterion_timeseries_code",
         )
+        case_where = append_clause(cohort_where, f"({criterion_code}) = {qstr(selected_criterion)}")
+        if view != "Série anual":
+            render_sinan_confirmation_detail(table, exprs, cohort_where, selected_criterion, view, key_prefix)
+            if view in {"Resultado e critério", "Coexistência de métodos"}:
+                count = run_query(table, f"SELECT COUNT(*) AS n FROM {table.ref_sql} {case_where}")
+                render_sinan_criterion_case_table(
+                    table, exprs, case_where, selected_criterion,
+                    total_cases=int(count.iloc[0]["n"]), key_prefix=key_prefix,
+                )
+            return
     measure = st.radio(
         "Medida da curva LOESS" if single_criterion else "Medida exibida",
-        ["Percentual no ano", "Número absoluto"],
+        ["Número absoluto", "Percentual no ano"],
         horizontal=True,
         key=f"{key_prefix}_criterion_timeseries_measure",
     )
@@ -6429,24 +6695,13 @@ def render_sinan_criterion_timeseries_chart(
         calc_title=title if single_criterion else "Série temporal dos critérios diagnósticos",
     )
     if selected_criterion is not None:
+        if selected_criterion in SINAN_CONFIRMATION_LAB_FIELDS:
+            render_sinan_lab_result_tables(table, exprs, cohort_where, selected_criterion, key_prefix)
         render_interval_total(temporal_df, by_col="criterio", value_label="casos", max_items=len(SINAN_CRITERIO))
-        cohort_where = sinan_criterion_stratum_where(classi_code, selected_where, stratum)
-        cohort_where = append_clause(cohort_where, f"({dt_sql}) IS NOT NULL")
-        case_where = append_clause(cohort_where, f"({criterion_code}) = {qstr(selected_criterion)}")
         total_criterion_cases = int(temporal_df["n"].sum())
-        methods = sinan_lab_method_evidence(table, exprs)
-        render_sinan_other_exam_counts(table, methods, case_where, selected_criterion, total_criterion_cases)
         render_sinan_criterion_case_table(
-            table, exprs, case_where, total_cases=total_criterion_cases, key_prefix=key_prefix,
+            table, exprs, case_where, selected_criterion, total_cases=total_criterion_cases, key_prefix=key_prefix,
         )
-        if selected_criterion == "05":
-            render_sinan_gram_confirmation_crosscheck(table, exprs, cohort_where)
-        elif selected_criterion in methods:
-            render_sinan_method_confirmation_crosscheck(
-                table, exprs, cohort_where, selected_criterion, methods[selected_criterion],
-            )
-        elif selected_criterion in {"04", "06"}:
-            render_sinan_clinical_method_combinations(table, case_where, selected_criterion, methods)
         download_button(
             temporal_df.drop(columns=["ordem"], errors="ignore"),
             f"sinan_criterios_tempo_{safe_filename(scope_label)}_criterio_{selected_criterion}.csv",
@@ -6475,10 +6730,9 @@ def render_sinan_criterion_timeseries_chart(
             "por uma função tricúbica. Não foi aplicada etapa de reponderação robusta. A curva não extrapola além do "
             "primeiro e do último ano observados, não altera os pontos anuais nem deve ser interpretada como previsão, "
             "teste de significância ou evidência causal. Oscilações em anos com denominadores pequenos exigem cautela; "
-            "confira no cursor e na tabela o total anual, os casos do critério e a quantidade com `CRITERIO` válido."
+            "passe o cursor sobre os pontos para consultar o total anual, os casos do critério e a quantidade com `CRITERIO` válido."
         )
     display_df = temporal_df.drop(columns=["ordem"], errors="ignore")
-    copyable_dataframe(display_df, width="stretch", hide_index=True)
     download_button(display_df, f"sinan_criterios_tempo_{safe_filename(scope_label)}.csv")
 
 
@@ -7973,9 +8227,8 @@ def query_sinan_quimio_summary(table: LoadedTable, exprs: Dict[str, Optional[str
     de puncionar.
 
     IMPORTANTE: sentinelas e valores acima do teto são sempre contados nas
-    colunas de auditoria. Percentuais diferenciais fora de 0-100 nunca entram
-    nas estatísticas; os demais tetos só deixam as estatísticas quando o usuário
-    ativa explicitamente o modo com critérios.
+    colunas de auditoria. Eles só deixam as estatísticas quando o usuário ativa
+    explicitamente o modo com critérios; no padrão, participam como registrados.
     """
     params = sinan_quimio_param_exprs(exprs)
     if not params:
@@ -8092,7 +8345,7 @@ def query_sinan_lcr_numeric_audit_long(
                    {qstr(label)} AS parametro,
                    {qstr(meta.unidade if meta else '')} AS unidade,
                    {audit['valor_bruto']} AS valor_bruto,
-                   {audit['valor_limpo']} AS valor_usado_na_analise,
+                   {audit['valor_limpo']} AS valor_usado_no_modo_criterios,
                    {teto_sql} AS teto_plausibilidade,
                    {audit['flag_sentinela']} AS flag_sentinela,
                    {audit['flag_teto_sistema']} AS flag_teto_sistema,
@@ -8119,7 +8372,6 @@ def query_sinan_lcr_numeric_audit_long(
                        ELSE NULL
                    END AS criterio_aplicado,
                    CASE
-                       WHEN flag_percentual_invalido THEN 'Percentual preservado no bruto e excluído dos cálculos analíticos'
                        WHEN flag_sentinela THEN 'Valor tratado como ausente somente no modo com critérios'
                        WHEN flag_acima_teto_plausivel THEN 'Valor excluído somente da visão analítica com critérios'
                        ELSE NULL
@@ -9494,8 +9746,7 @@ def query_sinan_hospitalization_internment(
 # O indicador agora exibe duas visões quando CON_DIAGES está disponível:
 # (1) todos os registros do recorte, para auditoria histórica; e
 # (2) elegíveis operacionais para quimioprofilaxia de contatos
-#     (CON_DIAGES 01/02/03/09: meningococcemia, formas meningocócicas e
-#     Haemophilus influenzae).
+#     (CON_DIAGES 02/03/09: formas meningocócicas e Haemophilus influenzae).
 # Assim, o usuário enxerga o efeito do denominador amplo sem confundir cobertura
 # de intervenção com casos em que a variável não deveria ser preenchida.
 def query_sinan_communicants_identified(
@@ -9571,7 +9822,7 @@ def query_sinan_communicants_prophylaxis(
     con_select = con_code if con_code else "CAST(NULL AS VARCHAR)"
     recorte_case = """
         CASE
-            WHEN con_code IN ('01', '02', '03', '09') THEN 'Elegíveis operacionais conforme SINAN'
+            WHEN con_code IN ('02', '03', '09') THEN 'Elegíveis operacionais conforme SINAN'
             ELSE NULL
         END
     """ if con_code else "CAST(NULL AS VARCHAR)"
@@ -9591,7 +9842,7 @@ def query_sinan_communicants_prophylaxis(
             SELECT {recorte_case} AS recorte_quimioprofilaxia,
                    ano, comunicantes, quimioprofilaxia
             FROM base
-            WHERE con_code IN ('01', '02', '03', '09')
+            WHERE con_code IN ('02', '03', '09')
         ), agg AS (
             SELECT recorte_quimioprofilaxia,
                    ano,
@@ -10312,16 +10563,14 @@ def render_lcr_quality_mode_note() -> None:
     """Observação obrigatória ao final de gráficos afetados pelos critérios."""
     if sinan_lcr_quality_criteria_enabled():
         st.caption(
-            "Observação sobre fidelidade: percentuais diferenciais fora de 0-100 são sempre excluídos dos cálculos "
-            "que exigem proporções válidas. Além disso, este gráfico foi recalculado com o modo opcional ativado; códigos "
-            "sentinela e outros valores acima do teto de plausibilidade foram excluídos somente desta visão analítica. "
+            "Observação sobre fidelidade: este gráfico foi recalculado com o modo opcional ativado; códigos "
+            "sentinela e valores acima do teto de plausibilidade foram excluídos somente desta visão analítica. "
             "O valor original permanece inalterado e pode ser auditado na tabela de registros afetados."
         )
     else:
         st.caption(
-            "Observação sobre fidelidade: percentuais diferenciais fora de 0-100 são preservados no dado bruto e "
-            "excluídos somente dos cálculos que exigem proporções válidas. Para os demais parâmetros, este gráfico usa "
-            "os valores registrados sem aplicar códigos sentinela nem tetos opcionais de plausibilidade."
+            "Observação sobre fidelidade: este gráfico usa os valores numéricos registrados sem aplicar códigos "
+            "sentinela nem tetos de plausibilidade. Nenhuma correção, truncamento, imputação ou winsorização foi aplicada."
         )
 
 
@@ -11580,10 +11829,9 @@ def render_sinan_lcr_indicators(table: LoadedTable, exprs: Dict[str, Optional[st
         "O denominador destes gráficos agora é o mesmo da tabela-resumo: registros com punção lombar e exame quimiocitológico realizados."
     )
     st.caption(
-        "Percentuais diferenciais fora de 0-100 permanecem auditáveis, mas não participam das estatísticas, faixas, "
-        "rainclouds ou inferências. Para os demais parâmetros, códigos sentinela e tetos não são aplicados automaticamente. "
-        "Quando o controle acima é ativado, 999/9999/99999 e outros valores acima do teto do parâmetro são tratados como "
-        "ausentes somente na consulta analítica. Esses critérios são "
+        "Os códigos sentinela e tetos não são aplicados automaticamente. No modo padrão, todos os valores numéricos "
+        "registrados participam das estatísticas e faixas. Quando o controle acima é ativado, 999/9999/99999 e valores "
+        "acima do teto do parâmetro são tratados como ausentes somente na consulta analítica. Esses critérios são "
         "provisórios e devem ser conferidos contra o dicionário da versão do SINAN usada no banco."
     )
     age_strat = sinan_lcr_age_stratum_expr(exprs)
@@ -15119,7 +15367,7 @@ casos de indivíduos com até 2 anos (≤ 24 meses)."
                 pass
             else:
                 st.caption(
-                    "Observação: não foi possível criar a visão elegível (CON_DIAGES 01/02/03/09), porque CON_DIAGES não foi detectado. "
+                    "Observação: não foi possível criar a visão elegível (CON_DIAGES 02/03/09), porque CON_DIAGES não foi detectado. "
                     "Os valores abaixo correspondem ao contingente completo de registros ativos e podem subestimar a cobertura real."
                 )
             comunicantes = comunicantes.copy()
@@ -17734,21 +17982,13 @@ def render_sinan_lcr_raincloud_chart(
                 if meta and "percentual" in meta.tipo_valor
                 else "Esses valores ultrapassam o teto operacional de plausibilidade definido para o parâmetro"
             )
-            if meta and "percentual" in meta.tipo_valor:
-                warning_text = (
-                    f"⚠️ ATENÇÃO: foram encontrados {format_int_br(len(aberrant_df))} caso(s) com "
-                    f"{parameter_label.lower()} acima de {limit_text}. {plausibility_text}. Os valores permanecem "
-                    "inalterados no banco e são listados abaixo para auditoria, mas foram excluídos do raincloud, "
-                    "dos resumos estatísticos e das inferências que exigem percentuais válidos."
-                )
-            else:
-                warning_text = (
-                    f"⚠️ ATENÇÃO: foram encontrados {format_int_br(len(aberrant_df))} caso(s) com "
-                    f"{parameter_label.lower()} acima de {limit_text}. {plausibility_text}, mas permanecem no "
-                    "raincloud, nos resumos e no banco para não transformar uma suspeita de erro em exclusão automática. "
-                    "Eles estão listados integralmente abaixo e, no foco visual robusto, são representados no limite "
-                    "com o valor original disponível no cursor."
-                )
+            warning_text = (
+                f"⚠️ ATENÇÃO: foram encontrados {format_int_br(len(aberrant_df))} caso(s) com "
+                f"{parameter_label.lower()} acima de {limit_text}. {plausibility_text}, mas permanecem no "
+                "raincloud, nos resumos e no banco para não transformar "
+                "uma suspeita de erro em exclusão automática. Eles estão listados integralmente abaixo e, no foco "
+                "visual robusto, são representados no limite com o valor original disponível no cursor."
+            )
             st.error(warning_text)
             copyable_dataframe(aberrant_df, width="stretch", hide_index=True)
             download_button(
@@ -19787,15 +20027,15 @@ def render_spreadsheet_analysis_tab(
 def render_quality_tab(table: LoadedTable, source: str, base_where: str, exprs: Dict[str, Optional[str]]) -> None:
     st.markdown("### Campos importantes não preenchidos")
     st.caption(
-        "Esta aba usa os filtros-base e mede, para cada campo-chave detectado, quantos registros estão literalmente sem preenchimento. "
+        "Esta aba usa os filtros-base e mede, para cada campo-chave detectado, quantos registros estão sem preenchimento válido. "
         "Os gráficos mostram a porcentagem e também o número absoluto de registros não preenchidos sobre o total analisado."
     )
 
     fields = {
         "data": exprs.get("dt"),
-        "sexo": exprs.get("sex_raw"),
+        "sexo": exprs.get("sex"),
         "idade": exprs.get("age"),
-        "raça/cor": exprs.get("race_raw"),
+        "raça/cor": exprs.get("race"),
         "município residência": exprs.get("mun_res"),
         "município ocorrência/atendimento": exprs.get("mun_event"),
         "CID meningite detectado": exprs.get("cid"),
@@ -21479,9 +21719,10 @@ def render_methodology():
         "Os gráficos alternam entre número absoluto e percentual. Na composição, o percentual é calculado "
         "sobre o recorte completo. Nas séries temporais, o denominador inclui os casos elegíveis com data válida de "
         "cada ano. Os pontos são os valores observados e a curva mostra a tendência LOESS. O texto abaixo do gráfico "
-        "soma as contagens dos métodos no período. Em **Análise esmiuçada dos critérios de confirmação**, "
-        "os pontos, a curva LOESS, a comparação de outros métodos e a listagem de casos usam o mesmo "
-        "código registrado em CRITERIO."
+        f"soma as contagens dos métodos no período. Em **{SINAN_CRITERION_DETAIL_TITLE}**, "
+        "a série e a listagem usam o código registrado em CRITERIO. As demais visões usam os campos de resultados "
+        "do campo 49, discriminam os estados por material e cruzam esses resultados com CRITERIO. A coexistência "
+        "conta cada método uma vez por ficha, mesmo quando há registro em vários materiais."
     )
     st.markdown("### Referência CID-10")
     render_cid_reference()
