@@ -5675,6 +5675,7 @@ def _loess_predict(
 SINAN_UNSPECIFIED_MENINGITIS_LABEL = "Meningite não especificada"
 SINAN_CRITERIA_NEISSERIA_CODES = ("02", "03")
 SINAN_CRITERIA_BACTERIAL_CODES = (*SINAN_CRITERIA_NEISSERIA_CODES, "05", "09", "10")
+SINAN_COMPARE_FINAL_CLASSIFICATIONS = "Comparar total, confirmados e descartados"
 
 
 def render_sinan_criterion_agent_filter(
@@ -5733,6 +5734,7 @@ def render_sinan_criterion_scope(
     default_etiology: str = "Todos os casos",
     fixed_etiology: Optional[str] = None,
     include_all_notifications: bool = False,
+    compare_final_classifications: bool = False,
 ) -> Optional[Tuple[str, str, str]]:
     """Seleciona o recorte usado na composição e na série anual de CRITERIO."""
     # Campo 51 da ficha SINAN. A forma tuberculosa tem um recorte próprio.
@@ -5757,6 +5759,8 @@ def render_sinan_criterion_scope(
     con_codes = etiology_codes[etiology]
     if not con_codes:
         strata = ["Total de casos", "Casos confirmados", "Casos descartados"]
+        if compare_final_classifications:
+            strata.insert(0, SINAN_COMPARE_FINAL_CLASSIFICATIONS)
         if include_all_notifications:
             strata.append("Todas as notificações")
         stratum = st.radio(
@@ -7706,8 +7710,9 @@ def make_weighted_raincloud_halfeye(
     max_bandwidth: Optional[float] = None,
     max_rain_points_per_group: int = 2500,
     show_full_range: bool = False,
+    show_upper_percentiles: bool = False,
 ) -> Tuple[go.Figure, pd.DataFrame, bool]:
-    """Monta raincloud half-eye ponderado, com foco robusto e cinco percentis."""
+    """Monta raincloud half-eye ponderado com foco robusto e marcadores de percentis."""
     fig = go.Figure()
     summary_rows: List[Dict[str, object]] = []
     sampled_rain = False
@@ -7763,9 +7768,12 @@ def make_weighted_raincloud_halfeye(
         percentile_values = np.asarray([q025, q1, median, q3, q975], dtype=float)
         percentile_display = (
             percentile_values
-            if show_full_range
+            if show_full_range or show_upper_percentiles
             else np.clip(percentile_values, visual_low, visual_high)
         )
+        if show_upper_percentiles:
+            visual_lows[-1] = min(visual_low, q025)
+            visual_highs[-1] = max(visual_high, q975)
         fig.add_trace(go.Scatter(
             x=[percentile_display[0], percentile_display[4]], y=[baseline, baseline], mode="lines",
             line={"color": color, "width": 3}, legendgroup=group,
@@ -7791,6 +7799,24 @@ def make_weighted_raincloud_halfeye(
             legendgroup=group, showlegend=False,
             hovertemplate=f"%{{text}}: %{{customdata:.2f}}{unit_suffix}<extra>{group}</extra>",
         ))
+        upper_summary = {}
+        if show_upper_percentiles:
+            q90 = _weighted_quantile(values, weights, 0.90)
+            q95 = _weighted_quantile(values, weights, 0.95)
+            upper_summary = {f"p90_{summary_prefix}": round(q90, 3), f"p95_{summary_prefix}": round(q95, 3)}
+            fig.add_trace(go.Scatter(
+                x=[q90, q95],
+                y=[baseline + 0.065, baseline + 0.135],
+                mode="markers+text",
+                marker={"color": color, "size": 9, "symbol": ["triangle-up", "triangle-down"]},
+                text=["P90", "P95"],
+                textposition="middle left",
+                textfont={"color": color, "size": 12},
+                cliponaxis=False,
+                legendgroup=group,
+                showlegend=False,
+                hovertemplate=f"%{{text}}: %{{x:.2f}}{unit_suffix}<extra>{group}</extra>",
+            ))
         rain_count = min(total, int(max_rain_points_per_group))
         sampled_rain = sampled_rain or total > rain_count
         cumulative = np.cumsum(weights)
@@ -7853,6 +7879,7 @@ def make_weighted_raincloud_halfeye(
             f"q1_p25_{summary_prefix}": round(q1, 3),
             f"mediana_p50_{summary_prefix}": round(median, 3),
             f"q3_p75_{summary_prefix}": round(q3, 3),
+            **upper_summary,
             f"p97_5_{summary_prefix}": round(q975, 3),
             f"minimo_{summary_prefix}": round(float(values.min()), 3),
             f"maximo_{summary_prefix}": round(float(values.max()), 3),
@@ -7910,6 +7937,7 @@ def make_age_raincloud_halfeye(
         max_bandwidth=8.0,
         max_rain_points_per_group=max_rain_points_per_group,
         show_full_range=show_full_range,
+        show_upper_percentiles=True,
     )
 
 
@@ -18610,19 +18638,42 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
     def render_age_raincloud_chart() -> None:
         if not age:
             return
+        st.markdown("**Distribuição contínua da idade — raincloud plot half-eye**")
+        compare_groups = False
         if source == "SINAN" and classi_code:
-            group_sql = f"""
-                CASE
-                    WHEN {classi_code} = '1' THEN 'Casos confirmados'
-                    WHEN {classi_code} = '2' THEN 'Casos descartados'
-                    ELSE NULL
-                END
-            """
-            rain_where = demography_case_base_where
-            group_order = ["Casos confirmados", "Casos descartados"]
-            title = "Raincloud half-eye da idade — casos confirmados e descartados"
+            scope = render_sinan_criterion_scope(
+                exprs, demography_case_base_where,
+                etiology_key="sinan_age_raincloud_etiology",
+                stratum_key="sinan_age_raincloud_stratum",
+                include_all_notifications=True,
+                compare_final_classifications=True,
+            )
+            if scope is None:
+                return
+            selected_where, stratum, scope_label = scope
+            compare_groups = stratum == SINAN_COMPARE_FINAL_CLASSIFICATIONS
+            selected_stratum = "Total de casos" if compare_groups else stratum
+            rain_where = sinan_criterion_stratum_where(classi_code, selected_where, selected_stratum)
+            if compare_groups:
+                group_sql = f"""
+                    CASE WHEN ({classi_code}) = '1' THEN 'Casos confirmados'
+                         WHEN ({classi_code}) = '2' THEN 'Casos descartados' END
+                """
+                group_order = ["Casos confirmados", "Casos descartados", "Total de casos"]
+                st.caption(
+                    "Total de casos reúne confirmados e descartados. Cada ficha com idade válida aparece "
+                    "no seu grupo e no total. Todas as notificações inclui também fichas sem classificação válida."
+                )
+            else:
+                group_label = scope_label[:1].upper() + scope_label[1:]
+                group_sql = qstr(group_label)
+                group_order = [group_label]
+            title = f"Raincloud half-eye da idade — {scope_label}"
         else:
-            group_label = "Óbitos/registros analisados" if source == "SIM" else "Atendimentos/registros analisados"
+            group_label = {
+                "SIM": "Óbitos/registros analisados",
+                "CIHA": "Atendimentos/registros analisados",
+            }.get(source, "Registros analisados")
             group_sql = qstr(group_label)
             rain_where = graph_where
             group_order = [group_label]
@@ -18631,13 +18682,20 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
         if age_frequency.empty:
             st.info("Sem idades válidas entre 0 e 130 anos para gerar o raincloud plot com os filtros atuais.")
             return
+        if compare_groups:
+            total_frequency = age_frequency.groupby("idade", as_index=False)["n"].sum().assign(grupo="Total de casos")
+            age_frequency = pd.concat([age_frequency, total_frequency], ignore_index=True)
+            add_calc_note("O total soma as frequências exatas de idade de confirmados e descartados antes de calcular os percentis.")
+        missing_groups = [group for group in group_order if group not in set(age_frequency["grupo"])]
+        if missing_groups:
+            st.caption("Grupos sem idade válida no recorte: " + ", ".join(missing_groups) + ".")
         render_raincloud_construction_notice()
         show_full_age_range = st.checkbox(
             "Mostrar a amplitude horizontal completa da idade",
             value=False,
             key=f"{source.lower()}_age_raincloud_full_range",
             help=(
-                "Desligado: usa foco visual robusto; ligado: mostra todo o intervalo observado de 0 a 130 anos. "
+                "Desligado: usa foco visual robusto; ligado: mostra a escala completa de 0 a 130 anos. "
                 "A escolha não modifica estatísticas nem registros."
             ),
         )
@@ -18650,14 +18708,12 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
         if summary_rain.empty:
             st.info("Sem dados suficientes de idade para gerar o raincloud plot.")
             return
-        st.markdown("**Distribuição contínua da idade — raincloud plot half-eye**")
         st.caption(
             "A meia densidade mostra o formato da distribuição; a linha fina representa P2,5–P97,5; a linha grossa, "
-            "Q1–Q3; losangos marcam P2,5/P97,5, quadrados marcam P25/P75 e o ponto branco marca a mediana. "
-            "Passe o cursor sobre cada marcador para ver o valor exato. Os pontos inferiores representam observações; "
-            "a densidade e os resumos usam todos os registros válidos, sem arredondar ou agrupar a idade em faixas. "
-            "No foco visual robusto, valores além da janela central aparecem como triângulos no limite, mantendo o valor "
-            "original no cursor; a amplitude completa pode ser restaurada no controle acima."
+            "Q1–Q3. Os quadrados marcam P25 e P75, o círculo marca a mediana (P50) e os triângulos rotulados marcam P90 e P95. "
+            "Por exemplo, P90 é a primeira idade em que a frequência acumulada chega a pelo menos 90% do grupo. "
+            "Os valores exatos estão no cursor e na tabela. Os pontos inferiores representam observações. "
+            "No foco robusto, o eixo preserva a posição dos percentis e desloca observações extremas para o limite da janela da densidade."
         )
         if source != "SINAN":
             st.caption(
@@ -18669,7 +18725,8 @@ def render_demography_tab(table: LoadedTable, source: str, graph_where: str, exp
                 "Para manter a interação responsiva, a camada visual de pontos mostra uma amostra sistemática determinística "
                 "de até 2.500 observações por grupo. A densidade, os percentis, a média e a mediana continuam calculados sobre todos os casos."
             )
-        render_plotly_chart(fig_rain, calc_title=title)
+        fig_rain.update_layout(height=max(600, 300 * len(summary_rain)))
+        render_plotly_chart(preserve_trace_colors(fig_rain), calc_title=title)
         st.markdown("**Resumo dos percentis e da tendência central**")
         copyable_dataframe(summary_rain, width="stretch", hide_index=True)
         download_button(summary_rain, f"{source.lower()}_raincloud_idade_resumo.csv", max_rows=len(summary_rain))
@@ -21969,9 +22026,10 @@ def render_methodology():
     st.markdown(
         "Os rainclouds combinam a meia densidade, os intervalos P2,5–P97,5 e Q1–Q3, a mediana e as observações. "
         "Losangos marcam P2,5/P97,5, quadrados marcam P25/P75 e o ponto branco marca P50; o cursor e a tabela abaixo "
-        "fornecem os valores exatos, e a tabela de frequências registra a repetição de cada valor. No gráfico da idade, "
-        "o SINAN compara confirmados e descartados; SIM e CIHA representam o conjunto definido pelos filtros, pois não "
-        "possuem equivalente a `CLASSI_FIN`. São usados todos os registros com idade válida entre 0 e 130 anos.\n\n"
+        "fornecem os valores exatos, e a tabela de frequências registra a repetição de cada valor. O raincloud de idade "
+        "também destaca P90 e P95. O SINAN oferece total, confirmados, descartados, todas as notificações e recortes "
+        "por etiologia. SIM e CIHA representam o conjunto definido pelos filtros. "
+        "São usados todos os registros com idade válida entre 0 e 130 anos.\n\n"
         "Nos parâmetros liquóricos do SINAN, exige-se punção lombar e seleciona-se um único parâmetro por vez para reduzir "
         "o custo de carregamento. O raincloud **sem estratificação etiológica** compara confirmados e descartados e não "
         "oferece divisão por `CON_DIAGES`. O raincloud **por definição etiológica** separa meningites bacterianas ou "
@@ -21982,7 +22040,8 @@ def render_methodology():
         "0,5% e 99,5%. O bandwidth continua único por grupo, mas seus limites passam a usar a amplitude central robusta, "
         "não a distância entre mínimo e máximo; se o IQR é zero, a escala usa MAD e, quando também é zero, a amplitude "
         "central. Isso impede que um extremo isolado superdimensione a suavização sem introduzir KDE adaptativo. No modo "
-        "padrão, o eixo recebe o mesmo foco robusto: observações além da janela são representadas por triângulos no limite, "
+        "padrão, o eixo recebe o foco robusto e, no gráfico da idade, é ampliado quando necessário para preservar a posição "
+        "dos percentis. Observações além da janela são representadas por triângulos no limite, "
         "com o valor original no cursor. Quando há muitos extremos, os triângulos recebem um jitter horizontal determinístico "
         "de até 1,5% da amplitude, sempre para dentro da janela, evitando uma parede de pontos sobrepostos sem alterar os "
         "valores. A opção de amplitude completa restaura suas posições horizontais. Média, mediana, "
