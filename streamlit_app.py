@@ -664,6 +664,15 @@ PLOT_EXPLANATION_RULES: List[Tuple[str, str]] = [
     ("preenchimento válido do campo criterio", "Verifica se CRITERIO contém um código oficial do Quadro V; o campo registra critério de confirmação, portanto sua ausência em descartados não permite concluir que não houve investigação ou fundamento para o descarte."),
     ("critério de confirmação", "Mostra quais critérios do campo CRITERIO foram registrados no estrato selecionado, permitindo comparar o peso relativo de cultura, PCR, clínica e demais critérios oficiais."),
     ("critérios diagnósticos ao longo do tempo", "Mostra os valores anuais observados como pontos e a tendência LOESS local linear como curva; a suavização usa 2/3 dos anos vizinhos e deve ser lida junto aos denominadores anuais."),
+    (
+        "análise isolada dos critérios de confirmação",
+        "A curva mostra a tendência suavizada do critério escolhido. Em percentual, o denominador é o total de "
+        "casos elegíveis com data válida em cada ano, inclusive os sem CRITERIO válido.",
+    ),
+    (
+        "contagem anual pelo critério selecionado",
+        "Cada barra conta os registros do ano cujo CRITERIO corresponde ao código selecionado.",
+    ),
     ("série temporal", "Mostra como o número de registros varia ao longo do tempo no recorte filtrado; quando há estratos, cada linha representa uma categoria calculada com o mesmo eixo temporal."),
     ("sazonalidade", "Cruza ano e período do calendário para destacar concentrações sazonais de registros; células mais intensas representam maiores contagens."),
     ("faixa etária", "Compara a distribuição dos registros entre grupos de idade, exibindo números absolutos e percentuais calculados no recorte atual."),
@@ -5968,12 +5977,11 @@ def render_sinan_criterion_timeseries_chart(
 ) -> None:
     """Renderiza as séries de CRITERIO ou destaca um critério por vez."""
     if single_criterion:
-        title = "Esmiuçando os critérios diagnósticos ao longo do tempo"
+        title = "Análise isolada dos critérios de confirmação"
         st.markdown(f"#### {title}")
         st.caption(
-            "Cada ficha tem um campo CRITERIO. Selecione o critério de confirmação registrado para acompanhar "
-            "sua frequência anual em número absoluto ou percentual dos casos elegíveis do ano. "
-            "A ficha registra os exames em campos separados de CRITERIO."
+            "Escolha um critério registrado no campo CRITERIO. A curva LOESS suaviza a série desse critério "
+            "e as barras abaixo mostram a contagem observada em cada ano. A ficha registra os exames em campos próprios."
         )
     else:
         title = "Critérios diagnósticos ao longo do tempo"
@@ -6019,13 +6027,13 @@ def render_sinan_criterion_timeseries_chart(
     selected_criterion = None
     if single_criterion:
         selected_criterion = st.selectbox(
-            "Critério diagnóstico registrado",
+            "Critério de confirmação registrado",
             list(SINAN_CRITERIO),
             format_func=SINAN_CRITERIO.__getitem__,
             key=f"{key_prefix}_criterion_timeseries_code",
         )
     measure = st.radio(
-        "Medida exibida",
+        "Medida da curva LOESS" if single_criterion else "Medida exibida",
         ["Percentual no ano", "Número absoluto"],
         horizontal=True,
         key=f"{key_prefix}_criterion_timeseries_measure",
@@ -6076,41 +6084,43 @@ def render_sinan_criterion_timeseries_chart(
             observed_smooth = np.maximum(observed_smooth, 0.0)
         temporal_df.loc[series.index, "valor_loess"] = observed_smooth
         color = SINAN_CRITERIO_TIMESERIES_COLOR_BY_CODE[code]
-        observed_text = []
-        for _, row in series.iterrows():
-            observed_value = (
-                f"{float(row[y_col]):.2f}%".replace(".", ",")
-                if measure == "Percentual no ano"
-                else f"{int(round(float(row[y_col]))):,}".replace(",", ".")
+        if not single_criterion:
+            observed_text = []
+            for _, row in series.iterrows():
+                observed_value = (
+                    f"{float(row[y_col]):.2f}%".replace(".", ",")
+                    if measure == "Percentual no ano"
+                    else f"{int(round(float(row[y_col]))):,}".replace(",", ".")
+                )
+                criterion_n_text = f"{int(row['n']):,}".replace(",", ".")
+                denominator_text = f"{int(row['denominador_ano']):,}".replace(",", ".")
+                valid_text = f"{int(row['criterios_validos_ano']):,}".replace(",", ".")
+                observed_text.append(
+                    f"<b>{criterion}</b><br>Ano: {int(row['ano'])}<br>Observado: {observed_value}"
+                    f"<br>Casos do critério: {criterion_n_text}"
+                    f"<br>Total no ano: {denominator_text}"
+                    f"<br>Critérios válidos no ano: {valid_text}"
+                )
+            fig.add_trace(
+                go.Scatter(
+                    x=years,
+                    y=values,
+                    mode="markers",
+                    marker={"color": color, "size": 7, "opacity": 0.55},
+                    name=str(criterion),
+                    legendgroup=str(criterion),
+                    showlegend=False,
+                    text=observed_text,
+                    hovertemplate="%{text}<extra></extra>",
+                )
             )
-            criterion_n_text = f"{int(row['n']):,}".replace(",", ".")
-            denominator_text = f"{int(row['denominador_ano']):,}".replace(",", ".")
-            valid_text = f"{int(row['criterios_validos_ano']):,}".replace(",", ".")
-            observed_text.append(
-                f"<b>{criterion}</b><br>Ano: {int(row['ano'])}<br>Observado: {observed_value}"
-                f"<br>Casos do critério: {criterion_n_text}"
-                f"<br>Total no ano: {denominator_text}"
-                f"<br>Critérios válidos no ano: {valid_text}"
-            )
-        fig.add_trace(
-            go.Scatter(
-                x=years,
-                y=values,
-                mode="markers",
-                marker={"color": color, "size": 7, "opacity": 0.55},
-                name=str(criterion),
-                legendgroup=str(criterion),
-                showlegend=False,
-                text=observed_text,
-                hovertemplate="%{text}<extra></extra>",
-            )
-        )
         fig.add_trace(
             go.Scatter(
                 x=dense_years,
                 y=smooth_values,
-                mode="lines",
+                mode="markers" if single_criterion and len(dense_years) == 1 else "lines",
                 line={"color": color, "width": 2.4},
+                marker={"color": color},
                 name=str(criterion),
                 legendgroup=str(criterion),
                 hovertemplate=(
@@ -6137,9 +6147,43 @@ def render_sinan_criterion_timeseries_chart(
         preserve_trace_colors(fig),
         calc_title=title if single_criterion else "Série temporal dos critérios diagnósticos",
     )
-    render_interval_total(temporal_df, by_col="criterio", value_label="casos", max_items=len(SINAN_CRITERIO))
-
-    if selected_criterion is None:
+    if selected_criterion is not None:
+        bar_title = "Contagem anual pelo critério selecionado"
+        counts_chart = px.bar(
+            temporal_df,
+            x="ano",
+            y="n",
+            title=bar_title,
+            hover_data=["criterio", "denominador_ano"],
+            labels={
+                "ano": "Ano",
+                "n": "Casos",
+                "criterio": "Critério registrado",
+                "denominador_ano": "Total de casos elegíveis no ano",
+            },
+        )
+        counts_chart.update_traces(
+            marker_color=SINAN_CRITERIO_TIMESERIES_COLOR_BY_CODE[selected_criterion],
+            text=temporal_df["n"].map(format_int_br),
+            textposition="outside",
+            cliponaxis=False,
+        )
+        counts_chart.update_xaxes(dtick=1)
+        counts_chart.update_yaxes(rangemode="tozero")
+        render_plotly_chart(
+            preserve_trace_colors(counts_chart),
+            calc_title=bar_title,
+        )
+        render_interval_total(temporal_df, by_col="criterio", value_label="casos", max_items=len(SINAN_CRITERIO))
+        case_where = sinan_criterion_stratum_where(classi_code, selected_where, stratum)
+        case_where = append_clause(case_where, f"({dt_sql}) IS NOT NULL")
+        case_where = append_clause(case_where, f"({criterion_code}) = {qstr(selected_criterion)}")
+        render_sinan_criterion_case_table(
+            table, exprs, case_where, total_cases=int(temporal_df["n"].sum()), key_prefix=key_prefix,
+        )
+        st.markdown("##### Resumo anual")
+    else:
+        render_interval_total(temporal_df, by_col="criterio", value_label="casos", max_items=len(SINAN_CRITERIO))
         annual_totals = temporal_df.drop_duplicates(subset=["ano"])
         total_cases = int(annual_totals["denominador_ano"].sum())
         cases_in_methods = int(annual_totals["criterios_validos_ano"].sum())
@@ -6148,41 +6192,26 @@ def render_sinan_criterion_timeseries_chart(
             f"com {format_int_br(cases_in_methods)} na soma dos métodos "
             f"e {format_int_br(total_cases - cases_in_methods)} sem código válido em CRITERIO."
         )
-
-    if single_criterion:
-        denominator_note = (
-            "O denominador de cada ano inclui todos os casos elegíveis com data válida no recorte, "
-            "inclusive os que estão sem critério válido."
-        )
-    else:
         denominator_note = (
             "O denominador de cada ano inclui todos os casos do estrato com data válida e CLASSI_FIN válido (1 ou 2), "
             "mesmo quando CRITERIO está vazio ou fora de 01–10. Esses registros não são atribuídos a nenhuma linha; "
             "portanto, no modo percentual, a soma dos critérios pode ser inferior a 100%."
         )
-    st.caption(
-        denominator_note
-        + " Metodologia da suavização: para estimar a tendência em cada posição do eixo temporal, o LOESS ajusta "
-        "uma regressão linear local usando os 2/3 dos anos mais próximos e atribui maior peso aos anos mais próximos "
-        "por uma função tricúbica. Não foi aplicada etapa de reponderação robusta. A curva não extrapola além do "
-        "primeiro e do último ano observados, não altera os pontos anuais nem deve ser interpretada como previsão, "
-        "teste de significância ou evidência causal. Oscilações em anos com denominadores pequenos exigem cautela; "
-        "confira no cursor e na tabela o total anual, os casos do critério e a quantidade com `CRITERIO` válido."
-    )
+        st.caption(
+            denominator_note
+            + " Metodologia da suavização: para estimar a tendência em cada posição do eixo temporal, o LOESS ajusta "
+            "uma regressão linear local usando os 2/3 dos anos mais próximos e atribui maior peso aos anos mais próximos "
+            "por uma função tricúbica. Não foi aplicada etapa de reponderação robusta. A curva não extrapola além do "
+            "primeiro e do último ano observados, não altera os pontos anuais nem deve ser interpretada como previsão, "
+            "teste de significância ou evidência causal. Oscilações em anos com denominadores pequenos exigem cautela; "
+            "confira no cursor e na tabela o total anual, os casos do critério e a quantidade com `CRITERIO` válido."
+        )
     display_df = temporal_df.drop(columns=["ordem"], errors="ignore")
     copyable_dataframe(display_df, width="stretch", hide_index=True)
     filename = f"sinan_criterios_tempo_{safe_filename(scope_label)}"
     if selected_criterion is not None:
         filename += f"_criterio_{selected_criterion}"
     download_button(display_df, f"{filename}.csv")
-
-    if selected_criterion is not None:
-        case_where = sinan_criterion_stratum_where(classi_code, selected_where, stratum)
-        case_where = append_clause(case_where, f"({dt_sql}) IS NOT NULL")
-        case_where = append_clause(case_where, f"({criterion_code}) = {qstr(selected_criterion)}")
-        render_sinan_criterion_case_table(
-            table, exprs, case_where, total_cases=int(temporal_df["n"].sum()), key_prefix=key_prefix,
-        )
 
 
 def query_category_top_with_outros(table: LoadedTable, category_sql: str, where_sql: str, top_n: int = 15, outros_label: str = "Outros municípios") -> pd.DataFrame:
@@ -21182,8 +21211,8 @@ def render_methodology():
         "Os gráficos alternam entre número absoluto e percentual. Na composição, o percentual é calculado "
         "sobre o recorte completo. Nas séries temporais, o denominador inclui os casos elegíveis com data válida de "
         "cada ano. Os pontos são os valores observados e a curva mostra a tendência LOESS. O texto abaixo do gráfico "
-        "soma as contagens dos métodos no período. Em **Esmiuçando os critérios diagnósticos ao longo do tempo**, "
-        "o seletor de CRITERIO limita a série ao código de confirmação registrado, mantendo o denominador anual."
+        "soma as contagens dos métodos no período. Em **Análise isolada dos critérios de confirmação**, "
+        "a curva LOESS, as contagens anuais e a listagem de casos usam o mesmo código registrado em CRITERIO."
     )
     st.markdown("### Referência CID-10")
     render_cid_reference()
