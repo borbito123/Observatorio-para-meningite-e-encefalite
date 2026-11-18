@@ -5672,6 +5672,8 @@ def _loess_predict(
 
 
 SINAN_UNSPECIFIED_MENINGITIS_LABEL = "Meningite não especificada"
+SINAN_CRITERIA_NEISSERIA_CODES = ("02", "03")
+SINAN_CRITERIA_BACTERIAL_CODES = (*SINAN_CRITERIA_NEISSERIA_CODES, "05", "09", "10")
 
 
 def render_sinan_criterion_agent_filter(
@@ -5687,11 +5689,13 @@ def render_sinan_criterion_agent_filter(
         "08": ("CLA_ME_ETI", SINAN_CLA_ME_ETI),
     }
     options = {}
-    if "05" in con_codes:
-        options = {
+    if con_codes == SINAN_CRITERIA_BACTERIAL_CODES:
+        neisseria_codes_sql = ", ".join(qstr(code) for code in SINAN_CRITERIA_NEISSERIA_CODES)
+        options["Meningite por Neisseria (02 + 03)"] = f"({con_code}) IN ({neisseria_codes_sql})"
+        options.update({
             SINAN_CON_DIAGES[code]: f"({con_code}) = {qstr(code)}"
             for code in con_codes
-        }
+        })
 
     for code in con_codes:
         if code not in domains:
@@ -5727,13 +5731,12 @@ def render_sinan_criterion_scope(
     stratum_key: str,
     default_etiology: str = "Todos os casos",
     fixed_etiology: Optional[str] = None,
-) -> Optional[Tuple[str, str, str, Optional[Sequence[str]]]]:
+) -> Optional[Tuple[str, str, str]]:
     """Seleciona o recorte usado na composição e na série anual de CRITERIO."""
-    # Campo 51 da ficha SINAN. O grupo bacteriano mantém o recorte histórico
-    # sem meningococcemia isolada (01) e com a forma tuberculosa separada.
+    # Campo 51 da ficha SINAN. A forma tuberculosa tem um recorte próprio.
     etiology_codes = {
         "Todos os casos": (),
-        "Meningites bacterianas": ("02", "03", "05", "09", "10"),
+        "Meningites bacterianas": SINAN_CRITERIA_BACTERIAL_CODES,
         "Meningites assépticas": ("07",),
         "Meningite tuberculosa": ("04",),
         "Meningites por outras etiologias": ("08",),
@@ -5758,7 +5761,7 @@ def render_sinan_criterion_scope(
             key=stratum_key,
             help="Total de casos inclui confirmados e descartados.",
         )
-        return where_sql, stratum, stratum.lower(), None
+        return where_sql, stratum, stratum.lower()
 
     con_code = exprs.get("con_code")
     if not con_code:
@@ -5775,23 +5778,7 @@ def render_sinan_criterion_scope(
         scope_label, agent_clause = agent
         selected_where = append_clause(selected_where, agent_clause)
 
-    criterion_codes = None
-    if etiology == "Meningites bacterianas" and agent is None and st.checkbox(
-        "Aplicar recorte histórico de sete critérios",
-        value=False,
-        key=f"{etiology_key}_bacterial_legacy_criteria",
-        help="Exclui clínico (04), quimiocitológico (06), clínico-epidemiológico (07) e registros sem critério válido.",
-    ):
-        criterion_codes = [code for code in SINAN_CRITERIO if code not in {"04", "06", "07"}]
-        criterion_codes_sql = ", ".join(qstr(code) for code in criterion_codes)
-        selected_where = append_clause(
-            selected_where, f"({exprs['criterio_code']}) IN ({criterion_codes_sql})"
-        )
-        st.caption(
-            "O recorte bacteriano inclui somente registros com um dos sete critérios selecionados, "
-            "excluindo clínico (04), quimiocitológico (06) e clínico-epidemiológico (07)."
-        )
-    return selected_where, "Casos confirmados", scope_label, criterion_codes
+    return selected_where, "Casos confirmados", scope_label
 
 
 def render_sinan_criterion_distribution_chart(
@@ -5809,7 +5796,7 @@ def render_sinan_criterion_distribution_chart(
         heading = "Critérios diagnósticos utilizados na classificação"
         st.markdown(f"##### {heading}")
     st.caption(
-        "Cada barra mostra a frequência de um critério oficial de confirmação no recorte selecionado."
+        "Cada barra mostra a frequência de um dos dez critérios oficiais. Zero indica que o critério não foi registrado no recorte."
     )
     classi_code = exprs.get("classi_code")
     criterion_code = exprs.get("criterio_code")
@@ -5828,7 +5815,7 @@ def render_sinan_criterion_distribution_chart(
     )
     if scope is None:
         return
-    selected_where, stratum, scope_label, criterion_codes = scope
+    selected_where, stratum, scope_label = scope
     measure = st.radio(
         "Medida exibida",
         ["Número absoluto", "Percentual no recorte"],
@@ -5841,7 +5828,6 @@ def render_sinan_criterion_distribution_chart(
         criterion_code,
         selected_where,
         stratum,
-        criterion_codes=criterion_codes,
     )
     denominator = (
         int(pd.to_numeric(criterion_df.get("denominador_estrato"), errors="coerce").fillna(0).max())
@@ -5857,47 +5843,39 @@ def render_sinan_criterion_distribution_chart(
         f"{int(n):,} ({float(pct):.2f}%)".replace(",", "X").replace(".", ",").replace("X", ".")
         for n, pct in zip(criterion_df["n"], criterion_df["pct_estrato"])
     ]
-    plotted = criterion_df
-    if criterion_codes is None:
-        plotted = criterion_df.loc[criterion_df["n"] > 0].copy()
-    denominator_text = f"{denominator:,}".replace(",", ".")
-    if plotted.empty:
-        st.info(
-            f"Há {denominator_text} caso(s) no estrato, mas nenhum possui CRITERIO válido do Quadro V."
-        )
-    else:
-        x_col = "pct_estrato" if measure == "Percentual no recorte" else "n"
-        plot_title = f"{heading} — {scope_label}" if fixed_etiology else f"Critérios diagnósticos registrados — {scope_label}"
-        fig = px.bar(
-            plotted,
-            x=x_col,
-            y="criterio",
-            orientation="h",
-            text="texto",
-            title=plot_title,
-            labels={
-                "criterio": "Critério diagnóstico",
-                "n": "Casos",
-                "pct_estrato": "% do estrato",
-                "pct_criterios_validos": "% entre critérios válidos",
-                "denominador_estrato": "Total do estrato",
-                "criterios_validos": "Casos com critério válido",
-            },
-            hover_data={
-                "texto": False,
-                "codigo": True,
-                "n": True,
-                "pct_estrato": ":.2f",
-                "pct_criterios_validos": ":.2f",
-                "denominador_estrato": True,
-                "criterios_validos": True,
-                "ordem": False,
-            },
-        )
-        if x_col == "pct_estrato":
-            fig.update_xaxes(range=[0, 100], ticksuffix="%")
-        fig.update_layout(yaxis={"categoryorder": "total ascending"})
-        render_plotly_chart(fig, calc_title=heading)
+    denominator_text = format_int_br(denominator)
+    x_col = "pct_estrato" if measure == "Percentual no recorte" else "n"
+    plot_title = f"{heading} — {scope_label}" if fixed_etiology else f"Critérios diagnósticos registrados — {scope_label}"
+    fig = px.bar(
+        criterion_df,
+        x=x_col,
+        y="criterio",
+        orientation="h",
+        text="texto",
+        title=plot_title,
+        labels={
+            "criterio": "Critério diagnóstico",
+            "n": "Casos",
+            "pct_estrato": "% do estrato",
+            "pct_criterios_validos": "% entre critérios válidos",
+            "denominador_estrato": "Total do estrato",
+            "criterios_validos": "Casos com critério válido",
+        },
+        hover_data={
+            "texto": False,
+            "codigo": True,
+            "n": True,
+            "pct_estrato": ":.2f",
+            "pct_criterios_validos": ":.2f",
+            "denominador_estrato": True,
+            "criterios_validos": True,
+            "ordem": False,
+        },
+    )
+    if x_col == "pct_estrato":
+        fig.update_xaxes(range=[0, 100], ticksuffix="%")
+    fig.update_layout(yaxis={"categoryorder": "total ascending"})
+    render_plotly_chart(fig, calc_title=heading)
 
     valid_count = int(
         pd.to_numeric(criterion_df.get("criterios_validos"), errors="coerce").fillna(0).max()
@@ -5939,7 +5917,8 @@ def render_sinan_criterion_timeseries_chart(
         st.markdown(f"#### {title}")
         st.caption(
             "Como ler: cada cor representa um código oficial de `CRITERIO` do Quadro V. Os pontos são os resultados "
-            "anuais efetivamente observados; a linha é uma tendência LOESS descritiva traçada sobre esses pontos, e não "
+            "anuais efetivamente observados. Os dez critérios aparecem, inclusive com zero nos anos com casos "
+            "elegíveis em que o critério não foi registrado. A linha é uma tendência LOESS traçada sobre os pontos, e não "
             "uma contagem observada adicional. Em **Percentual no ano**, cada ponto é `casos daquele critério no ano ÷ "
             "todos os casos elegíveis daquele ano × 100`; em **Número absoluto**, mostra-se diretamente a contagem anual. "
             "O denominador é, portanto, recalculado ano a ano. Na legenda, clique sobre o nome de um critério para ocultar "
@@ -5973,12 +5952,12 @@ def render_sinan_criterion_timeseries_chart(
     )
     if scope is None:
         return
-    selected_where, stratum, scope_label, criterion_codes = scope
+    selected_where, stratum, scope_label = scope
     selected_criterion = None
     if single_criterion:
         selected_criterion = st.selectbox(
             "Critério diagnóstico registrado",
-            list(criterion_codes or SINAN_CRITERIO),
+            list(SINAN_CRITERIO),
             format_func=SINAN_CRITERIO.__getitem__,
             key=f"{key_prefix}_criterion_timeseries_code",
         )
@@ -5996,7 +5975,6 @@ def render_sinan_criterion_timeseries_chart(
         criterion_code,
         selected_where,
         stratum,
-        criterion_codes=criterion_codes,
     )
     if temporal_df.empty:
         st.info(f"Não há registros com data válida em {scope_label} no recorte atual.")
@@ -6007,122 +5985,96 @@ def render_sinan_criterion_timeseries_chart(
     temporal_df = temporal_df.copy()
     temporal_df["ano"] = pd.to_numeric(temporal_df["ano"], errors="coerce").astype("Int64")
     temporal_df["n"] = pd.to_numeric(temporal_df["n"], errors="coerce").fillna(0)
-    if selected_criterion is not None or criterion_codes is not None:
-        plotted = temporal_df.copy()
-    else:
-        active_codes = temporal_df.groupby("codigo", dropna=False)["n"].sum()
-        active_codes = set(active_codes.loc[active_codes > 0].index.astype(str))
-        plotted = temporal_df.loc[temporal_df["codigo"].astype(str).isin(active_codes)].copy()
-    if plotted.empty:
-        st.info(
-            "Há casos com data válida no estrato, mas nenhum possui um código CRITERIO oficial do Quadro V."
+    y_col = "pct_ano" if measure == "Percentual no ano" else "n"
+    y_label = "% dos casos no ano" if measure == "Percentual no ano" else "Casos"
+    temporal_df[y_col] = pd.to_numeric(temporal_df[y_col], errors="coerce")
+    temporal_df["valor_loess"] = np.nan
+    fig = go.Figure()
+    shown_codes = (selected_criterion,) if selected_criterion is not None else SINAN_CRITERIO
+    for code in shown_codes:
+        criterion = SINAN_CRITERIO[code]
+        series = temporal_df.loc[temporal_df["codigo"].eq(code)].dropna(subset=["ano", y_col]).sort_values("ano")
+        if series.empty:
+            continue
+        years = series["ano"].astype(float).to_numpy()
+        values = series[y_col].astype(float).to_numpy()
+        dense_years = (
+            np.linspace(float(years.min()), float(years.max()), max(120, len(years) * 20))
+            if len(years) >= 3 and float(years.max()) > float(years.min())
+            else years.copy()
         )
-    else:
-        y_col = "pct_ano" if measure == "Percentual no ano" else "n"
-        y_label = "% dos casos no ano" if measure == "Percentual no ano" else "Casos"
-        plotted[y_col] = pd.to_numeric(plotted[y_col], errors="coerce")
-        plotted["valor_loess"] = np.nan
-        fig = go.Figure()
-        allowed_code_set = (
-            {str(code).zfill(2) for code in criterion_codes}
-            if criterion_codes is not None
-            else set(SINAN_CRITERIO)
-        )
-        if selected_criterion is not None:
-            allowed_code_set = {selected_criterion}
-        criterion_order = [
-            label for code, label in SINAN_CRITERIO.items() if code in allowed_code_set
-        ]
-        color_map = {
-            SINAN_CRITERIO[code]: SINAN_CRITERIO_TIMESERIES_COLOR_BY_CODE[code]
-            for code in SINAN_CRITERIO
-            if code in allowed_code_set
-        }
-        for criterion in criterion_order:
-            series = plotted.loc[
-                plotted["criterio"].astype(str).eq(str(criterion))
-            ].dropna(subset=["ano", y_col]).sort_values("ano")
-            if series.empty:
-                continue
-            years = series["ano"].astype(float).to_numpy()
-            values = series[y_col].astype(float).to_numpy()
-            dense_years = (
-                np.linspace(float(years.min()), float(years.max()), max(120, len(years) * 20))
-                if len(years) >= 3 and float(years.max()) > float(years.min())
-                else years.copy()
-            )
-            smooth_values = _loess_predict(years, values, dense_years)
-            observed_smooth = _loess_predict(years, values, years)
-            if measure == "Percentual no ano":
-                smooth_values = np.clip(smooth_values, 0.0, 100.0)
-                observed_smooth = np.clip(observed_smooth, 0.0, 100.0)
-            else:
-                smooth_values = np.maximum(smooth_values, 0.0)
-                observed_smooth = np.maximum(observed_smooth, 0.0)
-            plotted.loc[series.index, "valor_loess"] = observed_smooth
-            color = color_map[str(criterion)]
-            observed_text = []
-            for _, row in series.iterrows():
-                observed_value = (
-                    f"{float(row[y_col]):.2f}%".replace(".", ",")
-                    if measure == "Percentual no ano"
-                    else f"{int(round(float(row[y_col]))):,}".replace(",", ".")
-                )
-                criterion_n_text = f"{int(row['n']):,}".replace(",", ".")
-                denominator_text = f"{int(row['denominador_ano']):,}".replace(",", ".")
-                valid_text = f"{int(row['criterios_validos_ano']):,}".replace(",", ".")
-                observed_text.append(
-                    f"<b>{criterion}</b><br>Ano: {int(row['ano'])}<br>Observado: {observed_value}"
-                    f"<br>Casos do critério: {criterion_n_text}"
-                    f"<br>Total no ano: {denominator_text}"
-                    f"<br>Critérios válidos no ano: {valid_text}"
-                )
-            fig.add_trace(
-                go.Scatter(
-                    x=years,
-                    y=values,
-                    mode="markers",
-                    marker={"color": color, "size": 7, "opacity": 0.55},
-                    name=str(criterion),
-                    legendgroup=str(criterion),
-                    showlegend=False,
-                    text=observed_text,
-                    hovertemplate="%{text}<extra></extra>",
-                )
-            )
-            fig.add_trace(
-                go.Scatter(
-                    x=dense_years,
-                    y=smooth_values,
-                    mode="lines",
-                    line={"color": color, "width": 2.4},
-                    name=str(criterion),
-                    legendgroup=str(criterion),
-                    hovertemplate=(
-                        f"<b>{criterion}</b><br>Tendência LOESS: %{{y:.2f}}"
-                        + ("%" if measure == "Percentual no ano" else "")
-                        + "<extra></extra>"
-                    ),
-                )
-            )
-        fig.update_layout(
-            title=title,
-            xaxis_title="Ano",
-            yaxis_title=y_label,
-            legend_title_text="Critério diagnóstico",
-            hovermode="closest",
-            hoverlabel={"namelength": -1},
-        )
-        fig.update_xaxes(dtick=1)
+        smooth_values = _loess_predict(years, values, dense_years)
+        observed_smooth = _loess_predict(years, values, years)
         if measure == "Percentual no ano":
-            fig.update_yaxes(range=[0, 100])
-        # Impede que o estilizador global recolora separadamente o ponto e a
-        # curva LOESS, preservando uma única cor fixa para cada critério.
-        render_plotly_chart(
-            preserve_trace_colors(fig),
-            calc_title=title if single_criterion else "Série temporal dos critérios diagnósticos",
+            smooth_values = np.clip(smooth_values, 0.0, 100.0)
+            observed_smooth = np.clip(observed_smooth, 0.0, 100.0)
+        else:
+            smooth_values = np.maximum(smooth_values, 0.0)
+            observed_smooth = np.maximum(observed_smooth, 0.0)
+        temporal_df.loc[series.index, "valor_loess"] = observed_smooth
+        color = SINAN_CRITERIO_TIMESERIES_COLOR_BY_CODE[code]
+        observed_text = []
+        for _, row in series.iterrows():
+            observed_value = (
+                f"{float(row[y_col]):.2f}%".replace(".", ",")
+                if measure == "Percentual no ano"
+                else f"{int(round(float(row[y_col]))):,}".replace(",", ".")
+            )
+            criterion_n_text = f"{int(row['n']):,}".replace(",", ".")
+            denominator_text = f"{int(row['denominador_ano']):,}".replace(",", ".")
+            valid_text = f"{int(row['criterios_validos_ano']):,}".replace(",", ".")
+            observed_text.append(
+                f"<b>{criterion}</b><br>Ano: {int(row['ano'])}<br>Observado: {observed_value}"
+                f"<br>Casos do critério: {criterion_n_text}"
+                f"<br>Total no ano: {denominator_text}"
+                f"<br>Critérios válidos no ano: {valid_text}"
+            )
+        fig.add_trace(
+            go.Scatter(
+                x=years,
+                y=values,
+                mode="markers",
+                marker={"color": color, "size": 7, "opacity": 0.55},
+                name=str(criterion),
+                legendgroup=str(criterion),
+                showlegend=False,
+                text=observed_text,
+                hovertemplate="%{text}<extra></extra>",
+            )
         )
-        render_interval_total(plotted, by_col="criterio", value_label="casos", max_items=len(SINAN_CRITERIO))
+        fig.add_trace(
+            go.Scatter(
+                x=dense_years,
+                y=smooth_values,
+                mode="lines",
+                line={"color": color, "width": 2.4},
+                name=str(criterion),
+                legendgroup=str(criterion),
+                hovertemplate=(
+                    f"<b>{criterion}</b><br>Tendência LOESS: %{{y:.2f}}"
+                    + ("%" if measure == "Percentual no ano" else "")
+                    + "<extra></extra>"
+                ),
+            )
+        )
+    fig.update_layout(
+        title=title,
+        xaxis_title="Ano",
+        yaxis_title=y_label,
+        legend_title_text="Critério diagnóstico",
+        hovermode="closest",
+        hoverlabel={"namelength": -1},
+    )
+    fig.update_xaxes(dtick=1)
+    if measure == "Percentual no ano":
+        fig.update_yaxes(range=[0, 100])
+    # Impede que o estilizador global recolora separadamente o ponto e a
+    # curva LOESS, preservando uma única cor fixa para cada critério.
+    render_plotly_chart(
+        preserve_trace_colors(fig),
+        calc_title=title if single_criterion else "Série temporal dos critérios diagnósticos",
+    )
+    render_interval_total(temporal_df, by_col="criterio", value_label="casos", max_items=len(SINAN_CRITERIO))
 
     if selected_criterion is None:
         annual_totals = temporal_df.drop_duplicates(subset=["ano"])
@@ -6134,11 +6086,7 @@ def render_sinan_criterion_timeseries_chart(
             f"e {format_int_br(total_cases - cases_in_methods)} sem código válido em CRITERIO."
         )
 
-    if criterion_codes is not None:
-        denominator_note = (
-            "O denominador anual inclui os casos com data válida e com um dos sete critérios do recorte bacteriano."
-        )
-    elif single_criterion:
+    if single_criterion:
         denominator_note = (
             "O denominador de cada ano inclui todos os casos elegíveis com data válida no recorte, "
             "inclusive os que estão sem critério válido."
@@ -6158,16 +6106,6 @@ def render_sinan_criterion_timeseries_chart(
         "teste de significância ou evidência causal. Oscilações em anos com denominadores pequenos exigem cautela; "
         "confira no cursor e na tabela o total anual, os casos do critério e a quantidade com `CRITERIO` válido."
     )
-    if criterion_codes is not None and selected_criterion is None:
-        first_year = int(pd.to_numeric(temporal_df["ano"], errors="coerce").min())
-        last_year = int(pd.to_numeric(temporal_df["ano"], errors="coerce").max())
-        st.caption(
-            f"Domínio completo ativado: todos os critérios elegíveis são exibidos de {first_year} a {last_year}, "
-            "inclusive como séries horizontais em zero quando não houve registro. O intervalo começa no primeiro ano "
-            "em que existe ao menos um caso que satisfaz integralmente o recorte, não no primeiro ano bruto da base."
-        )
-    if "valor_loess" in plotted.columns:
-        temporal_df["valor_loess"] = pd.to_numeric(plotted["valor_loess"], errors="coerce")
     display_df = temporal_df.drop(columns=["ordem"], errors="ignore")
     copyable_dataframe(display_df, width="stretch", hide_index=True)
     filename = f"sinan_criterios_tempo_{safe_filename(scope_label)}"
@@ -21165,9 +21103,9 @@ def render_methodology():
         "e 10 para bacterianas, 07 para assépticas, 04 para tuberculosa, 08 para outras etiologias e 06 para meningite "
         "não especificada. Bacterianas, assépticas e outras etiologias podem ser vistas em conjunto ou detalhadas "
         "pelos códigos de CON_DIAGES e pelos campos CLA_ME_BAC, CLA_ME_ASS e CLA_ME_ETI, conforme o grupo. "
-        "O total bacteriano inclui por padrão todos os casos confirmados do grupo. A opção de recorte histórico "
-        "restringe a análise a sete critérios. As categorias específicas usam todos os casos confirmados na "
-        "categoria, inclusive os que estão sem CRITERIO válido."
+        "O agregado bacteriano reúne 05 (outras bactérias), 10 (pneumococo), 02 e 03 (Neisseria) e 09 (Hemófilo). "
+        "Nos recortes por etiologia, o denominador inclui todos os casos confirmados da categoria selecionada, "
+        "inclusive os que estão sem CRITERIO válido. Os dez critérios do Quadro V ficam disponíveis em todos os recortes."
     )
     st.markdown(
         "Os gráficos alternam entre número absoluto e percentual. Na composição, o percentual é calculado "
