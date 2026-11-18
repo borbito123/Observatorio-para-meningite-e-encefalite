@@ -5801,7 +5801,7 @@ def render_sinan_criterion_distribution_chart(
     key_prefix: str,
     fixed_etiology: Optional[str] = None,
 ) -> None:
-    """Renderiza a composição dos critérios para o recorte fixo ou selecionado."""
+    """Renderiza a composição e, nas análises gerais, a série anual no mesmo recorte."""
     if fixed_etiology is None:
         heading = "Composição dos critérios diagnósticos registrados"
         st.markdown(f"#### {heading}")
@@ -5906,6 +5906,8 @@ def render_sinan_criterion_distribution_chart(
     file_prefix = "sinan_criterios_classificacao" if fixed_etiology else "sinan_composicao_criterios"
     file_scope = re.sub(r"[^\w]+", "_", scope_label.lower()).strip("_")
     download_button(display_df, f"{file_prefix}_{file_scope}.csv")
+    if fixed_etiology is None:
+        render_sinan_criterion_timeseries_chart(table, exprs, where_sql, key_prefix, shared_scope=scope)
 
 
 def render_sinan_case_records(
@@ -6822,6 +6824,7 @@ def render_sinan_criterion_timeseries_chart(
     key_prefix: str,
     default_etiology: str = "Todos os casos",
     single_criterion: bool = False,
+    shared_scope: Optional[Tuple[str, str, str]] = None,
 ) -> None:
     """Renderiza as séries de CRITERIO ou destaca um critério por vez."""
     if single_criterion:
@@ -6833,8 +6836,15 @@ def render_sinan_criterion_timeseries_chart(
         )
     else:
         title = "Critérios diagnósticos ao longo do tempo"
-        st.markdown(f"#### {title}")
-        st.caption(SINAN_RECORDED_CRITERION_NOTE)
+        if shared_scope is None:
+            st.markdown(f"#### {title}")
+            st.caption(SINAN_RECORDED_CRITERION_NOTE)
+        else:
+            st.markdown(f"##### {title}")
+            st.caption(
+                "A série usa a mesma estratificação da composição acima. Aqui, cada ficha precisa de uma data "
+                "válida para ser atribuída a um ano."
+            )
         st.caption(
             "Como ler: cada cor representa um código oficial de `CRITERIO` do Quadro V. Os pontos são os resultados "
             "anuais efetivamente observados. Os dez critérios aparecem, inclusive com zero nos anos com casos "
@@ -6863,14 +6873,16 @@ def render_sinan_criterion_timeseries_chart(
         )
         return
 
-    scope = render_sinan_criterion_scope(
-        exprs,
-        where_sql,
-        etiology_key=f"{key_prefix}_timeseries_group",
-        stratum_key=f"{key_prefix}_criterion_timeseries_stratum",
-        default_etiology=default_etiology,
-        include_all_notifications=single_criterion,
-    )
+    scope = shared_scope
+    if scope is None:
+        scope = render_sinan_criterion_scope(
+            exprs,
+            where_sql,
+            etiology_key=f"{key_prefix}_timeseries_group",
+            stratum_key=f"{key_prefix}_criterion_timeseries_stratum",
+            default_etiology=default_etiology,
+            include_all_notifications=single_criterion,
+        )
     if scope is None:
         return
     selected_where, stratum, scope_label = scope
@@ -16790,12 +16802,6 @@ def render_cid_tab(table: LoadedTable, source: str, graph_where: str, exprs: Dic
         table,
         exprs,
         conversion_base_where,
-        key_prefix="sinan_cid_etiology",
-    )
-    render_sinan_criterion_timeseries_chart(
-        table,
-        exprs,
-        conversion_base_where,
         key_prefix="sinan_cid_etiology_single",
         single_criterion=True,
     )
@@ -19600,13 +19606,6 @@ def render_detailed_etiology_analysis_tab(
         exprs,
         base_where,
         key_prefix="sinan_detailed_etiology",
-    )
-    render_sinan_criterion_timeseries_chart(
-        table,
-        exprs,
-        base_where,
-        key_prefix="sinan_detailed_etiology_confirmed",
-        default_etiology="Meningites bacterianas",
     )
     render_sinan_criterion_timeseries_chart(
         table,
