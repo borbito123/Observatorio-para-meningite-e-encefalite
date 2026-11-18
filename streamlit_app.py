@@ -5967,6 +5967,93 @@ def render_sinan_criterion_case_table(
     st.dataframe(cases, width="stretch", hide_index=True, column_config=names)
 
 
+def render_sinan_other_exam_counts(
+    table: LoadedTable,
+    exprs: Dict[str, Optional[str]],
+    where_sql: str,
+    selected_criterion: str,
+    total_cases: int,
+) -> None:
+    """Compara o critério registrado com resultados de outros métodos do campo 49."""
+    title = "Critério de confirmação e registro de outros métodos"
+    st.markdown(f"##### {title}")
+    st.caption(f"Critério selecionado: {SINAN_CRITERIO[selected_criterion]}.")
+    # Cada grupo reúne os materiais do mesmo método nos Quadros VII–XII.
+    method_fields = {
+        "01": ("VII", ("LAB_CTLIQU", "LAB_CTLESA", "LAB_CTSANG", "LAB_CTESCA")),
+        "05": ("VIII", ("LAB_BCLIQU", "LAB_BCLESA", "LAB_BCSANG", "LAB_BCESCA")),
+        "02": ("IX", ("LAB_CILIQU", "LAB_CISANG")),
+        "03": ("X", ("LAB_AGLIQU", "LAB_AGSANG")),
+        "08": ("XI", ("LAB_ISLIQU", "LAB_ISFEZE")),
+        "09": ("XII", ("LAB_PCLIQU", "LAB_PCLESA", "LAB_PCSANG", "LAB_PCESCA")),
+    }
+    columns = schema_df(table)["coluna"].tolist()
+    criterion_sql = exprs["criterio_code"]
+    has_valid, has_informative = [], []
+    available_fields = 0
+    for method_code, (quadro, fields) in method_fields.items():
+        valid_codes = _sinan_quadro_mapping(quadro)
+        valid_sql = ", ".join(qstr(code) for code in valid_codes)
+        informative_sql = ", ".join(qstr(code) for code in valid_codes if code not in {"61", "62"})
+        for field in fields:
+            col = choose_candidate(columns, [field])
+            if not col:
+                continue
+            available_fields += 1
+            value_sql = dictionary_code_expr(col, pad2=True)
+            other = f"({criterion_sql}) <> {qstr(method_code)}"
+            has_valid.append(f"({other} AND COALESCE(({value_sql}) IN ({valid_sql}), FALSE))")
+            has_informative.append(f"({other} AND COALESCE(({value_sql}) IN ({informative_sql}), FALSE))")
+    counts = {"registrados": total_cases, "sem_outro_valido": None, "sem_outro_informativo": None}
+    if available_fields:
+        data = run_query(
+            table,
+            f"""
+            SELECT COUNT(*) AS registrados,
+                   COUNT(*) FILTER (WHERE NOT ({" OR ".join(has_valid)})) AS sem_outro_valido,
+                   COUNT(*) FILTER (WHERE NOT ({" OR ".join(has_informative)})) AS sem_outro_informativo
+            FROM {table.ref_sql}
+            {where_sql}
+            """,
+        )
+        counts = data.iloc[0].to_dict()
+    else:
+        st.info("A base não contém os campos laboratoriais avaliados. Apenas o total registrado está disponível.")
+
+    measures = {
+        "registrados": "Total do critério registrado em CRITERIO",
+        "sem_outro_valido": "Sem outro método com resultado válido",
+        "sem_outro_informativo": "Sem outro método com resultado informativo",
+    }
+    chart_data = pd.DataFrame({"medida": list(measures.values()), "casos": [counts[key] for key in measures]})
+    fig = px.bar(
+        chart_data, x="medida", y="casos",
+        title=title, labels={"casos": "Casos", "medida": ""},
+    )
+    fig.update_traces(
+        text=[format_int_br(n) if pd.notna(n) else "" for n in chart_data["casos"]],
+        textposition="outside",
+        cliponaxis=False,
+    )
+    fig.update_xaxes(tickmode="array", tickvals=list(measures.values()), ticktext=[
+        "Total registrado<br>em CRITERIO",
+        "Sem outro método<br>com resultado válido",
+        "Sem outro método<br>com resultado informativo",
+    ])
+    fig.update_yaxes(rangemode="tozero")
+    render_plotly_chart(fig, calc_title=title)
+    expected_fields = sum(len(fields) for _, fields in method_fields.values())
+    st.caption(
+        f"A comparação usa {available_fields} de {expected_fields} campos de resultados previstos no campo 49. "
+        "O critério de confirmação vem de CRITERIO. Para detectar outro método, a análise ignora os resultados "
+        "do próprio método, além da punção, do aspecto e dos achados quimiocitológicos do líquor. "
+        "A medida de código válido inclui não realizado e ignorado quando previstos no dicionário. A medida "
+        "de resultado informativo exclui esses códigos e inclui resultados negativos previstos no dicionário. "
+        "Campos vazios, ausentes e fora do dicionário deixam a realização do exame indeterminada. "
+        "As três contagens se sobrepõem."
+    )
+
+
 def render_sinan_criterion_timeseries_chart(
     table: LoadedTable,
     exprs: Dict[str, Optional[str]],
@@ -6178,10 +6265,17 @@ def render_sinan_criterion_timeseries_chart(
         case_where = sinan_criterion_stratum_where(classi_code, selected_where, stratum)
         case_where = append_clause(case_where, f"({dt_sql}) IS NOT NULL")
         case_where = append_clause(case_where, f"({criterion_code}) = {qstr(selected_criterion)}")
+        total_criterion_cases = int(temporal_df["n"].sum())
+        render_sinan_other_exam_counts(table, exprs, case_where, selected_criterion, total_criterion_cases)
         render_sinan_criterion_case_table(
-            table, exprs, case_where, total_cases=int(temporal_df["n"].sum()), key_prefix=key_prefix,
+            table, exprs, case_where, total_cases=total_criterion_cases, key_prefix=key_prefix,
         )
-        st.markdown("##### Resumo anual")
+        download_button(
+            temporal_df.drop(columns=["ordem"], errors="ignore"),
+            f"sinan_criterios_tempo_{safe_filename(scope_label)}_criterio_{selected_criterion}.csv",
+            label="Baixar série anual (CSV)",
+        )
+        return
     else:
         render_interval_total(temporal_df, by_col="criterio", value_label="casos", max_items=len(SINAN_CRITERIO))
         annual_totals = temporal_df.drop_duplicates(subset=["ano"])
@@ -6208,10 +6302,7 @@ def render_sinan_criterion_timeseries_chart(
         )
     display_df = temporal_df.drop(columns=["ordem"], errors="ignore")
     copyable_dataframe(display_df, width="stretch", hide_index=True)
-    filename = f"sinan_criterios_tempo_{safe_filename(scope_label)}"
-    if selected_criterion is not None:
-        filename += f"_criterio_{selected_criterion}"
-    download_button(display_df, f"{filename}.csv")
+    download_button(display_df, f"sinan_criterios_tempo_{safe_filename(scope_label)}.csv")
 
 
 def query_category_top_with_outros(table: LoadedTable, category_sql: str, where_sql: str, top_n: int = 15, outros_label: str = "Outros municípios") -> pd.DataFrame:
@@ -21212,7 +21303,8 @@ def render_methodology():
         "sobre o recorte completo. Nas séries temporais, o denominador inclui os casos elegíveis com data válida de "
         "cada ano. Os pontos são os valores observados e a curva mostra a tendência LOESS. O texto abaixo do gráfico "
         "soma as contagens dos métodos no período. Em **Análise isolada dos critérios de confirmação**, "
-        "a curva LOESS, as contagens anuais e a listagem de casos usam o mesmo código registrado em CRITERIO."
+        "a curva LOESS, as contagens anuais, a comparação de outros métodos e a listagem de casos usam o mesmo "
+        "código registrado em CRITERIO."
     )
     st.markdown("### Referência CID-10")
     render_cid_reference()
