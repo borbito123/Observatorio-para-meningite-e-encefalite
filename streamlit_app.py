@@ -5045,6 +5045,7 @@ def build_expressions(source: str, sel: ColumnSelection) -> Dict[str, Optional[s
         exprs["cla_me_ass_raw"] = literal_str_expr(sel.cla_me_ass_col) if sel.cla_me_ass_col else None
         exprs["cla_me_ass_code"] = dictionary_code_expr(sel.cla_me_ass_col, pad2=True) if sel.cla_me_ass_col else None
         exprs["cla_me_ass_label"] = case_from_mapping(exprs["cla_me_ass_code"], SINAN_CLA_ME_ASS, "Sem agente viral/asséptico especificado") if exprs["cla_me_ass_code"] else None
+        exprs["cla_me_eti_raw"] = literal_str_expr(sel.cla_me_eti_col) if sel.cla_me_eti_col else None
         exprs["cla_me_eti_code"] = clean_code_expr(sel.cla_me_eti_col, pad2=True) if sel.cla_me_eti_col else None
         exprs["cla_me_eti_label"] = case_from_mapping(exprs["cla_me_eti_code"], SINAN_CLA_ME_ETI, "Sem outra etiologia especificada") if exprs["cla_me_eti_code"] else None
         exprs["cla_sorogr_code"] = clean_code_expr(sel.cla_sorogr_col, pad2=True) if sel.cla_sorogr_col else None
@@ -5475,6 +5476,17 @@ def query_sinan_criterion_presence_by_classification(
     return run_query(table, sql)
 
 
+def sinan_criterion_stratum_where(classi_sql: str, where_sql: str, stratum: str) -> str:
+    """Aplica a mesma classificação final aos gráficos e à listagem por caso."""
+    if stratum == "Casos confirmados":
+        stratum_clause = f"({classi_sql}) = '1'"
+    elif stratum == "Casos descartados":
+        stratum_clause = f"({classi_sql}) = '2'"
+    else:
+        stratum_clause = f"({classi_sql}) IN ('1', '2')"
+    return append_clause(where_sql, stratum_clause)
+
+
 def query_sinan_criterion_distribution(
     table: LoadedTable,
     classi_sql: str,
@@ -5484,13 +5496,7 @@ def query_sinan_criterion_distribution(
     criterion_codes: Optional[Sequence[str]] = None,
 ) -> pd.DataFrame:
     """Distribui os critérios oficiais selecionados no estrato."""
-    if stratum == "Casos confirmados":
-        stratum_clause = f"({classi_sql}) = '1'"
-    elif stratum == "Casos descartados":
-        stratum_clause = f"({classi_sql}) = '2'"
-    else:
-        stratum_clause = f"({classi_sql}) IN ('1', '2')"
-    selected_where = append_clause(where_sql, stratum_clause)
+    selected_where = sinan_criterion_stratum_where(classi_sql, where_sql, stratum)
     allowed_codes = [code for code in SINAN_CRITERIO if criterion_codes is None or code in criterion_codes]
     if not allowed_codes:
         return pd.DataFrame()
@@ -5546,13 +5552,7 @@ def query_sinan_criterion_timeseries(
     criterion_codes: Optional[Sequence[str]] = None,
 ) -> pd.DataFrame:
     """Série anual dos critérios oficiais no estrato de CLASSI_FIN selecionado."""
-    if stratum == "Casos confirmados":
-        stratum_clause = f"({classi_sql}) = '1'"
-    elif stratum == "Casos descartados":
-        stratum_clause = f"({classi_sql}) = '2'"
-    else:
-        stratum_clause = f"({classi_sql}) IN ('1', '2')"
-    selected_where = append_clause(where_sql, stratum_clause)
+    selected_where = sinan_criterion_stratum_where(classi_sql, where_sql, stratum)
     allowed_codes = [
         code
         for code in SINAN_CRITERIO
@@ -5895,6 +5895,69 @@ def render_sinan_criterion_distribution_chart(
     download_button(display_df, f"{file_prefix}_{file_scope}.csv")
 
 
+def render_sinan_criterion_case_table(
+    table: LoadedTable,
+    exprs: Dict[str, Optional[str]],
+    case_where: str,
+    total_cases: int,
+    key_prefix: str,
+) -> None:
+    """Exibe uma página dos registros que compõem a série do critério selecionado."""
+    st.markdown("##### Casos com o critério selecionado")
+    if total_cases == 0:
+        st.info("Não há casos com esse critério no recorte temporal selecionado.")
+        return
+
+    names = {"NM_PACIENT": "Nome do paciente", "NU_NOTIFIC": "Número de notificação"}
+    fields = {
+        "NM_PACIENT": exprs.get("nm_pacient_raw"),
+        "NU_NOTIFIC": exprs.get("nu_notific_raw"),
+        "CON_DIAGES": exprs.get("con_raw") or exprs.get("con_code"),
+        "CRITERIO": exprs.get("criterio_raw") or exprs.get("criterio_code"),
+        "CLA_ME_BAC": exprs.get("cla_me_bac_raw") or exprs.get("cla_me_bac_code"),
+        "CLA_ME_ETI": exprs.get("cla_me_eti_raw") or exprs.get("cla_me_eti_code"),
+        "CLA_ME_ASS": exprs.get("cla_me_ass_raw") or exprs.get("cla_me_ass_code"),
+    }
+    missing = [names.get(field, field) for field, expression in fields.items() if not expression]
+    if missing:
+        st.caption("A base carregada não contém os campos " + ", ".join(missing) + ". Essas colunas ficam vazias.")
+
+    page_size = 100
+    page_count = (total_cases + page_size - 1) // page_size
+    page = 1
+    if page_count > 1:
+        page_key = f"{key_prefix}_criterion_cases_page"
+        if st.session_state.get(page_key, 1) > page_count:
+            st.session_state[page_key] = 1
+        page = int(st.number_input(
+            "Página da lista de casos", min_value=1, max_value=page_count, step=1, key=page_key
+        ))
+    offset = (page - 1) * page_size
+    select_sql = ", ".join(
+        f"{expression or 'CAST(NULL AS VARCHAR)'} AS {qident(field)}"
+        for field, expression in fields.items()
+    )
+    order_sql = ", ".join(qident(field) for field in fields)
+    cases = run_query(
+        table,
+        f"""
+        SELECT {select_sql}
+        FROM {table.ref_sql}
+        {case_where}
+        ORDER BY ({exprs["dt"]}) DESC, {order_sql}
+        LIMIT {page_size} OFFSET {offset}
+        """,
+        cache=False,
+    )
+    if cases.empty:
+        st.info("Não há casos nesta página do recorte atual.")
+        return
+    start = format_int_br(offset + 1)
+    end = format_int_br(offset + len(cases))
+    st.caption(f"Exibindo {start} a {end} de {format_int_br(total_cases)} registros.")
+    st.dataframe(cases, width="stretch", hide_index=True, column_config=names)
+
+
 def render_sinan_criterion_timeseries_chart(
     table: LoadedTable,
     exprs: Dict[str, Optional[str]],
@@ -6112,6 +6175,14 @@ def render_sinan_criterion_timeseries_chart(
     if selected_criterion is not None:
         filename += f"_criterio_{selected_criterion}"
     download_button(display_df, f"{filename}.csv")
+
+    if selected_criterion is not None:
+        case_where = sinan_criterion_stratum_where(classi_code, selected_where, stratum)
+        case_where = append_clause(case_where, f"({dt_sql}) IS NOT NULL")
+        case_where = append_clause(case_where, f"({criterion_code}) = {qstr(selected_criterion)}")
+        render_sinan_criterion_case_table(
+            table, exprs, case_where, total_cases=int(temporal_df["n"].sum()), key_prefix=key_prefix,
+        )
 
 
 def query_category_top_with_outros(table: LoadedTable, category_sql: str, where_sql: str, top_n: int = 15, outros_label: str = "Outros municípios") -> pd.DataFrame:
