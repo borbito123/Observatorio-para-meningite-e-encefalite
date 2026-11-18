@@ -18521,17 +18521,15 @@ def render_detailed_etiology_analysis_tab(
                 "O gráfico mostra os critérios registrados no SINAN. Casos com CRITERIO vazio ou fora de 01–10 "
                 "entram no denominador anual e não são atribuídos a nenhuma linha."
             )
-        else:
-            st.caption("Inclui casos confirmados e descartados, independentemente de CON_DIAGES.")
 
         render_sinan_criterion_timeseries_chart(
             table,
             exprs,
             temporal_where,
             key_prefix="sinan_detailed_etiology_confirmed",
-            fixed_stratum="Casos confirmados" if con_codes else "Total de casos",
+            fixed_stratum="Casos confirmados" if con_codes else None,
             criterion_codes=criterion_codes,
-            scope_label=temporal_etiology_group.lower(),
+            scope_label=temporal_etiology_group.lower() if con_codes else None,
             population_note=population_note,
             show_zero_series=bacterial_scope,
         )
@@ -21011,9 +21009,10 @@ def render_methodology():
         "alternar entre percentual dentro de cada ano e número absoluto. Os valores anuais observados permanecem como "
         "pontos e a tendência é desenhada por LOESS local linear, com pesos tricúbicos, janela de 2/3 dos anos e sem "
         "reponderação robusta. Anos sem um critério específico são mantidos com zero para não interromper artificialmente "
-        "a série. Em **Análise etiológica detalhada**, o gráfico permite selecionar todos os casos classificados "
-        "(confirmados e descartados) ou apenas os casos confirmados de uma etiologia: bacteriana (02, 03, 05, 09, 10), "
-        "asséptica (07), tuberculosa (04) ou outra etiologia (08), segundo CON_DIAGES. O recorte bacteriano exclui "
+        "a série. Em **Análise etiológica detalhada**, o recorte **Todos os casos** permite escolher o total de "
+        "casos classificados, apenas confirmados ou apenas descartados. Os recortes por etiologia usam CON_DIAGES entre "
+        "confirmados para selecionar meningites bacterianas (02, 03, 05, 09, 10), assépticas (07), tuberculosas (04) "
+        "ou de outras etiologias (08). O recorte bacteriano exclui "
         "os critérios clínico (04), quimiocitológico (06) e clínico-epidemiológico (07), e exibe os sete critérios "
         "restantes mesmo com contagem zero. Nos demais recortes, o denominador anual inclui casos sem CRITERIO válido."
     )
