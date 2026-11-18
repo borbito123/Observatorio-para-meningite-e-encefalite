@@ -5671,12 +5671,16 @@ def _loess_predict(
     return np.asarray(predictions, dtype=float)
 
 
+SINAN_UNSPECIFIED_MENINGITIS_LABEL = "Meningite não especificada"
+
+
 def render_sinan_criterion_scope(
     exprs: Dict[str, Optional[str]],
     where_sql: str,
     etiology_key: str,
     stratum_key: str,
     default_etiology: str = "Todos os casos",
+    fixed_etiology: Optional[str] = None,
 ) -> Optional[Tuple[str, str, str, Optional[Sequence[str]]]]:
     """Seleciona o recorte usado na composição e na série anual de CRITERIO."""
     # Campo 51 da ficha SINAN. O grupo bacteriano mantém o recorte histórico
@@ -5687,15 +5691,18 @@ def render_sinan_criterion_scope(
         "Meningites assépticas": ("07",),
         "Meningite tuberculosa": ("04",),
         "Meningites por outras etiologias": ("08",),
+        SINAN_UNSPECIFIED_MENINGITIS_LABEL: ("06",),
     }
-    etiology_options = list(etiology_codes)
-    etiology = st.radio(
-        "Recorte por etiologia",
-        etiology_options,
-        index=etiology_options.index(default_etiology),
-        horizontal=True,
-        key=etiology_key,
-    )
+    etiology = fixed_etiology
+    if etiology is None:
+        etiology_options = list(etiology_codes)
+        etiology = st.radio(
+            "Recorte por etiologia",
+            etiology_options,
+            index=etiology_options.index(default_etiology),
+            horizontal=True,
+            key=etiology_key,
+        )
     con_codes = etiology_codes[etiology]
     if not con_codes:
         stratum = st.radio(
@@ -5709,10 +5716,7 @@ def render_sinan_criterion_scope(
 
     con_code = exprs.get("con_code")
     if not con_code:
-        st.warning(
-            "CON_DIAGES precisa estar presente para selecionar uma etiologia. "
-            "O recorte Todos os casos continua disponível."
-        )
+        st.warning("A coluna CON_DIAGES é necessária para identificar a etiologia neste recorte.")
         return None
 
     con_codes_sql = ", ".join(qstr(code) for code in con_codes)
@@ -5737,9 +5741,15 @@ def render_sinan_criterion_distribution_chart(
     exprs: Dict[str, Optional[str]],
     where_sql: str,
     key_prefix: str,
+    fixed_etiology: Optional[str] = None,
 ) -> None:
-    """Renderiza a composição de CRITERIO, com o mesmo cálculo em diferentes seções."""
-    st.markdown("#### Composição dos critérios diagnósticos registrados")
+    """Renderiza a composição dos critérios para o recorte fixo ou selecionado."""
+    if fixed_etiology is None:
+        heading = "Composição dos critérios diagnósticos registrados"
+        st.markdown(f"#### {heading}")
+    else:
+        heading = "Critérios diagnósticos utilizados na classificação"
+        st.markdown(f"##### {heading}")
     st.caption(
         "Cada barra mostra a frequência de um critério oficial de confirmação no recorte selecionado."
     )
@@ -5756,6 +5766,7 @@ def render_sinan_criterion_distribution_chart(
         where_sql,
         etiology_key=f"{key_prefix}_distribution_group",
         stratum_key=f"{key_prefix}_criterion_distribution_stratum",
+        fixed_etiology=fixed_etiology,
     )
     if scope is None:
         return
@@ -5798,13 +5809,14 @@ def render_sinan_criterion_distribution_chart(
         )
     else:
         x_col = "pct_estrato" if measure == "Percentual no recorte" else "n"
+        plot_title = f"{heading} — {scope_label}" if fixed_etiology else f"Critérios diagnósticos registrados — {scope_label}"
         fig = px.bar(
             plotted,
             x=x_col,
             y="criterio",
             orientation="h",
             text="texto",
-            title=f"Critérios diagnósticos registrados — {scope_label}",
+            title=plot_title,
             labels={
                 "criterio": "Critério diagnóstico",
                 "n": "Casos",
@@ -5827,7 +5839,7 @@ def render_sinan_criterion_distribution_chart(
         if x_col == "pct_estrato":
             fig.update_xaxes(range=[0, 100], ticksuffix="%")
         fig.update_layout(yaxis={"categoryorder": "total ascending"})
-        render_plotly_chart(fig, calc_title="Composição dos critérios diagnósticos registrados")
+        render_plotly_chart(fig, calc_title=heading)
 
     valid_count = int(
         pd.to_numeric(criterion_df.get("criterios_validos"), errors="coerce").fillna(0).max()
@@ -5840,10 +5852,8 @@ def render_sinan_criterion_distribution_chart(
     )
     display_df = criterion_df.drop(columns=["ordem", "texto"], errors="ignore")
     copyable_dataframe(display_df, width="stretch", hide_index=True)
-    download_button(
-        display_df,
-        f"sinan_composicao_criterios_{scope_label.replace(' ', '_')}.csv",
-    )
+    file_prefix = "sinan_criterios_classificacao" if fixed_etiology else "sinan_composicao_criterios"
+    download_button(display_df, f"{file_prefix}_{scope_label.replace(' ', '_')}.csv")
 
 
 def render_sinan_criterion_timeseries_chart(
@@ -6012,7 +6022,7 @@ def render_sinan_criterion_timeseries_chart(
                 )
             )
         fig.update_layout(
-            title=f"Critérios diagnósticos ao longo do tempo — {scope_label}",
+            title="Critérios diagnósticos ao longo do tempo",
             xaxis_title="Ano",
             yaxis_title=y_label,
             legend_title_text="Critério diagnóstico",
@@ -18550,6 +18560,21 @@ def render_detailed_etiology_analysis_tab(
     )
     st.divider()
 
+    st.markdown(f"#### {SINAN_UNSPECIFIED_MENINGITIS_LABEL}")
+    st.caption(
+        "Para a meningite não especificada, o Quadro I do dicionário SINAN prevê os critérios clínico (04) "
+        "e quimiocitológico (06). O gráfico mostra os critérios registrados na base, inclusive outros códigos "
+        "de confirmação que possam aparecer nesse grupo."
+    )
+    render_sinan_criterion_distribution_chart(
+        table,
+        exprs,
+        base_where,
+        key_prefix="sinan_unspecified_meningitis",
+        fixed_etiology=SINAN_UNSPECIFIED_MENINGITIS_LABEL,
+    )
+    st.divider()
+
     classi_code = exprs.get("classi_code")
     con_code = exprs.get("con_code")
     con_label = exprs.get("con_label")
@@ -21021,8 +21046,9 @@ def render_methodology():
         "anual de `CRITERIO` permitem escolher o recorte por etiologia independentemente. No recorte **Todos os casos**, "
         "a classificação final permite escolher total de casos (confirmados e descartados), apenas confirmados ou apenas "
         "descartados. Os recortes por etiologia incluem confirmados segundo CON_DIAGES e usam os códigos 02, 03, 05, 09 "
-        "e 10 para bacterianas, 07 para assépticas, 04 para tuberculosa e 08 para outras etiologias. No recorte bacteriano, "
-        "são excluídos os critérios clínico (04), quimiocitológico (06) e clínico-epidemiológico (07). Os sete critérios "
+        "e 10 para bacterianas, 07 para assépticas, 04 para tuberculosa, 08 para outras etiologias e 06 para meningite "
+        "não especificada. No recorte bacteriano, são excluídos os critérios clínico (04), quimiocitológico (06) e "
+        "clínico-epidemiológico (07). Os sete critérios "
         "restantes aparecem mesmo com contagem zero. Os demais recortes incluem casos sem CRITERIO válido no denominador."
     )
     st.markdown(
