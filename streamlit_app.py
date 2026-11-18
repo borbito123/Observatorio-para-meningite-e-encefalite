@@ -5674,6 +5674,52 @@ def _loess_predict(
 SINAN_UNSPECIFIED_MENINGITIS_LABEL = "Meningite não especificada"
 
 
+def render_sinan_criterion_agent_filter(
+    exprs: Dict[str, Optional[str]],
+    con_code: str,
+    con_codes: Sequence[str],
+    etiology_key: str,
+) -> Optional[Tuple[str, str]]:
+    """Oferece a conclusão bacteriana ou a especificação dos Quadros II–IV."""
+    domains = {
+        "05": ("CLA_ME_BAC", SINAN_CLA_ME_BAC),
+        "07": ("CLA_ME_ASS", SINAN_CLA_ME_ASS),
+        "08": ("CLA_ME_ETI", SINAN_CLA_ME_ETI),
+    }
+    options = {}
+    if "05" in con_codes:
+        options = {
+            SINAN_CON_DIAGES[code]: f"({con_code}) = {qstr(code)}"
+            for code in con_codes
+        }
+
+    for code in con_codes:
+        if code not in domains:
+            continue
+        field, labels = domains[code]
+        spec_code = exprs.get(f"{field.lower()}_code")
+        if not spec_code:
+            st.caption(f"A coluna {field} não foi detectada. As especificações desse campo estão indisponíveis.")
+            continue
+        for agent_code, label in labels.items():
+            option_label = f"05 / {label}" if code == "05" else label
+            options[option_label] = (
+                f"({con_code}) = {qstr(code)} AND ({spec_code}) = {qstr(agent_code)}"
+            )
+
+    if not options:
+        return None
+    all_cases = "Todos os casos do grupo"
+    selected = st.selectbox(
+        "Etiologia específica",
+        [all_cases, *options],
+        key=f"{etiology_key}_agent_{con_codes[0]}",
+    )
+    if selected == all_cases:
+        return None
+    return selected, options[selected]
+
+
 def render_sinan_criterion_scope(
     exprs: Dict[str, Optional[str]],
     where_sql: str,
@@ -5721,9 +5767,21 @@ def render_sinan_criterion_scope(
 
     con_codes_sql = ", ".join(qstr(code) for code in con_codes)
     selected_where = append_clause(where_sql, f"({con_code}) IN ({con_codes_sql})")
-    st.caption(f"Casos confirmados com CON_DIAGES em {', '.join(con_codes)}.")
+    scope_label = etiology.lower()
+    agent = render_sinan_criterion_agent_filter(exprs, con_code, con_codes, etiology_key)
+    if agent is None:
+        st.caption(f"Casos confirmados com CON_DIAGES em {', '.join(con_codes)}.")
+    else:
+        scope_label, agent_clause = agent
+        selected_where = append_clause(selected_where, agent_clause)
+
     criterion_codes = None
-    if etiology == "Meningites bacterianas":
+    if etiology == "Meningites bacterianas" and agent is None and st.checkbox(
+        "Usar apenas os sete critérios do recorte bacteriano anterior",
+        value=True,
+        key=f"{etiology_key}_restrict_bacterial_criteria",
+        help="Desmarque para incluir todos os casos confirmados do grupo, inclusive os que estão sem critério válido.",
+    ):
         criterion_codes = [code for code in SINAN_CRITERIO if code not in {"04", "06", "07"}]
         criterion_codes_sql = ", ".join(qstr(code) for code in criterion_codes)
         selected_where = append_clause(
@@ -5733,7 +5791,7 @@ def render_sinan_criterion_scope(
             "O recorte bacteriano inclui somente registros com um dos sete critérios selecionados, "
             "excluindo clínico (04), quimiocitológico (06) e clínico-epidemiológico (07)."
         )
-    return selected_where, "Casos confirmados", etiology.lower(), criterion_codes
+    return selected_where, "Casos confirmados", scope_label, criterion_codes
 
 
 def render_sinan_criterion_distribution_chart(
@@ -5853,7 +5911,8 @@ def render_sinan_criterion_distribution_chart(
     display_df = criterion_df.drop(columns=["ordem", "texto"], errors="ignore")
     copyable_dataframe(display_df, width="stretch", hide_index=True)
     file_prefix = "sinan_criterios_classificacao" if fixed_etiology else "sinan_composicao_criterios"
-    download_button(display_df, f"{file_prefix}_{scope_label.replace(' ', '_')}.csv")
+    file_scope = re.sub(r"[^\w]+", "_", scope_label.lower()).strip("_")
+    download_button(display_df, f"{file_prefix}_{file_scope}.csv")
 
 
 def render_sinan_criterion_timeseries_chart(
@@ -18560,21 +18619,6 @@ def render_detailed_etiology_analysis_tab(
     )
     st.divider()
 
-    st.markdown(f"#### {SINAN_UNSPECIFIED_MENINGITIS_LABEL}")
-    st.caption(
-        "Para a meningite não especificada, o Quadro I do dicionário SINAN prevê os critérios clínico (04) "
-        "e quimiocitológico (06). O gráfico mostra os critérios registrados na base, inclusive outros códigos "
-        "de confirmação que possam aparecer nesse grupo."
-    )
-    render_sinan_criterion_distribution_chart(
-        table,
-        exprs,
-        base_where,
-        key_prefix="sinan_unspecified_meningitis",
-        fixed_etiology=SINAN_UNSPECIFIED_MENINGITIS_LABEL,
-    )
-    st.divider()
-
     classi_code = exprs.get("classi_code")
     con_code = exprs.get("con_code")
     con_label = exprs.get("con_label")
@@ -19021,6 +19065,22 @@ def render_detailed_etiology_analysis_tab(
                 label="Baixar tabela de casos (CSV)",
                 max_rows=len(other_etiology_cases),
             )
+
+    st.divider()
+    st.markdown(f"#### {SINAN_UNSPECIFIED_MENINGITIS_LABEL}")
+    st.caption(
+        "Para a meningite não especificada, o Quadro I do dicionário SINAN prevê os critérios clínico (04) "
+        "e quimiocitológico (06). O gráfico mostra os critérios registrados na base, inclusive outros códigos "
+        "de confirmação que possam aparecer nesse grupo."
+    )
+    render_sinan_criterion_distribution_chart(
+        table,
+        exprs,
+        base_where,
+        key_prefix="sinan_unspecified_meningitis",
+        fixed_etiology=SINAN_UNSPECIFIED_MENINGITIS_LABEL,
+    )
+
 
 def render_spreadsheet_analysis_tab(
     table: LoadedTable,
@@ -21047,9 +21107,11 @@ def render_methodology():
         "a classificação final permite escolher total de casos (confirmados e descartados), apenas confirmados ou apenas "
         "descartados. Os recortes por etiologia incluem confirmados segundo CON_DIAGES e usam os códigos 02, 03, 05, 09 "
         "e 10 para bacterianas, 07 para assépticas, 04 para tuberculosa, 08 para outras etiologias e 06 para meningite "
-        "não especificada. No recorte bacteriano, são excluídos os critérios clínico (04), quimiocitológico (06) e "
-        "clínico-epidemiológico (07). Os sete critérios "
-        "restantes aparecem mesmo com contagem zero. Os demais recortes incluem casos sem CRITERIO válido no denominador."
+        "não especificada. Bacterianas, assépticas e outras etiologias podem ser vistas em conjunto ou detalhadas "
+        "pelos códigos de CON_DIAGES e pelos campos CLA_ME_BAC, CLA_ME_ASS e CLA_ME_ETI, conforme o grupo. "
+        "No total bacteriano, o recorte anterior restringe a análise a sete critérios. Desmarque essa opção para "
+        "incluir todos os casos do grupo no denominador. As categorias específicas usam todos os casos confirmados "
+        "naquela categoria, inclusive os que estão sem CRITERIO válido."
     )
     st.markdown(
         "Os dois gráficos alternam entre número absoluto e percentual. Na composição, o percentual é calculado "
