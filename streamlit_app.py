@@ -5988,22 +5988,26 @@ def render_sinan_other_exam_counts(
         "09": ("XII", ("LAB_PCLIQU", "LAB_PCLESA", "LAB_PCSANG", "LAB_PCESCA")),
     }
     columns = schema_df(table)["coluna"].tolist()
-    criterion_sql = exprs["criterio_code"]
     has_valid, has_informative = [], []
     available_fields = 0
+    expected_fields = 0
     for method_code, (quadro, fields) in method_fields.items():
+        if method_code == selected_criterion:
+            continue
+        expected_fields += len(fields)
         valid_codes = _sinan_quadro_mapping(quadro)
         valid_sql = ", ".join(qstr(code) for code in valid_codes)
         informative_sql = ", ".join(qstr(code) for code in valid_codes if code not in {"61", "62"})
         for field in fields:
-            col = choose_candidate(columns, [field])
-            if not col:
-                continue
+            value_sql = exprs.get(f"{field.lower()}_code")
+            if not value_sql:
+                col = choose_candidate(columns, [field])
+                if not col:
+                    continue
+                value_sql = dictionary_code_expr(col, pad2=True)
             available_fields += 1
-            value_sql = dictionary_code_expr(col, pad2=True)
-            other = f"({criterion_sql}) <> {qstr(method_code)}"
-            has_valid.append(f"({other} AND COALESCE(({value_sql}) IN ({valid_sql}), FALSE))")
-            has_informative.append(f"({other} AND COALESCE(({value_sql}) IN ({informative_sql}), FALSE))")
+            has_valid.append(f"COALESCE(({value_sql}) IN ({valid_sql}), FALSE)")
+            has_informative.append(f"COALESCE(({value_sql}) IN ({informative_sql}), FALSE)")
     counts = {"registrados": total_cases, "sem_outro_valido": None, "sem_outro_informativo": None}
     if available_fields:
         data = run_query(
@@ -6042,15 +6046,89 @@ def render_sinan_other_exam_counts(
     ])
     fig.update_yaxes(rangemode="tozero")
     render_plotly_chart(fig, calc_title=title)
-    expected_fields = sum(len(fields) for _, fields in method_fields.values())
     st.caption(
-        f"A comparação usa {available_fields} de {expected_fields} campos de resultados previstos no campo 49. "
+        f"A comparação usa {available_fields} de {expected_fields} campos de resultados dos outros métodos no campo 49. "
         "O critério de confirmação vem de CRITERIO. Para detectar outro método, a análise ignora os resultados "
         "do próprio método, além da punção, do aspecto e dos achados quimiocitológicos do líquor. "
         "A medida de código válido inclui não realizado e ignorado quando previstos no dicionário. A medida "
         "de resultado informativo exclui esses códigos e inclui resultados negativos previstos no dicionário. "
         "Campos vazios, ausentes e fora do dicionário deixam a realização do exame indeterminada. "
-        "As três contagens se sobrepõem."
+        "As duas medidas de ausência são subconjuntos do total e se sobrepõem. Resultado registrado em outro método "
+        "indica evidência laboratorial documentada, enquanto CRITERIO indica a modalidade registrada para confirmação."
+    )
+
+
+def render_sinan_gram_confirmation_crosscheck(
+    table: LoadedTable,
+    exprs: Dict[str, Optional[str]],
+    cohort_where: str,
+) -> None:
+    """Cruza resultado de LAB_BCLIQU com o critério de confirmação no recorte completo."""
+    st.markdown("##### Bacterioscopia do líquor e critério de confirmação")
+    gram = exprs.get("lab_bcliqu_code")
+    if not gram:
+        st.info("O campo LAB_BCLIQU não foi encontrado na base carregada.")
+        return
+    criterion = exprs["criterio_code"]
+    positive_codes = ", ".join(qstr(code) for code in _sinan_quadro_mapping("VIII") if code not in {"51", "61", "62"})
+    labels = {
+        1: "Com achado bacterioscópico",
+        2: "Nenhum agente identificado (51)",
+        3: "Não realizada (61)",
+        4: "Ignorada (62)",
+        5: "Campo vazio",
+        6: "Código fora do dicionário",
+    }
+    valid_criteria = ", ".join(qstr(code) for code in SINAN_CRITERIO)
+    data = run_query(
+        table,
+        f"""
+        WITH casos AS (
+            SELECT ({gram}) AS gram, ({criterion}) AS criterio
+            FROM {table.ref_sql}
+            {cohort_where}
+        )
+        SELECT CASE
+                   WHEN gram IN ({positive_codes}) THEN 1
+                   WHEN gram = '51' THEN 2
+                   WHEN gram = '61' THEN 3
+                   WHEN gram = '62' THEN 4
+                   WHEN gram IS NULL THEN 5
+                   ELSE 6
+               END AS situacao,
+               COUNT(*) AS total,
+               COUNT(*) FILTER (WHERE criterio = '05') AS bacterioscopia,
+               COUNT(*) FILTER (WHERE criterio IN ({valid_criteria}) AND criterio <> '05') AS outro,
+               COUNT(*) FILTER (WHERE criterio IS NULL OR criterio NOT IN ({valid_criteria})) AS sem_criterio
+        FROM casos
+        GROUP BY 1
+        ORDER BY 1
+        """,
+    ).set_index("situacao").reindex(list(labels), fill_value=0)
+    total = int(data["total"].sum())
+    if total == 0:
+        st.info("Nenhum caso elegível para cruzar resultado e critério de confirmação.")
+        return
+    with_result = int(data.loc[[1, 2], "total"].sum())
+    as_criterion = int(data["bacterioscopia"].sum())
+    st.caption(
+        f"No recorte completo com data válida, {format_int_br(with_result)} de {format_int_br(total)} casos têm "
+        f"resultado da bacterioscopia do líquor em LAB_BCLIQU ({format_pct_br(100 * with_result / total)}). "
+        f"Em {format_int_br(as_criterion)} casos ({format_pct_br(100 * as_criterion / total)}), "
+        "a bacterioscopia foi registrada como critério de confirmação em CRITERIO. "
+        "O código 05 de CRITERIO indica o método de confirmação, independentemente do material examinado."
+    )
+    data.insert(0, "Registro em LAB_BCLIQU", data.index.map(labels))
+    data["% do recorte"] = 100 * data["total"] / total
+    data = data.rename(columns={
+        "total": "Casos",
+        "bacterioscopia": "CRITERIO 05",
+        "outro": "Outro critério válido",
+        "sem_criterio": "Sem critério válido",
+    })
+    st.dataframe(
+        data, width="stretch", hide_index=True,
+        column_config={"% do recorte": st.column_config.NumberColumn(format="%.2f%%")},
     )
 
 
@@ -6262,14 +6340,16 @@ def render_sinan_criterion_timeseries_chart(
             calc_title=bar_title,
         )
         render_interval_total(temporal_df, by_col="criterio", value_label="casos", max_items=len(SINAN_CRITERIO))
-        case_where = sinan_criterion_stratum_where(classi_code, selected_where, stratum)
-        case_where = append_clause(case_where, f"({dt_sql}) IS NOT NULL")
-        case_where = append_clause(case_where, f"({criterion_code}) = {qstr(selected_criterion)}")
+        cohort_where = sinan_criterion_stratum_where(classi_code, selected_where, stratum)
+        cohort_where = append_clause(cohort_where, f"({dt_sql}) IS NOT NULL")
+        case_where = append_clause(cohort_where, f"({criterion_code}) = {qstr(selected_criterion)}")
         total_criterion_cases = int(temporal_df["n"].sum())
         render_sinan_other_exam_counts(table, exprs, case_where, selected_criterion, total_criterion_cases)
         render_sinan_criterion_case_table(
             table, exprs, case_where, total_cases=total_criterion_cases, key_prefix=key_prefix,
         )
+        if selected_criterion == "05":
+            render_sinan_gram_confirmation_crosscheck(table, exprs, cohort_where)
         download_button(
             temporal_df.drop(columns=["ordem"], errors="ignore"),
             f"sinan_criterios_tempo_{safe_filename(scope_label)}_criterio_{selected_criterion}.csv",
