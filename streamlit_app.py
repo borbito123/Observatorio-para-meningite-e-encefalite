@@ -6018,6 +6018,9 @@ SINAN_CONFIRMATION_INDIRECT_NOTES = {
           "a confirmação clínico-epidemiológica.",
     "10": "A ficha não tem campo laboratorial padronizado para identificar a técnica registrada como ‘Outros’.",
 }
+SINAN_CONFIRMATION_GROUPS = ("Mesmo critério", "Outro critério válido", "Sem critério válido")
+SINAN_COEXISTENCE_BY_CRITERION = "Fichas com o critério selecionado"
+SINAN_COEXISTENCE_BY_RESULT = "Fichas com resultado do método"
 
 
 def sinan_confirmation_fields(
@@ -6328,11 +6331,78 @@ def render_sinan_confirmation_profile_bars(data: pd.DataFrame, title: str) -> No
         data, x="n", y="Categoria", orientation="h", text="Rótulo", title=title,
         labels={"n": "Fichas"}, hover_data={"Rótulo": False, "Percentual": ":.2f"},
     )
-    fig.update_yaxes(autorange="reversed")
+    fig.update_yaxes(autorange="reversed", automargin=True)
     fig.update_traces(textposition="outside", cliponaxis=False)
-    fig.update_layout(showlegend=False, margin=dict(r=112))
+    fig.update_layout(showlegend=False, height=max(370, 125 + 30 * len(data)), margin=dict(r=112))
     render_plotly_chart(fig, calc_title=title)
     st.caption(f"Denominador exibido no gráfico: {format_int_br(total)} fichas.")
+
+
+def render_sinan_indirect_confirmation(
+    table: LoadedTable,
+    exprs: Dict[str, Optional[str]],
+    where_sql: str,
+    code: str,
+    show_chart: bool = False,
+) -> None:
+    """Exibe CRITERIO e cruza com o registro do quimiocitológico quando disponível."""
+    name = SINAN_CRITERIO[code].split(" — ", 1)[1]
+    st.markdown(f"##### Esmiunçando o critério diagnóstico {name}")
+    st.caption(SINAN_CONFIRMATION_INDIRECT_NOTES[code])
+    criterion = exprs["criterio_code"]
+    valid_codes = ", ".join(qstr(value) for value in SINAN_CRITERIO)
+    quimio = exprs.get("quimio_code") if code == "06" else None
+    states = ["Recorte completo"]
+    state_sql = qstr(states[0])
+    if quimio and exprs.get("quimio_inferred_from_params"):
+        states = ["Com parâmetro registrado", "Sem parâmetro utilizável"]
+        state_sql = f"CASE WHEN ({quimio}) = '1' THEN {qstr(states[0])} ELSE {qstr(states[1])} END"
+        st.caption("A base contém parâmetros do líquor. O cruzamento considera pelo menos um valor utilizável.")
+    elif quimio:
+        states = ["Realizado", "Não realizado", "Ignorado", "Campo vazio", "Fora do domínio"]
+        state_sql = f"""
+            CASE WHEN ({quimio}) = '1' THEN 'Realizado'
+                 WHEN ({quimio}) = '2' THEN 'Não realizado'
+                 WHEN ({quimio}) = '9' THEN 'Ignorado'
+                 WHEN ({quimio}) IS NULL THEN 'Campo vazio' ELSE 'Fora do domínio' END
+        """
+        st.caption("A base contém um indicador de realização do exame quimiocitológico.")
+    elif code == "06":
+        st.caption("A base não oferece um indicador de realização nem parâmetros do quimiocitológico.")
+
+    columns = [f"CRITERIO {code}", "Outro critério válido", "Sem critério válido"]
+    data = run_query(table, f"""
+        SELECT ({state_sql}) AS situacao,
+               COUNT(*) AS n,
+               COUNT(*) FILTER (WHERE ({criterion}) = {qstr(code)}) AS mesmo,
+               COUNT(*) FILTER (WHERE ({criterion}) IN ({valid_codes})
+                                 AND ({criterion}) <> {qstr(code)}) AS outro,
+               COUNT(*) FILTER (WHERE ({criterion}) IS NULL OR ({criterion}) NOT IN ({valid_codes})) AS sem
+        FROM {table.ref_sql}
+        {where_sql}
+        GROUP BY 1
+    """).set_index("situacao").reindex(states, fill_value=0)
+    data.columns = ["Fichas", *columns]
+    total = int(data["Fichas"].sum())
+    if not total:
+        st.info("Não há fichas com data válida no recorte selecionado.")
+        return
+
+    data.index.name = "Registro na ficha"
+    if show_chart:
+        bars = data.reset_index().melt(
+            id_vars="Registro na ficha", value_vars=columns, var_name="Categoria", value_name="n",
+        )
+        title = f"{name[:1].upper()}{name[1:]} — critério registrado"
+        if quimio:
+            bars["Categoria"] = bars["Registro na ficha"] + " · " + bars["Categoria"]
+            title = "Quimiocitológico — registro na ficha e critério de confirmação"
+        render_sinan_confirmation_profile_bars(bars[["Categoria", "n"]], title)
+    data["% do recorte"] = 100 * data["Fichas"] / total
+    st.dataframe(
+        data.reset_index(), width="stretch", hide_index=True,
+        column_config={"% do recorte": st.column_config.NumberColumn(format="%.2f%%")},
+    )
 
 
 def render_sinan_confirmation_detail(
@@ -6357,11 +6427,24 @@ def render_sinan_confirmation_detail(
     fields = sinan_confirmation_fields(table, exprs)
     method_fields = fields.get(code, {})
     is_lab_method = code in fields
-    if is_lab_method and not method_fields:
+    by_criterion = view == "Coexistência de métodos"
+    if by_criterion and is_lab_method and method_fields:
+        cohort = st.radio(
+            "Quais fichas entram no gráfico?",
+            [SINAN_COEXISTENCE_BY_CRITERION, SINAN_COEXISTENCE_BY_RESULT],
+            horizontal=True, key=f"{key_prefix}_detail_coexistence_cohort",
+        )
+        by_criterion = cohort == SINAN_COEXISTENCE_BY_CRITERION
+    if is_lab_method and not method_fields and not by_criterion:
         st.info("A base não contém os campos de resultado desse método.")
         return
-    method_name = SINAN_CRITERIO[code].split(" — ", 1)[1].capitalize()
-    if is_lab_method:
+    if view == "Resultado e critério" and not is_lab_method:
+        render_sinan_indirect_confirmation(table, exprs, where_sql, code, show_chart=True)
+        return
+    method_name = SINAN_CRITERIO[code].split(" — ", 1)[1]
+    method_name = method_name[:1].upper() + method_name[1:]
+    focal_field = None
+    if is_lab_method and not by_criterion:
         expected_fields = SINAN_CONFIRMATION_LAB_FIELDS[code][1]
         label = lambda field: f"{expected_fields[field]} ({field})" if field else "Qualquer material disponível"
         absent = ", ".join(field for field in expected_fields if field not in method_fields)
@@ -6369,9 +6452,8 @@ def render_sinan_confirmation_detail(
             st.caption(f"Campos ausentes da base para este método: {absent}.")
         materials = list(method_fields) if view == "Completude por material" else [None, *method_fields]
         focal_field = st.selectbox("Material do método", materials, format_func=label, key=f"{key_prefix}_detail_specimen")
-    else:
+    elif not is_lab_method:
         st.caption(SINAN_CONFIRMATION_INDIRECT_NOTES[code])
-        focal_field = None
 
     if view == "Completude por material":
         if not is_lab_method:
@@ -6417,7 +6499,7 @@ def render_sinan_confirmation_detail(
             return
         data = sinan_confirmation_count_by_status(table, where_sql, criterion, method_fields, code)
         domain = _sinan_quadro_mapping(SINAN_CONFIRMATION_LAB_FIELDS[code][0])
-        optional = {"sem_agente": "51", "nao_identificado": "75", "nao_realizado": "61", "ignorado": "62"}
+        optional = {state: value for value, state in SINAN_CONFIRMATION_SPECIAL_CODES.items()}
         statuses = [value for value in SINAN_CONFIRMATION_FIELD_STATUS if value not in optional or optional[value] in domain]
         shown = data.loc[data["campo"].eq(focal_field)].set_index("situacao")["n"].reindex(statuses, fill_value=0)
         shown.index = shown.index.map(SINAN_CONFIRMATION_FIELD_STATUS)
@@ -6428,7 +6510,7 @@ def render_sinan_confirmation_detail(
             pd.MultiIndex.from_product([method_fields, statuses], names=["campo", "situacao"]), fill_value=0,
         ).reset_index()
         totals = data.groupby("campo")["n"].transform("sum")
-        data["% do material"] = (100 * data["n"] / totals).round(2)
+        data["% do recorte"] = (100 * data["n"] / totals.where(totals.gt(0))).round(2)
         aggregate = data.assign(
             preenchimento_valido=data["n"].where(~data["situacao"].isin(["vazio", "invalido"]), 0),
             resultado_disponivel=data["n"].where(data["situacao"].isin(["achado", "sem_agente", "nao_identificado"]), 0),
@@ -6443,7 +6525,7 @@ def render_sinan_confirmation_detail(
             )
         data["situação"] = data.pop("situacao").map(SINAN_CONFIRMATION_FIELD_STATUS)
         data["sem_criterio_valido"] = data["n"] - data["mesmo_criterio"] - data["outro_criterio"]
-        display = data[["campo", "situação", "n", "% do material", "mesmo_criterio", "outro_criterio", "sem_criterio_valido"]]
+        display = data[["campo", "situação", "n", "% do recorte", "mesmo_criterio", "outro_criterio", "sem_criterio_valido"]]
         copyable_dataframe(display, width="stretch", hide_index=True)
         download_button(display, f"sinan_completude_criterio_{code}.csv", label="Baixar completude por material (CSV)")
         st.caption(
@@ -6452,9 +6534,13 @@ def render_sinan_confirmation_detail(
         )
         return
 
-    if view == "Resultado e critério" and not is_lab_method:
-        st.info("Use a série anual para a contagem deste critério ou a visão de coexistência para os exames documentados nessas fichas.")
+    if by_criterion and not any(columns for other, columns in fields.items() if other != code):
+        st.info("A base não contém campos de outros métodos laboratoriais para calcular a coexistência.")
         return
+    if view == "Coexistência de métodos":
+        missing_methods = [SINAN_CRITERIO[other] for other, columns in fields.items() if other != code and not columns]
+        if missing_methods:
+            st.caption("Métodos acompanhantes sem campos na base: " + ", ".join(missing_methods) + ".")
     selected_rule = st.radio(
         "Resultados que contam", ["Qualquer resultado registrado", "Apenas resultado com achado"],
         horizontal=True, key=f"{key_prefix}_detail_result_rule",
@@ -6464,35 +6550,42 @@ def render_sinan_confirmation_detail(
     data = query_sinan_confirmation_method_profile(
         table, where_sql, criterion, fields, code, focal_field, only_findings,
     )
-    criterion_groups = ["Mesmo critério", "Outro critério válido", "Sem critério válido"]
     if view == "Resultado e critério":
-        data["Resultado"] = data["resultado_focal"].map({True: "Com resultado pela regra", False: "Sem resultado pela regra"})
+        result_names = (
+            ["Com achado registrado", "Sem achado registrado"] if only_findings
+            else ["Com resultado registrado", "Sem resultado registrado"]
+        )
+        data["Resultado"] = data["resultado_focal"].map(dict(zip((True, False), result_names)))
         categories = [
             f"{result} · {group}"
-            for result in ["Com resultado pela regra", "Sem resultado pela regra"] for group in criterion_groups
+            for result in result_names for group in SINAN_CONFIRMATION_GROUPS
         ]
         data["Categoria"] = data["Resultado"] + " · " + data["criterio"]
         counts = data.groupby("Categoria")["n"].sum().reindex(categories, fill_value=0).reset_index()
         render_sinan_confirmation_profile_bars(counts, f"{method_name} — resultado e confirmação")
         return
 
-    if is_lab_method:
+    if by_criterion:
+        data = data.loc[data["criterio"].eq("Mesmo critério")]
+        st.caption(
+            f"O denominador inclui todas as fichas com CRITERIO {code}, mesmo sem resultado do método selecionado. "
+            "As barras contam resultados dos métodos acompanhantes nos campos disponíveis do campo 49."
+        )
+    else:
         data = data.loc[data["resultado_focal"]]
         confirmation = st.radio(
             "Critério de confirmação nas fichas com resultado",
-            ["Todos", *criterion_groups], horizontal=True, key=f"{key_prefix}_detail_confirmation",
+            ["Todos", *SINAN_CONFIRMATION_GROUPS], horizontal=True, key=f"{key_prefix}_detail_confirmation",
         )
         if confirmation != "Todos":
             data = data.loc[data["criterio"].eq(confirmation)]
-        st.caption("Isolado significa zero outros métodos. Cada método adicional conta uma vez por ficha, mesmo em vários materiais.")
-    else:
-        if not any(fields.values()):
-            st.info("A base não contém os campos laboratoriais necessários para calcular a coexistência.")
-            return
-        data = data.loc[data["criterio"].eq("Mesmo critério")]
-        st.caption("Denominador formado pelas fichas com este CRITERIO. A contagem inclui apenas métodos laboratoriais do campo 49.")
+        st.caption("O denominador inclui fichas com resultado do método, segundo o material e os filtros desta visão.")
+    st.caption(
+        "Cada acompanhante conta uma vez por ficha, mesmo em vários materiais. "
+        "Zero indica ausência de resultado documentado dos acompanhantes pela regra selecionada."
+    )
     counts = data.groupby("outros_metodos")["n"].sum().reindex(range(5), fill_value=0)
-    counts.index = ["Isolado (0)" if is_lab_method else "Nenhum método", "1 método", "2 métodos", "3 métodos", "4 ou mais métodos"]
+    counts.index = ["Nenhum método acompanhante", "1 método", "2 métodos", "3 métodos", "4 ou mais métodos"]
     title = "Análise dos métodos mediante realização ou não de outros critérios diagnósticos"
     render_sinan_confirmation_profile_bars(counts.rename_axis("Categoria").reset_index(), title)
 
@@ -6558,6 +6651,11 @@ def render_sinan_criterion_timeseries_chart(
     selected_where, stratum, scope_label = scope
     selected_criterion = None
     if single_criterion:
+        st.warning(
+            f"**Recorte ativo: {scope_label}.** As tabelas e os gráficos de **Esmiunçando o critério diagnóstico** "
+            "seguem o período, os filtros gerais e a estratificação selecionada logo acima. "
+            "Dentro desse recorte, cada visão informa quais fichas entram no denominador."
+        )
         view = st.radio(
             "Visão da análise",
             ["Série anual", "Preenchimento de CRITERIO", "Completude por material", "Resultado e critério", "Coexistência de métodos"],
@@ -6697,6 +6795,8 @@ def render_sinan_criterion_timeseries_chart(
     if selected_criterion is not None:
         if selected_criterion in SINAN_CONFIRMATION_LAB_FIELDS:
             render_sinan_lab_result_tables(table, exprs, cohort_where, selected_criterion, key_prefix)
+        else:
+            render_sinan_indirect_confirmation(table, exprs, cohort_where, selected_criterion)
         render_interval_total(temporal_df, by_col="criterio", value_label="casos", max_items=len(SINAN_CRITERIO))
         total_criterion_cases = int(temporal_df["n"].sum())
         render_sinan_criterion_case_table(
